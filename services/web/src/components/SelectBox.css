@@ -2,6 +2,7 @@
   position: relative;
   width: 100%;
   min-width: 150px;
+  z-index: 1;
 }
 
 .select-trigger {
@@ -22,6 +23,10 @@
 .select-trigger:hover {
   border-color: var(--accent-primary);
   background: rgba(0, 255, 136, 0.1);
+}
+
+.custom-select.open {
+  z-index: 99999;
 }
 
 .custom-select.open .select-trigger {
@@ -49,15 +54,12 @@
 }
 
 .select-dropdown {
-  position: absolute;
-  top: calc(100% + 0.5rem);
-  left: 0;
-  right: 0;
+  position: fixed;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 16px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  z-index: 1000;
+  z-index: 99999;
   max-height: 300px;
   overflow-y: auto;
   animation: fadeInDropdown 0.2s ease-out;

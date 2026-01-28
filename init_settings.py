@@ -4,6 +4,7 @@
 """
 import json
 import os
+import sys
 from pathlib import Path
 
 # Определяем корень проекта (папка с main.py)
@@ -40,9 +41,16 @@ def init_settings():
     with open(settings_file, 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=4, ensure_ascii=False)
     
-    print(f"Settings initialized: RobotID={settings['RobotID']}, RobotType={settings['RobotType']}")
-    print(f"Settings file path: {settings_file}")
-    print(f"Project root: {PROJECT_ROOT}")
+    print(f"Settings initialized: RobotID={settings['RobotID']}, RobotType={settings['RobotType']}", flush=True)
+    print(f"Settings file path: {settings_file}", flush=True)
+    print(f"Project root: {PROJECT_ROOT}", flush=True)
 
 if __name__ == '__main__':
-    init_settings()
+    try:
+        init_settings()
+        print("init_settings.py completed successfully", flush=True)
+    except Exception as e:
+        print(f"Error in init_settings.py: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

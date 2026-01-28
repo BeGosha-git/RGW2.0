@@ -79,6 +79,23 @@
   overflow: hidden;
 }
 
+.editor-layout.with-terminal {
+  /* Когда терминал открыт, редактор занимает меньше места */
+}
+
+.terminal-panel {
+  width: 400px;
+  min-width: 300px;
+  max-width: 50%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
 .file-explorer {
   width: 280px;
   min-width: 220px;

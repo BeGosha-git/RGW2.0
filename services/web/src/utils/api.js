@@ -117,3 +117,11 @@ export const robotApi = {
   updateCommands: (data) => apiPut('/api/robot/commands', data),
   updateRobotGroup: (target_ip, robot_group) => apiPost('/api/robot/update_group', { target_ip, robot_group })
 }
+
+/**
+ * API функции для настроек
+ */
+export const settingsApi = {
+  get: () => apiGet('/api/settings'),
+  update: (settings) => apiPost('/api/settings', settings)
+}

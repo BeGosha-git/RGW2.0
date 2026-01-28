@@ -5,6 +5,7 @@ import Button from '../components/Button'
 import ErrorBanner from '../components/ErrorBanner'
 import Loading from '../components/Loading'
 import Toast from '../components/Toast'
+import TerminalTabs from '../components/TerminalTabs'
 import { useToast } from '../hooks/useToast'
 import { useInterval } from '../hooks/useInterval'
 import { filesApi, directoryApi } from '../utils/api'
@@ -16,6 +17,7 @@ function FileEditorPage() {
   const [files, setFiles] = useState([])
   const [selectedFile, setSelectedFile] = useState(null)
   const [openFiles, setOpenFiles] = useState([]) // [{ path: string, content: string, modified: boolean }]
+  const [showTerminal, setShowTerminal] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const errorTimeoutRef = useRef(null)
@@ -335,6 +337,49 @@ function FileEditorPage() {
     return langMap[ext] || 'plaintext'
   }
 
+  // Загружаем открытые файлы из localStorage при монтировании
+  useEffect(() => {
+    const savedOpenFiles = localStorage.getItem('editor_open_files')
+    if (savedOpenFiles) {
+      try {
+        const parsed = JSON.parse(savedOpenFiles)
+        if (parsed && parsed.length > 0) {
+          // Загружаем содержимое файлов
+          Promise.all(parsed.map(async (file) => {
+            try {
+              const result = await filesApi.read(file.path)
+              if (result.success) {
+                return {
+                  path: file.path,
+                  content: result.content || '',
+                  modified: false // Всегда false при загрузке
+                }
+              }
+              return null
+            } catch (e) {
+              console.error(`Error loading file ${file.path}:`, e)
+              return null
+            }
+          })).then(loadedFiles => {
+            const validFiles = loadedFiles.filter(f => f !== null)
+            if (validFiles.length > 0) {
+              setOpenFiles(validFiles)
+              setSelectedFile(validFiles[0].path)
+            }
+          })
+        }
+      } catch (e) {
+        console.error('Error loading open files:', e)
+      }
+    }
+  }, [])
+
+  // Сохраняем открытые файлы в localStorage при изменении
+  useEffect(() => {
+    const filesToSave = openFiles.map(f => ({ path: f.path }))
+    localStorage.setItem('editor_open_files', JSON.stringify(filesToSave))
+  }, [openFiles])
+
   useEffect(() => {
     loadDirectory(currentPath)
   }, [])
@@ -368,6 +413,13 @@ function FileEditorPage() {
           >
             Новая папка
           </Button>
+          <Button 
+            variant={showTerminal ? "primary" : "secondary"}
+            onClick={() => setShowTerminal(!showTerminal)}
+            icon="💻"
+          >
+            {showTerminal ? 'Скрыть терминал' : 'Терминал'}
+          </Button>
         </div>
       </div>
 
@@ -384,7 +436,7 @@ function FileEditorPage() {
         />
       )}
 
-      <div className="editor-layout">
+      <div className={`editor-layout ${showTerminal ? 'with-terminal' : ''}`}>
         {/* File Explorer */}
         <div className="file-explorer">
           <div className="explorer-header">
@@ -581,6 +633,13 @@ function FileEditorPage() {
             </div>
           )}
         </div>
+
+        {/* Terminal Panel */}
+        {showTerminal && (
+          <div className="terminal-panel">
+            <TerminalTabs />
+          </div>
+        )}
       </div>
 
       {/* New File Modal */}

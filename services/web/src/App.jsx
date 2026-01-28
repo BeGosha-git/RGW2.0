@@ -6,6 +6,7 @@ import RobotControlPage from './pages/RobotControlPage'
 import RobotsPage from './pages/RobotsPage'
 import TerminalPage from './pages/TerminalPage'
 import ServicesPage from './pages/ServicesPage'
+import SettingsPage from './pages/SettingsPage'
 import { NAV_ICONS } from './constants/icons'
 import './App.css'
 
@@ -19,7 +20,8 @@ function Navigation() {
     { path: '/editor', label: 'Редактор', icon: NAV_ICONS.EDITOR },
     { path: '/robots', label: 'Роботы', icon: NAV_ICONS.ROBOTS },
     { path: '/services', label: 'Сервисы', icon: NAV_ICONS.SERVICES },
-    { path: '/terminal', label: 'Терминал', icon: NAV_ICONS.TERMINAL }
+    { path: '/terminal', label: 'Терминал', icon: NAV_ICONS.TERMINAL },
+    { path: '/settings', label: 'Настройки', icon: '⚙' }
   ]
 
   return (
@@ -59,6 +61,7 @@ function App() {
             <Route path="/robots-old" element={<RobotControlPage />} />
             <Route path="/services" element={<ServicesPage />} />
             <Route path="/terminal" element={<TerminalPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>
       </div>

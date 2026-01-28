@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import SelectBox from '../components/SelectBox'
 import Button from '../components/Button'
+import Loading from '../components/Loading'
+import ErrorBanner from '../components/ErrorBanner'
 import './ServicesPage.css'
 
 function ServicesPage() {
@@ -213,9 +215,7 @@ function ServicesPage() {
   if (loading) {
     return (
       <div className="services-page">
-        <div className="loading">
-          <div className="spinner"></div>
-        </div>
+        <Loading text="Загрузка сервисов..." />
       </div>
     )
   }
@@ -225,15 +225,16 @@ function ServicesPage() {
   return (
     <div className="services-page">
       {error && (
-        <div className="error-banner">
-          <span>⚠ {error}</span>
-          <button onClick={() => {
+        <ErrorBanner
+          error={error}
+          onDismiss={() => {
             if (errorTimeoutRef.current) {
               clearTimeout(errorTimeoutRef.current)
             }
             setError(null)
-          }}>✕</button>
-        </div>
+          }}
+          variant="error"
+        />
       )}
 
       <div className="services-header">

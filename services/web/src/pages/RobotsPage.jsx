@@ -739,6 +739,12 @@ function RobotsPage() {
   }, [robots])
 
   const handleExecuteCommand = async (button, robotId) => {
+    if (!robotId) {
+      console.warn('handleExecuteCommand: No robot ID provided')
+      setError('Робот не выбран')
+      return
+    }
+
     const buttonKey = button.id || `button-${robotId}-${Date.now()}`
     
     if (executingCommands.has(buttonKey)) return
@@ -748,8 +754,11 @@ function RobotsPage() {
     try {
       const robot = robots.find(r => r.id === robotId)
       if (!robot) {
-        throw new Error('Робот не найден')
+        console.warn(`Robot not found: ${robotId}`, { robots: robots.map(r => r.id) })
+        throw new Error(`Робот с ID ${robotId} не найден`)
       }
+
+      console.log(`Executing command "${button.command}" for robot ${robotId} (${robot.ip})`)
 
       const response = await fetch('/api/network/send', {
         method: 'POST',
@@ -761,18 +770,34 @@ function RobotsPage() {
         })
       })
 
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`HTTP error for robot ${robotId}:`, response.status, errorText)
+        throw new Error(`HTTP ${response.status}: ${errorText}`)
+      }
+
       const result = await response.json()
+      console.log(`Command result for robot ${robotId}:`, result)
+
       if (result.success) {
         setRobotStatuses(prev => ({
           ...prev,
           [robotId]: { isProcessing: false, currentCommand: button.name }
         }))
+        setError(null) // Очищаем ошибки при успехе
       } else {
         throw new Error(result.message || 'Ошибка выполнения команды')
       }
     } catch (error) {
       console.error('Error executing command:', error)
-      setError(error.message)
+      setError(error.message || 'Ошибка выполнения команды')
+      // Автоматически скрываем ошибку через 10 секунд
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current)
+      }
+      errorTimeoutRef.current = setTimeout(() => {
+        setError(null)
+      }, 10000)
     } finally {
       setExecutingCommands(prev => {
         const newSet = new Set(prev)
@@ -784,7 +809,10 @@ function RobotsPage() {
 
   // Выполнение команды для нескольких роботов
   const handleExecuteCommandMultiple = async (button, robotIds) => {
-    if (!robotIds || robotIds.length === 0) return
+    if (!robotIds || robotIds.length === 0) {
+      console.warn('handleExecuteCommandMultiple: No robot IDs provided')
+      return
+    }
 
     const buttonKey = `multi-${button.id}-${Date.now()}`
     if (executingCommands.has(buttonKey)) return
@@ -794,7 +822,10 @@ function RobotsPage() {
     try {
       const promises = robotIds.map(async (robotId) => {
         const robot = robots.find(r => r.id === robotId)
-        if (!robot) return { robotId, success: false, error: 'Робот не найден' }
+        if (!robot) {
+          console.warn(`Robot not found: ${robotId}`, { robots: robots.map(r => r.id) })
+          return { robotId, success: false, error: 'Робот не найден' }
+        }
 
         try {
           const response = await fetch('/api/network/send', {
@@ -802,38 +833,77 @@ function RobotsPage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               target_ip: robot.ip,
-              endpoint: '/execute',
+              endpoint: '/api/robot/execute',
               data: { command: button.command }
             })
           })
 
+          if (!response.ok) {
+            const errorText = await response.text()
+            console.error(`HTTP error for robot ${robotId} (${robot.ip}):`, response.status, errorText)
+            return {
+              robotId,
+              success: false,
+              error: `HTTP ${response.status}: ${errorText}`
+            }
+          }
+
           const result = await response.json()
+          console.log(`Command result for robot ${robotId} (${robot.ip}):`, result)
+          
           return {
             robotId,
-            success: result.success,
+            success: result.success === true,
             error: result.success ? null : (result.message || 'Ошибка выполнения команды')
           }
         } catch (error) {
-          return { robotId, success: false, error: error.message }
+          console.error(`Error executing command for robot ${robotId} (${robot.ip}):`, error)
+          return { robotId, success: false, error: error.message || 'Ошибка сети' }
         }
       })
 
       const results = await Promise.allSettled(promises)
-      const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length
-      const failed = results.length - successful
+      
+      // Обрабатываем результаты
+      const processedResults = results.map((result, index) => {
+        if (result.status === 'fulfilled') {
+          return result.value
+        } else {
+          // Если промис был отклонен (не должно происходить, но на всякий случай)
+          console.error(`Promise rejected for robot ${robotIds[index]}:`, result.reason)
+          return {
+            robotId: robotIds[index],
+            success: false,
+            error: result.reason?.message || 'Неизвестная ошибка'
+          }
+        }
+      })
+
+      const successful = processedResults.filter(r => r.success === true).length
+      const failed = processedResults.length - successful
+
+      console.log(`Command execution summary: ${successful} successful, ${failed} failed`, processedResults)
 
       // Обновляем статусы для успешных роботов
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled' && result.value.success) {
+      processedResults.forEach((result) => {
+        if (result.success) {
           setRobotStatuses(prev => ({
             ...prev,
-            [result.value.robotId]: { isProcessing: false, currentCommand: button.name }
+            [result.robotId]: { isProcessing: false, currentCommand: button.name }
           }))
         }
       })
 
-      if (failed > 0) {
-        setError(`Команда выполнена для ${successful} роботов, ошибок: ${failed}`)
+      if (successful > 0 && failed === 0) {
+        // Все успешно - показываем успешное сообщение
+        setError(null)
+      } else if (failed > 0) {
+        // Есть ошибки
+        const errorDetails = processedResults
+          .filter(r => !r.success)
+          .map(r => `Робот ${r.robotId}: ${r.error}`)
+          .join('; ')
+        setError(`Команда выполнена для ${successful} роботов, ошибок: ${failed}. ${errorDetails}`)
         // Автоматически скрываем ошибку через 10 секунд
         if (errorTimeoutRef.current) {
           clearTimeout(errorTimeoutRef.current)
@@ -844,7 +914,7 @@ function RobotsPage() {
       }
     } catch (error) {
       console.error('Error executing command for multiple robots:', error)
-      setError(error.message)
+      setError(`Критическая ошибка: ${error.message}`)
       // Автоматически скрываем ошибку через 10 секунд
       if (errorTimeoutRef.current) {
         clearTimeout(errorTimeoutRef.current)
@@ -1493,10 +1563,20 @@ function RobotsPage() {
                         key={button.id}
                         className={`command-execute-btn command-btn-${buttonColor}`}
                         onClick={() => {
+                          const selectedArray = Array.from(selectedRobots)
+                          if (selectedArray.length === 0) {
+                            console.warn('No robots selected')
+                            setError('Выберите хотя бы одного робота')
+                            return
+                          }
+                          
                           if (isMultiple) {
-                            handleExecuteCommandMultiple(button, Array.from(selectedRobots))
+                            console.log(`Executing command "${button.name}" for ${selectedArray.length} robots:`, selectedArray)
+                            handleExecuteCommandMultiple(button, selectedArray)
                           } else {
-                            handleExecuteCommand(button, Array.from(selectedRobots)[0])
+                            const robotId = selectedArray[0]
+                            console.log(`Executing command "${button.name}" for robot:`, robotId)
+                            handleExecuteCommand(button, robotId)
                           }
                         }}
                         disabled={isExecuting}

@@ -24,9 +24,15 @@
 /* Refresh button теперь использует Button компонент */
 
 .services-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 1rem;
+}
+
+@media (max-width: 1200px) {
+  .services-list {
+    grid-template-columns: 1fr;
+  }
 }
 
 .service-card {

@@ -212,6 +212,11 @@ def register_robot_endpoints():
         data = request.get_json() or {}
         return jsonify(robot_api.RobotAPI.update_commands(data))
     
+    @flask_app.route('/api/settings', methods=['GET'])
+    def api_settings_get():
+        """Получает настройки робота."""
+        return jsonify(robot_api.RobotAPI.get_settings())
+    
     @flask_app.route('/api/settings', methods=['POST'])
     def api_settings():
         """Обновляет настройки робота (локально)."""

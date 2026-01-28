@@ -85,31 +85,6 @@ def setup_virtual_environment():
         return True
 
 
-def calculate_file_size(filepath: str) -> int:
-    """
-    Вычисляет размер файла или директории.
-    
-    Args:
-        filepath: Путь к файлу или директории
-        
-    Returns:
-        Размер в байтах
-    """
-    if not os.path.exists(filepath):
-        return 0
-    
-    if os.path.isfile(filepath):
-        return os.path.getsize(filepath)
-    else:
-        total_size = 0
-        for dirpath, dirnames, filenames in os.walk(filepath):
-            for filename in filenames:
-                filepath_full = os.path.join(dirpath, filename)
-                if os.path.exists(filepath_full):
-                    total_size += os.path.getsize(filepath_full)
-        return total_size
-
-
 def check_and_update_version():
     """
     Проверяет файлы проекта и обновляет версию в data/version.json если файлы изменились.
@@ -119,146 +94,12 @@ def check_and_update_version():
         True если версия была обновлена или не требовала обновления
     """
     try:
-        # Создаем папку data если её нет
-        os.makedirs("data", exist_ok=True)
-        
-        version_file = "data/version.json"
-        
-        # Читаем текущую версию если есть
-        current_version = "1.00.01"
-        current_files = []
-        
-        if os.path.exists(version_file):
-            try:
-                with open(version_file, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
-                    current_version = existing_data.get("version", "1.00.01")
-                    current_files = existing_data.get("files", [])
-            except Exception as e:
-                print(f"Warning: Could not read existing version file: {str(e)}")
-        
-        # Сканируем текущие файлы
-        files_list = []
-        exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist', 'data'}
-        exclude_files = {'data/version.json', 'data/settings.json', 'data/commands.json', 'data/services.json', 'data/ips.json', '.gitignore'}
-        
-        services_path = "services"
-        
-        for root, dirs, files in os.walk('.'):
-            # Пропускаем папку services при обычном сканировании
-            if root == '.' and services_path in dirs:
-                dirs.remove(services_path)
-            
-            # Исключаем служебные директории (включая __pycache__ в любой папке)
-            dirs[:] = [d for d in dirs if d not in exclude_dirs and d != '__pycache__']
-            
-            # Пропускаем файлы в __pycache__ папках
-            if '__pycache__' in root:
-                continue
-            
-            # Пропускаем файлы внутри services/ при обычном сканировании
-            if services_path in root and root != f'./{services_path}':
-                continue
-            
-            for file in files:
-                if file in exclude_files:
-                    continue
-                
-                filepath = os.path.join(root, file)
-                # Пропускаем скрытые файлы
-                if filepath.startswith('./.'):
-                    continue
-                
-                # Пропускаем файлы внутри services/ (обработаем отдельно)
-                if services_path in filepath and root != f'./{services_path}':
-                    continue
-                
-                # Нормализуем путь
-                normalized_path = filepath.replace('\\', '/').lstrip('./')
-                
-                file_size = calculate_file_size(filepath)
-                files_list.append({
-                    "path": normalized_path,
-                    "size": file_size
-                })
-        
-        # Для папки services обрабатываем только первый уровень
-        if os.path.exists(services_path):
-            if os.path.isdir(services_path):
-                for item in os.listdir(services_path):
-                    # Пропускаем __pycache__
-                    if item == '__pycache__':
-                        continue
-                    
-                    item_path = os.path.join(services_path, item)
-                    normalized_item_path = item_path.replace('\\', '/')
-                    
-                    # Если это .py файл - добавляем его
-                    if os.path.isfile(item_path) and item.endswith('.py'):
-                        file_size = calculate_file_size(item_path)
-                        files_list.append({
-                            "path": normalized_item_path,
-                            "size": file_size
-                        })
-                    # Если это папка первого уровня - добавляем её с общим размером
-                    elif os.path.isdir(item_path):
-                        dir_size = calculate_file_size(item_path)
-                        files_list.append({
-                            "path": normalized_item_path,
-                            "size": dir_size,
-                            "is_directory": True
-                        })
-        
-        # Сортируем списки для сравнения
-        current_files_sorted = sorted(current_files, key=lambda x: x.get("path", ""))
-        files_list_sorted = sorted(files_list, key=lambda x: x.get("path", ""))
-        
-        # Сравниваем файлы
-        files_changed = False
-        
-        # Проверяем количество файлов
-        if len(current_files_sorted) != len(files_list_sorted):
-            files_changed = True
-        else:
-            # Проверяем каждый файл
-            for current_file, new_file in zip(current_files_sorted, files_list_sorted):
-                if (current_file.get("path") != new_file.get("path") or 
-                    current_file.get("size") != new_file.get("size")):
-                    files_changed = True
-                    break
-        
-        # Если файлы изменились, повышаем версию
-        if files_changed:
-            # Повышаем версию (увеличиваем последнюю цифру)
-            version_parts = current_version.split('.')
-            if len(version_parts) >= 3:
-                try:
-                    last_part = int(version_parts[2])
-                    last_part += 1
-                    version_parts[2] = str(last_part).zfill(2)
-                    new_version = '.'.join(version_parts)
-                except ValueError:
-                    new_version = current_version
-            else:
-                new_version = current_version
-            
-            version_data = {
-                "version": new_version,
-                "files": files_list
-            }
-            
-            # Сохраняем обновленный version.json
-            with open(version_file, 'w', encoding='utf-8') as f:
-                json.dump(version_data, f, indent=4, ensure_ascii=False)
-            
-            print(f"Version updated: {current_version} -> {new_version} ({len(files_list)} files)")
-            return True
-        else:
-            print(f"Version check: No changes detected (version {current_version}, {len(files_list)} files)")
-            return True
-            
+        import update
+        return update.check_and_update_version()
     except Exception as e:
-        print(f"Error checking/updating version: {str(e)}")
+        print(f"Error checking/updating version: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -300,63 +141,130 @@ def run_services():
 
 def main():
     """Главная функция приложения."""
-    print("=" * 50)
-    print("RGW 2.0 - Robot Control System")
-    print("=" * 50)
-    print(f"Platform: {platform.system()} {platform.release()}")
-    print(f"Python: {platform.python_version()}")
-    print("=" * 50)
-    
-    # Проверяем и обновляем версию ДО запуска докера
-    print("\nChecking and updating version...")
-    check_and_update_version()
-    print("=" * 50)
-    
-    # Инициализируем менеджер сервисов
-    manager = services_manager.get_services_manager()
-    manager.refresh_services()  # Обновляем список сервисов
-    
-    # Проверяем, запущены ли мы в Docker
-    in_docker = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true'
-    
-    # Настройка виртуального окружения только если не в Docker
-    if not in_docker:
-        print("\nSetting up virtual environment...")
-        if not setup_virtual_environment():
-            print("Warning: Virtual environment setup had issues, but continuing...")
-        print("=" * 50)
-    else:
-        print("\nDocker environment detected. Skipping virtual environment setup.")
-        print("=" * 50)
-    
-    if is_windows():
-        print("Windows detected. Docker-compose will be managed by docker_service.")
-    else:
-        print("Non-Windows system detected. Running services...")
+    try:
+        print("=" * 50, flush=True)
+        print("RGW 2.0 - Robot Control System", flush=True)
+        print("=" * 50, flush=True)
+        print(f"Platform: {platform.system()} {platform.release()}", flush=True)
+        print(f"Python: {platform.python_version()}", flush=True)
+        print("=" * 50, flush=True)
         
-        # В Docker пропускаем update, так как файлы уже скопированы
-        # Запускаем update.py только если не в Docker
+        # Проверяем и обновляем версию ДО запуска докера
+        print("\nChecking and updating version...", flush=True)
+        try:
+            check_and_update_version()
+            print("Version check completed", flush=True)
+        except Exception as e:
+            print(f"Warning: Version check failed: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+        print("=" * 50, flush=True)
+        
+        # Инициализируем менеджер сервисов
+        print("Initializing services manager...", flush=True)
+        try:
+            manager = services_manager.get_services_manager()
+            manager.refresh_services()  # Обновляем список сервисов
+            print("Services manager initialized", flush=True)
+        except Exception as e:
+            print(f"Warning: Services manager initialization failed: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            # Продолжаем работу даже если менеджер не инициализирован
+        
+        # Проверяем, запущены ли мы в Docker
         in_docker = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true'
+        print(f"In Docker: {in_docker}", flush=True)
+    
+        # Настройка виртуального окружения только если не в Docker
         if not in_docker:
-            print("Running update...")
-            update_success = run_update()
-            if not update_success:
-                print("Warning: Update completed with errors, but continuing...")
-            print("\n" + "=" * 50)
+            print("\nSetting up virtual environment...", flush=True)
+            if not setup_virtual_environment():
+                print("Warning: Virtual environment setup had issues, but continuing...", flush=True)
+            print("=" * 50, flush=True)
         else:
-            print("Docker environment detected. Skipping update.")
+            print("\nDocker environment detected. Skipping virtual environment setup.", flush=True)
+            print("=" * 50, flush=True)
         
-        # Запускаем сервисы
-        print("Starting services...")
-        run_services()
+        is_win = is_windows()
+        print(f"is_windows() = {is_win}", flush=True)
+        
+        if is_win:
+            print("Windows detected. Starting docker-compose...", flush=True)
+            # Импортируем и запускаем docker-compose напрямую
+            try:
+                # Импортируем функцию run_docker_compose из docker_service
+                from services.windows_docker.docker_service import run_docker_compose
+                
+                # Запускаем docker-compose и ждем завершения
+                success = run_docker_compose()
+                
+                if success:
+                    print("Docker-compose started successfully. main.py exiting.", flush=True)
+                    sys.exit(0)
+                else:
+                    print("Failed to start docker-compose. main.py exiting.", flush=True)
+                    sys.exit(1)
+                    
+            except ImportError as e:
+                print(f"Error importing docker_service: {str(e)}", flush=True)
+                import traceback
+                traceback.print_exc()
+                print("main.py exiting.", flush=True)
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error running docker-compose: {str(e)}", flush=True)
+                import traceback
+                traceback.print_exc()
+                print("main.py exiting.", flush=True)
+                sys.exit(1)
+        else:
+            print("Non-Windows system detected. Running services...", flush=True)
+            
+            # В Docker пропускаем update, так как файлы уже скопированы
+            # Запускаем update.py только если не в Docker
+            in_docker = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true'
+            if not in_docker:
+                print("Running update...", flush=True)
+                update_success = run_update()
+                if not update_success:
+                    print("Warning: Update completed with errors, but continuing...", flush=True)
+                print("\n" + "=" * 50, flush=True)
+            else:
+                print("Docker environment detected. Skipping update.", flush=True)
+            
+            # Запускаем сервисы
+            print("Starting services...", flush=True)
+            run_services()
+    except Exception as e:
+        print(f"Fatal error in main(): {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
 
 
 if __name__ == '__main__':
     try:
+        print("main.py starting...", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
         main()
+        print("main.py completed (this should not happen - services should run forever)", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Если main() завершился без ошибок, ждем бесконечно чтобы контейнер не падал
+        import time
+        while True:
+            time.sleep(60)
     except KeyboardInterrupt:
-        print("\n\nApplication stopped by user")
+        print("\n\nApplication stopped by user", flush=True)
         sys.exit(0)
     except Exception as e:
-        print(f"\nFatal error: {str(e)}")
+        print(f"\nFatal error: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
         sys.exit(1)

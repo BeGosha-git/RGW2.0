@@ -35,6 +35,7 @@ class ServiceRunner:
         """Инициализация запуска сервисов."""
         self.services: List[Dict] = []
         self.threads: List[threading.Thread] = []
+        self.service_files: List[str] = []  # Список файлов сервисов для перезапуска
         self.running = False
         self.manager = services_manager.get_services_manager()
     
@@ -173,12 +174,23 @@ class ServiceRunner:
     
     def run_all_services(self):
         """Запускает все найденные сервисы."""
+        self.running = True
         print("Discovering services...", flush=True)
         service_files = self.find_services()
         
         if not service_files:
-            print("No services found", flush=True)
+            print("No services found. Waiting indefinitely...", flush=True)
+            # Если сервисов нет, просто ждем бесконечно, чтобы контейнер не падал
+            try:
+                while True:
+                    time.sleep(60)
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                pass
             return
+        
+        # Сохраняем service_files как атрибут для использования при перезапуске
+        self.service_files = service_files
         
         print(f"Found {len(service_files)} service(s)", flush=True)
         for sf in service_files:
@@ -193,11 +205,41 @@ class ServiceRunner:
         
         print(f"Started {len(self.services)} service(s)", flush=True)
         
+        if len(self.services) == 0:
+            print("No services started. Waiting indefinitely...", flush=True)
+            try:
+                while True:
+                    time.sleep(60)
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                pass
+            return
+        
+        # Даем сервисам время запуститься перед первой проверкой
+        print("Waiting 5 seconds for services to initialize...", flush=True)
+        time.sleep(5)
+        
+        # Проверяем, что сервисы действительно запустились
+        alive_threads = [t for t in self.threads if t.is_alive()]
+        print(f"After initialization: {len(alive_threads)}/{len(self.threads)} threads alive", flush=True)
+        
+        if len(alive_threads) == 0:
+            print("ERROR: All service threads died immediately after start!", flush=True)
+            print("Waiting indefinitely to prevent container exit...", flush=True)
+            try:
+                while True:
+                    time.sleep(60)
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                pass
+            return
+        
         # Переменная для отслеживания времени последней проверки сервисов
         last_service_check = time.time()
         service_check_interval = 60  # Проверяем каждую минуту
         
         # Ждем завершения всех потоков
+        print("Entering main service loop...", flush=True)
         try:
             while self.running:
                 # Проверяем новые сервисы каждую минуту
@@ -234,6 +276,15 @@ class ServiceRunner:
                 
                 # Проверяем, что потоки еще живы
                 alive_threads = [t for t in self.threads if t.is_alive()]
+                dead_threads = [t for t in self.threads if not t.is_alive()]
+                
+                if dead_threads:
+                    print(f"Warning: {len(dead_threads)} service thread(s) stopped", flush=True)
+                    for i, thread in enumerate(dead_threads):
+                        service_info = self.services[i] if i < len(self.services) else None
+                        service_name = service_info.get("service_name", "unknown") if service_info else "unknown"
+                        print(f"  - Thread for service '{service_name}' is dead", flush=True)
+                
                 if not alive_threads and len(self.services) > 0:
                     print("All services stopped unexpectedly", flush=True)
                     sys.stdout.flush()
@@ -259,7 +310,8 @@ class ServiceRunner:
                     sys.stdout.flush()
                     self.threads = []
                     self.services = []
-                    for service_file in service_files:
+                    # Используем сохраненный список service_files
+                    for service_file in getattr(self, 'service_files', []):
                         self.load_service(service_file)
                         time.sleep(0.5)
                     if not self.threads:
@@ -268,7 +320,31 @@ class ServiceRunner:
                         break
                 elif len(alive_threads) > 0:
                     # Сервисы работают, просто ждем
-                    pass
+                    print(f"Services running: {len(alive_threads)}/{len(self.threads)} threads alive", flush=True)
+                else:
+                    # Нет запущенных сервисов и нет сервисов для запуска
+                    if len(self.services) == 0:
+                        print("No services to run. Waiting indefinitely...", flush=True)
+                        sys.stdout.flush()
+                        # Ждем бесконечно, чтобы контейнер не падал
+                        try:
+                            while True:
+                                time.sleep(60)
+                                sys.stdout.flush()
+                        except KeyboardInterrupt:
+                            break
+                        break
+                    else:
+                        # Есть сервисы, но все потоки мертвы - это проблема
+                        print(f"ERROR: All {len(self.services)} service(s) stopped but services list is not empty!", flush=True)
+                        print("This should not happen. Waiting indefinitely to prevent container exit...", flush=True)
+                        try:
+                            while True:
+                                time.sleep(60)
+                                sys.stdout.flush()
+                        except KeyboardInterrupt:
+                            break
+                        break
                 # Проверяем состояние сервисов каждую минуту
                 time.sleep(60)
                 sys.stdout.flush()
@@ -306,6 +382,14 @@ def run_services():
         traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()
+        # Не завершаем работу, а ждем бесконечно чтобы контейнер не падал
+        print("Waiting indefinitely after fatal error to prevent container exit...", flush=True)
+        try:
+            while True:
+                time.sleep(60)
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            pass
         raise
 
 

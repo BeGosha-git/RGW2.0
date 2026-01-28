@@ -1,0 +1,138 @@
+services:
+  robot1:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot1
+    ports:
+      - "5001:5000"  # API порт
+      - "8081:80"    # Web порт
+    environment:
+      - ROBOT_ID=0001
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot1_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+  robot2:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot2
+    ports:
+      - "5002:5000"  # API порт
+      - "8082:80"    # Web порт
+    environment:
+      - ROBOT_ID=0002
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot2_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+  robot3:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot3
+    ports:
+      - "5003:5000"  # API порт
+      - "8083:80"    # Web порт
+    environment:
+      - ROBOT_ID=0003
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot3_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+  robot4:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot4
+    ports:
+      - "5004:5000"  # API порт
+      - "8084:80"    # Web порт
+    environment:
+      - ROBOT_ID=0004
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot4_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+  robot5:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot5
+    ports:
+      - "5005:5000"  # API порт
+      - "8085:80"    # Web порт
+    environment:
+      - ROBOT_ID=0005
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot5_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+  robot6:
+    build:
+      context: ../..
+      dockerfile: services/windows_docker/Dockerfile
+    container_name: rgw_robot6
+    ports:
+      - "5006:5000"  # API порт
+      - "8086:80"    # Web порт
+    environment:
+      - ROBOT_ID=0006
+      - ROBOT_TYPE=PC
+      - ROBOT_GROUP=white
+      - VERSION_PRIORITY=STABLE
+    volumes:
+      - ../../:/app
+      - robot6_data:/app/data
+    networks:
+      - rgw_network
+    command: python init_settings.py && python -u main.py
+    restart: unless-stopped
+
+networks:
+  rgw_network:
+    driver: bridge
+
+volumes:
+  robot1_data:
+  robot2_data:
+  robot3_data:
+  robot4_data:
+  robot5_data:
+  robot6_data:

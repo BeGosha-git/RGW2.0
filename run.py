@@ -64,6 +64,9 @@ class ServiceRunner:
                 
                 for file in files:
                     if file.endswith('.py') and file != '__init__.py':
+                        # Пропускаем служебные файлы, которые не являются сервисами
+                        if file == 'init_settings.py':
+                            continue
                         filepath = os.path.join(root, file)
                         service_files.append(filepath)
         
@@ -86,6 +89,12 @@ class ServiceRunner:
             # Получаем имя сервиса из пути
             # Для файлов в подпапках (например, services/web/web.py) берем имя папки
             filepath_obj = Path(filepath)
+            
+            # Пропускаем служебные файлы, которые не являются сервисами
+            if filepath_obj.name == "init_settings.py":
+                print(f"Skipping utility file: {filepath}", flush=True)
+                return False
+            
             if filepath_obj.parent.name == "services" or filepath_obj.parent.parent.name == "services":
                 # Специальный случай: docker_service.py в windows_docker
                 if filepath_obj.name == "docker_service.py" and filepath_obj.parent.name == "windows_docker":

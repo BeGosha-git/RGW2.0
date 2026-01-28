@@ -493,6 +493,15 @@ def update_system():
     """
     print("Starting system update...", flush=True)
     
+    # Сканируем сеть перед обновлением для генерации ips.json
+    print("Scanning network to update ips.json...", flush=True)
+    try:
+        import scanner
+        scanner.scan_network()
+    except Exception as e:
+        print(f"Warning: Network scan failed: {str(e)}", flush=True)
+        print("Continuing with existing ips.json if available...", flush=True)
+    
     # Обновляем локальный version.json
     print("Updating local version file...", flush=True)
     update_version_file()

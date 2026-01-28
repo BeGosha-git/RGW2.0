@@ -1,16 +1,72 @@
 """
 Модуль для получения статуса и параметров робота.
+Поддерживает динамическую регистрацию данных от сервисов.
 """
 import os
 import json
 import platform
 import socket
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 # Определяем корень проекта (папка с main.py)
 PROJECT_ROOT = Path(__file__).parent.absolute()
+
+# Глобальный реестр данных от сервисов
+_service_data_registry: Dict[str, Dict[str, Any]] = {}
+
+
+def register_service_data(service_name: str, data: Dict[str, Any]) -> None:
+    """
+    Регистрирует данные от сервиса.
+    
+    Args:
+        service_name: Имя сервиса
+        data: Данные для регистрации (словарь)
+    """
+    global _service_data_registry
+    _service_data_registry[service_name] = {
+        **data,
+        "last_update": datetime.now().isoformat()
+    }
+
+
+def unregister_service_data(service_name: str) -> None:
+    """
+    Удаляет данные сервиса из реестра.
+    
+    Args:
+        service_name: Имя сервиса
+    """
+    global _service_data_registry
+    if service_name in _service_data_registry:
+        del _service_data_registry[service_name]
+
+
+def get_service_data(service_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Получает данные конкретного сервиса.
+    
+    Args:
+        service_name: Имя сервиса
+    
+    Returns:
+        Данные сервиса или None если не найдены
+    """
+    global _service_data_registry
+    return _service_data_registry.get(service_name)
+
+
+def get_all_service_data() -> Dict[str, Dict[str, Any]]:
+    """
+    Получает все зарегистрированные данные от сервисов.
+    
+    Returns:
+        Словарь с данными всех сервисов
+    """
+    global _service_data_registry
+    return _service_data_registry.copy()
 
 
 def get_robot_status() -> Dict[str, Any]:
@@ -27,7 +83,8 @@ def get_robot_status() -> Dict[str, Any]:
         "system": {},
         "version": {},
         "settings": {},
-        "network": {}
+        "network": {},
+        "services": get_all_service_data()
     }
     
     # Параметры робота из settings.json
@@ -80,6 +137,7 @@ def get_robot_status() -> Dict[str, Any]:
                 version_data = json.load(f)
                 status_data["version"] = {
                     "version": version_data.get("version", "UNKNOWN"),
+                    "version_type": version_data.get("version_type", "STABLE"),
                     "files_count": len(version_data.get("files", []))
                 }
     except Exception as e:

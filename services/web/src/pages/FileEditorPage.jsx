@@ -637,7 +637,7 @@ function FileEditorPage() {
         {/* Terminal Panel */}
         {showTerminal && (
           <div className="terminal-panel">
-            <TerminalTabs />
+            <TerminalTabs onOpenFile={loadFile} />
           </div>
         )}
       </div>

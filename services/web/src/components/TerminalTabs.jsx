@@ -3,9 +3,9 @@ import { robotApi, filesApi, statusApi } from '../utils/api'
 import './TerminalTabs.css'
 
 // Список команд для автодополнения
-const COMMANDS = ['help', 'clear', 'status', 'ls', 'pwd', 'cd']
+const COMMANDS = ['help', 'clear', 'status', 'ls', 'pwd', 'cd', 'cat', 'nano']
 
-function TerminalTabs() {
+function TerminalTabs({ onOpenFile }) {
   const [terminals, setTerminals] = useState([{ 
     id: 1, 
     name: 'Terminal 1', 
@@ -264,6 +264,8 @@ function TerminalTabs() {
       addToHistory(terminalId, 'output', '  ls [path]     - Список файлов в директории')
       addToHistory(terminalId, 'output', '  pwd           - Текущая директория')
       addToHistory(terminalId, 'output', '  cd [path]     - Изменить директорию')
+      addToHistory(terminalId, 'output', '  cat [file]    - Показать содержимое файла')
+      addToHistory(terminalId, 'output', '  nano [file]   - Открыть файл в редакторе')
       addToHistory(terminalId, 'output', '  <команда>     - Выполнить команду на сервере')
       return
     }
@@ -361,6 +363,107 @@ function TerminalTabs() {
         } else {
           addToHistory(terminalId, 'error', result.message || `Директория ${pathArg} не найдена`)
         }
+      } catch (error) {
+        addToHistory(terminalId, 'error', `Ошибка: ${error.message}`)
+      } finally {
+        setTerminalExecuting(terminalId, false)
+      }
+      return
+    }
+
+    if (command.trim().startsWith('cat ')) {
+      setTerminalExecuting(terminalId, true)
+      try {
+        const parts = command.trim().split(/\s+/)
+        if (parts.length < 2) {
+          addToHistory(terminalId, 'error', 'Использование: cat <файл>')
+          return
+        }
+        
+        const fileArg = parts[1]
+        let filePath = fileArg
+        
+        // Обрабатываем относительные пути
+        if (!fileArg.startsWith('/')) {
+          if (terminal.currentDirectory === '.') {
+            filePath = fileArg
+          } else {
+            filePath = terminal.currentDirectory.endsWith('/')
+              ? `${terminal.currentDirectory}${fileArg}`
+              : `${terminal.currentDirectory}/${fileArg}`
+          }
+        }
+        
+        // Нормализуем путь перед использованием
+        filePath = normalizePath(filePath)
+        
+        const result = await filesApi.read(filePath)
+        if (result.success) {
+          const content = result.content || ''
+          if (content) {
+            // Разбиваем содержимое на строки для лучшего отображения
+            const lines = content.split('\n')
+            lines.forEach(line => {
+              addToHistory(terminalId, 'output', line)
+            })
+          } else {
+            addToHistory(terminalId, 'output', '(файл пуст)')
+          }
+        } else {
+          addToHistory(terminalId, 'error', result.message || `Файл ${fileArg} не найден`)
+        }
+      } catch (error) {
+        addToHistory(terminalId, 'error', `Ошибка: ${error.message}`)
+      } finally {
+        setTerminalExecuting(terminalId, false)
+      }
+      return
+    }
+
+    if (command.trim().startsWith('nano ')) {
+      if (!onOpenFile) {
+        addToHistory(terminalId, 'error', 'Редактор недоступен (команда nano работает только на странице редактора)')
+        return
+      }
+      
+      setTerminalExecuting(terminalId, true)
+      try {
+        const parts = command.trim().split(/\s+/)
+        if (parts.length < 2) {
+          addToHistory(terminalId, 'error', 'Использование: nano <файл>')
+          return
+        }
+        
+        const fileArg = parts[1]
+        let filePath = fileArg
+        
+        // Обрабатываем относительные пути
+        if (!fileArg.startsWith('/')) {
+          if (terminal.currentDirectory === '.') {
+            filePath = fileArg
+          } else {
+            filePath = terminal.currentDirectory.endsWith('/')
+              ? `${terminal.currentDirectory}${fileArg}`
+              : `${terminal.currentDirectory}/${fileArg}`
+          }
+        }
+        
+        // Нормализуем путь перед использованием
+        filePath = normalizePath(filePath)
+        
+        // Проверяем, что это файл, а не директория
+        const listResult = await filesApi.list(filePath)
+        if (listResult.success && listResult.items && listResult.items.length > 0) {
+          const item = listResult.items[0]
+          if (item.is_dir) {
+            addToHistory(terminalId, 'error', `${fileArg} является директорией, а не файлом`)
+            return
+          }
+        }
+        
+        // Открываем файл в редакторе
+        await onOpenFile(filePath)
+        addToHistory(terminalId, 'output', `Файл ${filePath} открыт в редакторе`)
       } catch (error) {
         addToHistory(terminalId, 'error', `Ошибка: ${error.message}`)
       } finally {

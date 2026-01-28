@@ -54,6 +54,31 @@ def register_status_endpoints():
         import status
         return jsonify(status.get_robot_status())
     
+    @flask_app.route('/api/status/service/<service_name>', methods=['GET'])
+    def api_status_service(service_name):
+        """Возвращает данные конкретного сервиса из status."""
+        import status
+        service_data = status.get_service_data(service_name)
+        if service_data is None:
+            return jsonify({
+                "success": False,
+                "message": f"Service '{service_name}' not found in status registry"
+            }), 404
+        return jsonify({
+            "success": True,
+            "service_name": service_name,
+            "data": service_data
+        })
+    
+    @flask_app.route('/api/status/services', methods=['GET'])
+    def api_status_services():
+        """Возвращает все зарегистрированные данные от сервисов."""
+        import status
+        return jsonify({
+            "success": True,
+            "services": status.get_all_service_data()
+        })
+    
     @flask_app.route('/health', methods=['GET'])
     def api_health():
         """Проверка здоровья API."""

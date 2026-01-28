@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 # Определяем корень проекта (папка с main.py)
-PROJECT_ROOT = Path(__file__).parent.absolute()
+# init_settings.py находится в services/windows_docker/, поэтому поднимаемся на 2 уровня вверх
+PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 
 def init_settings():
     """Создает или обновляет settings.json из переменных окружения."""

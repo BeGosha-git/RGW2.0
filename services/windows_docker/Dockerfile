@@ -38,4 +38,4 @@ EXPOSE 5000 80
 ENV DOCKER_CONTAINER=true
 ENV PYTHONUNBUFFERED=1
 
-CMD python /app/init_settings.py && python -u /app/main.py
+CMD python /app/services/windows_docker/init_settings.py && python -u /app/main.py

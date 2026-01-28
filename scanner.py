@@ -1,5 +1,6 @@
 """
-Сервис для периодического сканирования сети и сохранения найденных IP адресов.
+Модуль для сканирования сети и сохранения найденных IP адресов в ips.json.
+Используется разово перед обновлением системы.
 """
 import os
 import sys
@@ -9,11 +10,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 import network
 
-# Добавляем корневую директорию в путь для импорта network
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 # Путь к файлу для сохранения результатов
-IPS_FILE = Path(__file__).parent.parent / "data" / "ips.json"
+IPS_FILE = Path(__file__).parent / "data" / "ips.json"
 
 
 def ensure_data_dir():
@@ -85,6 +83,9 @@ def save_ips(ips: List[str], scan_timestamp: float):
 def scan_network():
     """
     Выполняет сканирование сети и сохраняет результаты.
+    
+    Returns:
+        True если успешно
     """
     try:
         print(f"Starting network scan...", flush=True)
@@ -100,47 +101,14 @@ def scan_network():
         save_ips(found_ips, scan_end)
         
         print(f"Scan completed in {scan_duration:.2f}s. Found {len(found_ips)} IP(s): {found_ips}", flush=True)
+        return True
         
     except Exception as e:
         print(f"Error during network scan: {str(e)}", flush=True)
         import traceback
         traceback.print_exc()
-
-
-def run_scanner(scan_interval: int = 20):
-    """
-    Запускает периодическое сканирование сети.
-    
-    Args:
-        scan_interval: Интервал между сканированиями в секундах
-    """
-    print(f"Network scanner service started", flush=True)
-    print(f"Scan interval: {scan_interval} seconds", flush=True)
-    print(f"Results will be saved to: {IPS_FILE}", flush=True)
-    
-    # Выполняем первое сканирование сразу
-    scan_network()
-    
-    # Затем сканируем каждые scan_interval секунд
-    while True:
-        try:
-            time.sleep(scan_interval)
-            scan_network()
-        except KeyboardInterrupt:
-            print("\nScanner service stopped", flush=True)
-            break
-        except Exception as e:
-            print(f"Error in scanner loop: {str(e)}", flush=True)
-            import traceback
-            traceback.print_exc()
-            # Продолжаем работу даже при ошибке
-            time.sleep(5)
-
-
-def run():
-    """Точка входа для запуска сервиса сканера."""
-    run_scanner(scan_interval=20)
+        return False
 
 
 if __name__ == '__main__':
-    run()
+    scan_network()

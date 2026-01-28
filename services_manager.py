@@ -76,7 +76,7 @@ class ServicesManager:
             Дефолтные настройки
         """
         defaults = {
-            "scanner": {
+            "scanner_service": {
                 "status": "ON",
                 "scan_interval": 20,
                 "network_range": "0-255",
@@ -236,9 +236,55 @@ class ServicesManager:
         data = self.load_services()
         return data.get("services", {})
     
+    def _file_imports_services_manager(self, filepath: Path) -> bool:
+        """
+        Проверяет, импортирует ли файл services_manager.
+        
+        Args:
+            filepath: Путь к файлу для проверки
+        
+        Returns:
+            True если файл импортирует services_manager
+        """
+        try:
+            if not filepath.exists():
+                return False
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Парсим AST для анализа импортов
+            tree = ast.parse(content, filename=str(filepath))
+            
+            # Проверяем импорты
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    # import services_manager или import services_manager as ...
+                    for alias in node.names:
+                        module_name = alias.name.split('.')[0]  # Берем только первый уровень
+                        if module_name == 'services_manager':
+                            return True
+                elif isinstance(node, ast.ImportFrom):
+                    # from services_manager import ... или from services import manager
+                    if node.module:
+                        module_name = node.module.split('.')[0]  # Берем только первый уровень
+                        if module_name == 'services_manager':
+                            return True
+                        # Проверяем импорты вида "from services import manager"
+                        if module_name == 'services' and node.names:
+                            for alias in node.names:
+                                if 'manager' in alias.name.lower():
+                                    return True
+            
+            return False
+        except Exception:
+            # Если не удалось проанализировать, считаем что не импортирует
+            return False
+    
     def discover_services(self) -> List[str]:
         """
         Обнаруживает доступные сервисы.
+        Сервисом считается только файл, который импортирует services_manager.
         
         Returns:
             Список имен сервисов
@@ -249,17 +295,36 @@ class ServicesManager:
         if services_dir.exists():
             for item in services_dir.iterdir():
                 if item.is_file() and item.suffix == '.py' and item.stem != '__init__':
-                    services.append(item.stem)
+                    # Пропускаем служебные файлы, которые не являются сервисами
+                    if item.stem == 'init_settings':
+                        continue
+                    # Проверяем, импортирует ли файл services_manager
+                    if self._file_imports_services_manager(item):
+                        services.append(item.stem)
                 elif item.is_dir():
-                    # Проверяем есть ли main файл в директории
-                    main_file = item / "main.py"
-                    if main_file.exists():
-                        services.append(item.name)
-                    # Проверяем есть ли docker_service.py в windows_docker
-                    elif item.name == "windows_docker":
+                    # Пропускаем служебные папки
+                    if item.name == "windows_docker":
+                        # windows_docker - служебная папка, проверяем только docker_service.py
                         docker_service_file = item / "docker_service.py"
                         if docker_service_file.exists():
+                            # docker_service всегда считается сервисом (специальный случай)
                             services.append("docker_service")
+                        continue
+                    
+                    # Проверяем есть ли main.py или файл с именем папки в директории
+                    main_file = item / "main.py"
+                    service_file = item / f"{item.name}.py"
+                    
+                    # Проверяем main.py
+                    if main_file.exists():
+                        # Проверяем, импортирует ли main.py services_manager
+                        if self._file_imports_services_manager(main_file):
+                            services.append(item.name)
+                    # Проверяем файл с именем папки (например, web/web.py)
+                    elif service_file.exists():
+                        # Проверяем, импортирует ли файл services_manager
+                        if self._file_imports_services_manager(service_file):
+                            services.append(item.name)
         
         # Добавляем системные сервисы
         services.append("api")
@@ -268,14 +333,17 @@ class ServicesManager:
     
     def refresh_services(self):
         """
-        Обновляет список сервисов, добавляя новые если их нет.
+        Обновляет список сервисов, добавляя новые если их нет и удаляя несуществующие.
         """
         data = self.load_services()
         services = data.get("services", {})
         
         discovered = self.discover_services()
+        discovered_set = set(discovered)
         new_services_count = 0
+        removed_services_count = 0
         
+        # Добавляем новые сервисы
         for service_name in discovered:
             if service_name not in services:
                 defaults = self.get_service_defaults(service_name)
@@ -287,6 +355,17 @@ class ServicesManager:
                 }
                 new_services_count += 1
                 print(f"[ServicesManager] Added new service: {service_name}", flush=True)
+        
+        # Удаляем несуществующие сервисы (кроме системных)
+        services_to_remove = []
+        for service_name in list(services.keys()):
+            if service_name not in discovered_set and service_name != "api":
+                services_to_remove.append(service_name)
+        
+        for service_name in services_to_remove:
+            del services[service_name]
+            removed_services_count += 1
+            print(f"[ServicesManager] Removed non-existent service: {service_name}", flush=True)
         
         # Всегда обновляем last_update, даже если новых сервисов нет
         # Это показывает, что проверка была выполнена
@@ -424,15 +503,22 @@ class ServicesManager:
                     if item.is_file() and item.suffix == '.py' and item.stem != '__init__':
                         service_mapping[item.stem] = item.stem
                     elif item.is_dir():
-                        # Проверяем есть ли main файл в директории
-                        main_file = item / "main.py"
-                        if main_file.exists():
-                            service_mapping[item.name] = item.name
-                        # Проверяем есть ли docker_service.py в windows_docker
-                        elif item.name == "windows_docker":
+                        # Пропускаем служебные папки
+                        if item.name == "windows_docker":
+                            # windows_docker - служебная папка, проверяем только docker_service.py
                             docker_service_file = item / "docker_service.py"
                             if docker_service_file.exists():
                                 service_mapping["docker_service"] = "docker_service"
+                            continue
+                        
+                        # Проверяем есть ли main.py или файл с именем папки в директории
+                        main_file = item / "main.py"
+                        service_file = item / f"{item.name}.py"
+                        
+                        if main_file.exists():
+                            service_mapping[item.name] = item.name
+                        elif service_file.exists():
+                            service_mapping[item.name] = item.name
             
             # Добавляем системные сервисы
             service_mapping["api"] = "api"

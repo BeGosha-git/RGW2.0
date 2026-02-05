@@ -146,8 +146,8 @@ def run_client_gui(server_host: str, server_port: int):
         messagebox.showerror("Ошибка", msg.get("message", "Хост недоступен"))
         sock.close()
         return
-    sock.settimeout(0.5)
-    frame_queue = queue.Queue(maxsize=2)
+    sock.settimeout(2.0)
+    frame_queue = queue.Queue(maxsize=5)
     closed = threading.Event()
 
     def recv_thread():
@@ -177,7 +177,8 @@ def run_client_gui(server_host: str, server_port: int):
     root.geometry("1024x768")
     canvas = Canvas(root, bg="gray20", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
-    remote_size = [None, None]  # width, height of remote screen
+    # Размер удалённого экрана (обновляется с первого кадра; до этого мышь масштабируется по умолчанию)
+    remote_size = [1920, 1080]
     photo_ref = []  # храним ссылку на PhotoImage, иначе GC удалит
 
     def update_image():
@@ -200,12 +201,16 @@ def run_client_gui(server_host: str, server_port: int):
             pil = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
             remote_size[0], remote_size[1] = pil.size
             root.update_idletasks()
-            cw = max(canvas.winfo_width(), 200)
-            ch = max(canvas.winfo_height(), 200)
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if cw < 100:
+                cw = 1024
+            if ch < 100:
+                ch = 768
             pil_scaled = pil.resize((cw, ch), getattr(Image, "Resampling", Image).LANCZOS)
             photo = ImageTk.PhotoImage(pil_scaled)
             photo_ref.append(photo)
-            if len(photo_ref) > 2:
+            if len(photo_ref) > 3:
                 photo_ref.pop(0)
             canvas.delete("all")
             canvas.create_image(0, 0, anchor="nw", image=photo)
@@ -214,11 +219,8 @@ def run_client_gui(server_host: str, server_port: int):
         root.after(1, update_image)
 
     def to_remote_xy(canvas_x, canvas_y):
-        if not remote_size[0] or not remote_size[1]:
-            return 0, 0
         cw = max(canvas.winfo_width(), 1)
         ch = max(canvas.winfo_height(), 1)
-        # displayed image is thumbnail of remote_size -> scale back to remote
         sx = remote_size[0] / cw
         sy = remote_size[1] / ch
         return int(canvas_x * sx), int(canvas_y * sy)
@@ -254,29 +256,45 @@ def run_client_gui(server_host: str, server_port: int):
         except Exception:
             pass
 
-    def on_key(event):
-        key = event.keysym
-        if len(key) == 1:
-            k = key
-        else:
-            k = "Key.%s" % key.lower()
+    def send_key(key_str, pressed):
         try:
-            send_json_sync(sock, {"type": MSG_KEY, "key": k, "pressed": True})
-            send_json_sync(sock, {"type": MSG_KEY, "key": k, "pressed": False})
+            send_json_sync(sock, {"type": MSG_KEY, "key": key_str, "pressed": pressed})
         except Exception:
             pass
-        return "break"  # не отдавать событие дальше
+
+    def on_key_press(event):
+        # Для набора текста: event.char — символ с учётом раскладки и Shift (например "ф", "@")
+        char = event.char
+        if char and len(char) == 1:
+            k = char
+        else:
+            key = event.keysym
+            k = key if len(key) == 1 else "Key.%s" % key.lower()
+        send_key(k, True)
+        return "break"
+
+    def on_key_release(event):
+        char = event.char
+        if char and len(char) == 1:
+            k = char
+        else:
+            key = event.keysym
+            k = key if len(key) == 1 else "Key.%s" % key.lower()
+        send_key(k, False)
+        return "break"
 
     def focus_for_keys(_=None):
         root.focus_set()
 
     canvas.bind("<Motion>", on_motion)
+    canvas.bind("<Enter>", focus_for_keys)
     canvas.bind("<Button-1>", lambda e: (on_click(e), focus_for_keys()))
     canvas.bind("<Button-2>", lambda e: (on_click(e), focus_for_keys()))
     canvas.bind("<Button-3>", lambda e: (on_click(e), focus_for_keys()))
     canvas.bind("<MouseWheel>", on_scroll)
     canvas.bind("<FocusIn>", focus_for_keys)
-    root.bind("<Key>", on_key)
+    root.bind("<KeyPress>", on_key_press)
+    root.bind("<KeyRelease>", on_key_release)
     root.after(100, focus_for_keys)
 
     def on_closing():

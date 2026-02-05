@@ -122,13 +122,25 @@ def send_frame(writer: asyncio.StreamWriter, frame_bytes: bytes):
     writer.write(encode_message(TYPE_FRAME, frame_bytes))
 
 
+def _placeholder_frame() -> bytes:
+    """Минимальный JPEG 320x240 (серый) — если захват недоступен."""
+    if not Image:
+        return b""
+    try:
+        pil = Image.new("RGB", (320, 240), color=(64, 64, 64))
+        buf = io.BytesIO()
+        pil.save(buf, "JPEG", quality=80)
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
 def _capture_all_screens(quality: int = 60) -> bytes | None:
-    """Захват всех мониторов в один JPEG. Без mss/PIL возвращает None."""
+    """Захват всех мониторов в один JPEG. При ошибке — заглушка."""
     if not mss or not Image:
-        return None
+        return _placeholder_frame() or None
     try:
         with mss.mss() as sct:
-            # monitors[0] — все экраны вместе
             mon_all = sct.monitors[0]
             img = sct.grab(mon_all)
             pil = Image.frombytes("RGB", (img.width, img.height), img.rgb)
@@ -136,7 +148,7 @@ def _capture_all_screens(quality: int = 60) -> bytes | None:
             pil.save(buf, "JPEG", quality=quality, optimize=True)
             return buf.getvalue()
     except Exception:
-        return None
+        return _placeholder_frame() or None
 
 
 def _apply_mouse(msg: dict):

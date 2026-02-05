@@ -118,20 +118,17 @@ def run_client_gui(server_host: str, server_port: int):
     if not hosts:
         messagebox.showerror("Ошибка", f"Не удалось получить список ПК от {server_host}:{server_port}")
         return
-    if len(hosts) == 1:
-        choice = hosts[0]
-    else:
-        # Список только по имени (без IP — сервер отдаёт только host_id и name)
-        names = [h.get("name", "?") for h in hosts]
-        idx = simpledialog.askinteger(
-            "Выбор ПК",
-            "Введите номер ПК (1..%d):\n\n%s" % (len(hosts), "\n".join("%d. %s" % (i + 1, n) for i, n in enumerate(names))),
-            minvalue=1,
-            maxvalue=len(hosts),
-        )
-        if idx is None:
-            return
-        choice = hosts[idx - 1]
+    # Всегда показываем выбор (даже если хост один)
+    names = [h.get("name", "?") for h in hosts]
+    idx = simpledialog.askinteger(
+        "Выбор ПК",
+        "Введите номер ПК (1..%d):\n\n%s" % (len(hosts), "\n".join("%d. %s" % (i + 1, n) for i, n in enumerate(names))),
+        minvalue=1,
+        maxvalue=len(hosts),
+    )
+    if idx is None:
+        return
+    choice = hosts[idx - 1]
     host_id = choice["host_id"]
     host_name = choice.get("name", host_id)
     # Подключаемся и переходим в режим управления
@@ -180,8 +177,8 @@ def run_client_gui(server_host: str, server_port: int):
     root.geometry("1024x768")
     canvas = Canvas(root, bg="gray20", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
-    img_id = None
     remote_size = [None, None]  # width, height of remote screen
+    photo_ref = []  # храним ссылку на PhotoImage, иначе GC удалит
 
     def update_image():
         if closed.is_set():
@@ -193,23 +190,25 @@ def run_client_gui(server_host: str, server_port: int):
         try:
             frame_bytes = frame_queue.get_nowait()
         except queue.Empty:
-            root.after(50, update_image)
+            root.after(33, update_image)
             return
         if not Image:
-            root.after(50, update_image)
+            root.after(33, update_image)
             return
         try:
             from PIL import ImageTk
             pil = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
             remote_size[0], remote_size[1] = pil.size
-            cw = max(canvas.winfo_width(), 100)
-            ch = max(canvas.winfo_height(), 100)
-            pil_scaled = pil.copy()
-            pil_scaled.thumbnail((cw, ch), getattr(Image, "Resampling", Image).LANCZOS)
+            root.update_idletasks()
+            cw = max(canvas.winfo_width(), 200)
+            ch = max(canvas.winfo_height(), 200)
+            pil_scaled = pil.resize((cw, ch), getattr(Image, "Resampling", Image).LANCZOS)
             photo = ImageTk.PhotoImage(pil_scaled)
+            photo_ref.append(photo)
+            if len(photo_ref) > 2:
+                photo_ref.pop(0)
             canvas.delete("all")
             canvas.create_image(0, 0, anchor="nw", image=photo)
-            canvas.image = photo
         except Exception:
             pass
         root.after(1, update_image)
@@ -266,14 +265,19 @@ def run_client_gui(server_host: str, server_port: int):
             send_json_sync(sock, {"type": MSG_KEY, "key": k, "pressed": False})
         except Exception:
             pass
+        return "break"  # не отдавать событие дальше
+
+    def focus_for_keys(_=None):
+        root.focus_set()
 
     canvas.bind("<Motion>", on_motion)
-    canvas.bind("<Button-1>", lambda e: on_click(e))
-    canvas.bind("<Button-2>", lambda e: on_click(e))
-    canvas.bind("<Button-3>", lambda e: on_click(e))
+    canvas.bind("<Button-1>", lambda e: (on_click(e), focus_for_keys()))
+    canvas.bind("<Button-2>", lambda e: (on_click(e), focus_for_keys()))
+    canvas.bind("<Button-3>", lambda e: (on_click(e), focus_for_keys()))
     canvas.bind("<MouseWheel>", on_scroll)
+    canvas.bind("<FocusIn>", focus_for_keys)
     root.bind("<Key>", on_key)
-    canvas.focus_set()
+    root.after(100, focus_for_keys)
 
     def on_closing():
         closed.set()
@@ -284,7 +288,7 @@ def run_client_gui(server_host: str, server_port: int):
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
-    root.after(50, update_image)
+    root.after(100, update_image)
     root.mainloop()
 
 

@@ -303,10 +303,18 @@ async def accept_loop(port: int):
         await server.serve_forever()
 
 
-def run(port: int = DEFAULT_PORT):
+def run(port=None):
+    """Точка входа. Порт из аргумента, из параметров сервиса remote_desktop или 9009."""
+    if port is None:
+        try:
+            import services_manager
+            params = services_manager.get_services_manager().get_service_parameters("remote_desktop")
+            port = int(params.get("server_port", DEFAULT_PORT))
+        except Exception:
+            port = DEFAULT_PORT
     asyncio.run(accept_loop(port))
 
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else None
     run(port)

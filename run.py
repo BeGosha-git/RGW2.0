@@ -71,11 +71,6 @@ class ServiceRunner:
                         if file.endswith('_client.py'):
                             continue
                         filepath = os.path.join(root, file)
-                        # Сервер RD в подпапке remote_desktop не грузим (есть отдельный сервис remote_desktop_server)
-                        if file.endswith('_server.py'):
-                            fp = Path(filepath)
-                            if fp.parent.name != fp.stem:
-                                continue
                         service_files.append(filepath)
         
         # НЕ добавляем api/api.py, так как API теперь интегрирован в web.py

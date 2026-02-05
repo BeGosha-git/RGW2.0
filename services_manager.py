@@ -103,11 +103,6 @@ class ServicesManager:
                 "pc_name": "",
                 "wake_password": "1055",
                 "dependencies": []
-            },
-            "remote_desktop_server": {
-                "status": "ON",
-                "server_port": 9009,
-                "dependencies": []
             }
         }
         

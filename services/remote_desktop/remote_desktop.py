@@ -177,6 +177,17 @@ _KEY_MAP = {
     "prior": "page_up",
     "next": "page_down",
     "num_lock": "num_lock",
+    "backspace": "backspace",
+    "tab": "tab",
+    "space": "space",
+    "delete": "delete",
+    "home": "home",
+    "end": "end",
+    "insert": "insert",
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
 }
 
 

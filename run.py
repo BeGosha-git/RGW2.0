@@ -67,7 +67,15 @@ class ServiceRunner:
                         # Пропускаем служебные файлы, которые не являются сервисами
                         if file == 'init_settings.py':
                             continue
+                        # Клиент удалённого стола — только вручную (окно только при запуске клиента)
+                        if file.endswith('_client.py'):
+                            continue
                         filepath = os.path.join(root, file)
+                        # Сервер RD в подпапке remote_desktop не грузим (есть отдельный сервис remote_desktop_server)
+                        if file.endswith('_server.py'):
+                            fp = Path(filepath)
+                            if fp.parent.name != fp.stem:
+                                continue
                         service_files.append(filepath)
         
         # НЕ добавляем api/api.py, так как API теперь интегрирован в web.py
@@ -273,8 +281,12 @@ class ServiceRunner:
                                         break
                                     elif item.is_dir() and item.name == service_name:
                                         main_file = item / "main.py"
+                                        name_file = item / f"{item.name}.py"
                                         if main_file.exists():
                                             service_file = str(main_file)
+                                            break
+                                        if name_file.exists():
+                                            service_file = str(name_file)
                                             break
                             
                             if service_file and self.manager.is_service_enabled(service_name):

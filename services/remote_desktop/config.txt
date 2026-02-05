@@ -1,0 +1,6 @@
+# IP, куда подключаться к серверу (хост подключается к серверу, клиент — к серверу).
+# На этом ПК: server_host=localhost (сервер и хост на одной машине).
+# С другого ПК: укажите IP этого ПК в server_host в config на том ПК.
+# server_port=9009
+server_host=localhost
+server_port=9009

@@ -95,6 +95,19 @@ class ServicesManager:
                 "check_windows": True,
                 "prevent_restart": True,
                 "dependencies": []
+            },
+            "remote_desktop": {
+                "status": "ON",
+                "server_host": "localhost",
+                "server_port": 9009,
+                "pc_name": "",
+                "wake_password": "1055",
+                "dependencies": []
+            },
+            "remote_desktop_server": {
+                "status": "ON",
+                "server_port": 9009,
+                "dependencies": []
             }
         }
         

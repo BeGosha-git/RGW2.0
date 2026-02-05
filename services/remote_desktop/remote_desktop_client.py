@@ -315,23 +315,28 @@ def run_client_gui(server_host: str, server_port: int):
         "F9": "f9", "F10": "f10", "F11": "f11", "F12": "f12",
     }
 
-    def on_key_press(event):
+    def key_from_event(event, for_release=False):
+        """Единый маппинг из event в строку клавиши."""
         char = event.char
-        if char and len(char) == 1 and ord(char) >= 32:  # печатный символ
-            k = char
-        else:
-            keysym = event.keysym
-            k = _TK_KEY_MAP.get(keysym, keysym.lower() if len(keysym) == 1 else "Key.%s" % keysym.lower())
+        if char and len(char) == 1 and ord(char) >= 32:
+            return char
+        keysym = event.keysym
+        return _TK_KEY_MAP.get(keysym, keysym.lower() if len(keysym) == 1 else "Key.%s" % keysym.lower())
+
+    def on_key_press(event):
+        k = key_from_event(event)
         send_key(k, True)
+        # Для специальных клавиш (Backspace, Enter, Tab и т.д.) release часто не приходит —
+        # отправляем release сразу после press, чтобы клавиша не «залипала»
+        if k.startswith("Key.") or k in ("backspace", "return", "tab", "escape", "space", "delete",
+                                          "home", "end", "insert", "prior", "next",
+                                          "up", "down", "left", "right",
+                                          "alt_l", "alt_r", "ctrl_l", "ctrl_r", "shift_l", "shift_r") or k.startswith("f"):
+            root.after(30, lambda key=k: send_key(key, False))
         return "break"
 
     def on_key_release(event):
-        char = event.char
-        if char and len(char) == 1 and ord(char) >= 32:
-            k = char
-        else:
-            keysym = event.keysym
-            k = _TK_KEY_MAP.get(keysym, keysym.lower() if len(keysym) == 1 else "Key.%s" % keysym.lower())
+        k = key_from_event(event)
         send_key(k, False)
         return "break"
 

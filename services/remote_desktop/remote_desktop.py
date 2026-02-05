@@ -156,33 +156,36 @@ def _apply_mouse(msg: dict):
         return
     try:
         ctrl = MouseController()
-        x = msg.get("x")
-        y = msg.get("y")
-        if x is not None and y is not None:
-            ctrl.position = (int(x), int(y))
-        btn = msg.get("button")
-        pressed = msg.get("pressed", True)
-        if btn is not None:
-            if btn == "left":
-                b = Button.left
-            elif btn == "right":
-                b = Button.right
-            else:
-                b = Button.middle
-            if pressed:
-                ctrl.press(b)
-            else:
-                ctrl.release(b)
         scroll = msg.get("scroll")
-        if scroll is not None:
+        if scroll:
+            # Скролл: не двигаем мышь, только прокручиваем
             dx = msg.get("dx", 0)
             dy = msg.get("dy", 0)
-            ctrl.scroll(dx, dy)
+            ctrl.scroll(int(dx), int(dy))
+        else:
+            # Обычное движение/клик: двигаем мышь и обрабатываем кнопки
+            x = msg.get("x")
+            y = msg.get("y")
+            if x is not None and y is not None:
+                ctrl.position = (int(x), int(y))
+            btn = msg.get("button")
+            pressed = msg.get("pressed", True)
+            if btn is not None:
+                if btn == "left":
+                    b = Button.left
+                elif btn == "right":
+                    b = Button.right
+                else:
+                    b = Button.middle
+                if pressed:
+                    ctrl.press(b)
+                else:
+                    ctrl.release(b)
     except Exception:
         pass
 
 
-# Сопоставление Tk keysym -> pynput Key
+# Сопоставление нашего формата -> pynput Key
 _KEY_MAP = {
     "return": "enter",
     "escape": "esc",
@@ -200,6 +203,15 @@ _KEY_MAP = {
     "down": "down",
     "left": "left",
     "right": "right",
+    "alt_l": "alt_l",
+    "alt_r": "alt_r",
+    "ctrl_l": "ctrl_l",
+    "ctrl_r": "ctrl_r",
+    "shift_l": "shift_l",
+    "shift_r": "shift_r",
+    "f1": "f1", "f2": "f2", "f3": "f3", "f4": "f4",
+    "f5": "f5", "f6": "f6", "f7": "f7", "f8": "f8",
+    "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12",
 }
 
 

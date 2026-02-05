@@ -236,21 +236,46 @@ def run_client_gui(server_host: str, server_port: int):
         except Exception:
             pass
 
-    def on_motion(event):
-        on_mouse_event(event)
+    mouse_button_state = {"down": None}  # отслеживаем зажатую кнопку для drag (через dict для замыкания)
 
-    def on_click(event):
+    def on_motion(event):
+        if mouse_button_state["down"]:
+            # При движении с зажатой кнопкой — drag
+            on_mouse_event(event, button=mouse_button_state["down"], pressed=True)
+        else:
+            # Просто движение мыши
+            on_mouse_event(event)
+
+    def on_button_press(event):
         btn = "left"
         if event.num == 3:
             btn = "right"
         elif event.num == 2:
             btn = "middle"
+        mouse_button_state["down"] = btn
         on_mouse_event(event, button=btn, pressed=True)
-        root.after(100, lambda: on_mouse_event(event, button=btn, pressed=False))
+        focus_for_keys()
+
+    def on_button_release(event):
+        btn = "left"
+        if event.num == 3:
+            btn = "right"
+        elif event.num == 2:
+            btn = "middle"
+        mouse_button_state["down"] = None
+        on_mouse_event(event, button=btn, pressed=False)
 
     def on_scroll(event):
         rx, ry = to_remote_xy(event.x, event.y)
-        delta = -1 if event.delta > 0 else 1
+        # Windows/Mac: event.delta; Linux: event.num == 4 (вверх) или 5 (вниз)
+        if hasattr(event, "delta") and event.delta:
+            delta = -3 if event.delta > 0 else 3
+        elif event.num == 4:
+            delta = 3  # вверх
+        elif event.num == 5:
+            delta = -3  # вниз
+        else:
+            delta = 0
         try:
             send_json_sync(sock, {"type": MSG_MOUSE, "x": rx, "y": ry, "scroll": True, "dx": 0, "dy": delta})
         except Exception:
@@ -262,24 +287,51 @@ def run_client_gui(server_host: str, server_port: int):
         except Exception:
             pass
 
+    # Маппинг Tk keysym -> наш формат
+    _TK_KEY_MAP = {
+        "BackSpace": "backspace",
+        "Return": "return",
+        "Tab": "tab",
+        "Escape": "escape",
+        "Space": "space",
+        "Delete": "delete",
+        "Home": "home",
+        "End": "end",
+        "Insert": "insert",
+        "Prior": "prior",  # Page Up
+        "Next": "next",    # Page Down
+        "Up": "up",
+        "Down": "down",
+        "Left": "left",
+        "Right": "right",
+        "Alt_L": "alt_l",
+        "Alt_R": "alt_r",
+        "Control_L": "ctrl_l",
+        "Control_R": "ctrl_r",
+        "Shift_L": "shift_l",
+        "Shift_R": "shift_r",
+        "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4",
+        "F5": "f5", "F6": "f6", "F7": "f7", "F8": "f8",
+        "F9": "f9", "F10": "f10", "F11": "f11", "F12": "f12",
+    }
+
     def on_key_press(event):
-        # Для набора текста: event.char — символ с учётом раскладки и Shift (например "ф", "@")
         char = event.char
-        if char and len(char) == 1:
+        if char and len(char) == 1 and ord(char) >= 32:  # печатный символ
             k = char
         else:
-            key = event.keysym
-            k = key if len(key) == 1 else "Key.%s" % key.lower()
+            keysym = event.keysym
+            k = _TK_KEY_MAP.get(keysym, keysym.lower() if len(keysym) == 1 else "Key.%s" % keysym.lower())
         send_key(k, True)
         return "break"
 
     def on_key_release(event):
         char = event.char
-        if char and len(char) == 1:
+        if char and len(char) == 1 and ord(char) >= 32:
             k = char
         else:
-            key = event.keysym
-            k = key if len(key) == 1 else "Key.%s" % key.lower()
+            keysym = event.keysym
+            k = _TK_KEY_MAP.get(keysym, keysym.lower() if len(keysym) == 1 else "Key.%s" % keysym.lower())
         send_key(k, False)
         return "break"
 
@@ -288,10 +340,15 @@ def run_client_gui(server_host: str, server_port: int):
 
     canvas.bind("<Motion>", on_motion)
     canvas.bind("<Enter>", focus_for_keys)
-    canvas.bind("<Button-1>", lambda e: (on_click(e), focus_for_keys()))
-    canvas.bind("<Button-2>", lambda e: (on_click(e), focus_for_keys()))
-    canvas.bind("<Button-3>", lambda e: (on_click(e), focus_for_keys()))
+    canvas.bind("<Button-1>", on_button_press)
+    canvas.bind("<ButtonRelease-1>", on_button_release)
+    canvas.bind("<Button-2>", on_button_press)
+    canvas.bind("<ButtonRelease-2>", on_button_release)
+    canvas.bind("<Button-3>", on_button_press)
+    canvas.bind("<ButtonRelease-3>", on_button_release)
     canvas.bind("<MouseWheel>", on_scroll)
+    canvas.bind("<Button-4>", on_scroll)  # Linux scroll up
+    canvas.bind("<Button-5>", on_scroll)  # Linux scroll down
     canvas.bind("<FocusIn>", focus_for_keys)
     root.bind("<KeyPress>", on_key_press)
     root.bind("<KeyRelease>", on_key_release)

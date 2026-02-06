@@ -389,7 +389,7 @@ class MotorController:
                             
                             delta = target_angle - current_angle
                             
-                            if abs(delta) > 0.0001:
+                            if abs(delta) > 0.01:
                                 if velocity > 0:
                                     max_delta = velocity * self.control_dt
                                     
@@ -401,7 +401,7 @@ class MotorController:
                                         dq = velocity * np.sign(delta)
                                 else:
                                     new_angle = target_angle
-                                    dq = delta / self.control_dt if abs(delta) > 0.0001 else 0.0
+                                    dq = delta / self.control_dt if abs(delta) > 0.01 else 0.0
                             else:
                                 new_angle = target_angle
                                 dq = 0.0
@@ -484,7 +484,7 @@ class MotorController:
                         angle = max(min_limit, min(max_limit, angle))
                     
                     if interpolation > 0:
-                        effective_velocity = max(0.0, min(1000.0, interpolation))
+                        effective_velocity = max(0.0, min(100.0, interpolation))
                     else:
                         effective_velocity = 0.0
                     

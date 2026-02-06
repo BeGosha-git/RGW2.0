@@ -125,3 +125,21 @@ export const settingsApi = {
   get: () => apiGet('/api/settings'),
   update: (settings) => apiPost('/api/settings', settings)
 }
+
+/**
+ * API функции для управления моторами Unitree
+ */
+export const unitreeMotorApi = {
+  setAngle: (motorIndex, angle, velocity = 0, interpolation = 0) => 
+    apiPost('/api/unitree_motor/set_angle', { motor_index: motorIndex, angle, velocity, interpolation }),
+  setAngles: (angles, velocity = 0, interpolation = 0) => {
+    const roundedAngles = {}
+    for (const [key, value] of Object.entries(angles)) {
+      roundedAngles[key] = parseFloat(value.toFixed(4))
+    }
+    return apiPost('/api/unitree_motor/set_angles', { angles: roundedAngles, velocity, interpolation })
+  },
+  getAngles: () => apiGet('/api/unitree_motor/get_angles'),
+  setFromNeuralNetwork: (data) => 
+    apiPost('/api/unitree_motor/neural_network', data)
+}

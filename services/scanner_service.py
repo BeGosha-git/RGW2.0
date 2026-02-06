@@ -29,24 +29,38 @@ def get_service_name() -> str:
 def run_service_loop(scan_interval: int = 20):
     """
     Основной цикл работы сервиса сканирования сети.
+    КРИТИЧНО: Сервис не должен падать, все ошибки обрабатываются.
     
     Args:
         scan_interval: Интервал между сканированиями в секундах
     """
     service_name = get_service_name()
-    manager = services_manager.get_services_manager()
+    
+    try:
+        manager = services_manager.get_services_manager()
+    except Exception as e:
+        print(f"Scanner service: Error getting services_manager: {e}, retrying...", flush=True)
+        time.sleep(5)
+        try:
+            manager = services_manager.get_services_manager()
+        except Exception:
+            print(f"Scanner service: Failed to get services_manager, exiting", flush=True)
+            return
     
     print(f"Scanner service started", flush=True)
     print(f"Scan interval: {scan_interval} seconds", flush=True)
     
     # Регистрируем начальные данные в status.py
-    status.register_service_data(service_name, {
-        "status": "running",
-        "started_at": time.time(),
-        "scan_interval": scan_interval,
-        "scans_count": 0,
-        "last_scan_time": None
-    })
+    try:
+        status.register_service_data(service_name, {
+            "status": "running",
+            "started_at": time.time(),
+            "scan_interval": scan_interval,
+            "scans_count": 0,
+            "last_scan_time": None
+        })
+    except Exception as e:
+        print(f"Scanner service: Error registering initial status: {e}", flush=True)
     
     scans_count = 0
     
@@ -55,13 +69,26 @@ def run_service_loop(scan_interval: int = 20):
         print(f"Performing initial network scan...", flush=True)
         scanner.scan_network()
         scans_count += 1
-        status.register_service_data(service_name, {
-            "status": "running",
-            "started_at": status.get_service_data(service_name).get("started_at", time.time()) if status.get_service_data(service_name) else time.time(),
-            "scan_interval": scan_interval,
-            "scans_count": scans_count,
-            "last_scan_time": time.time()
-        })
+        try:
+            status.register_service_data(service_name, {
+                "status": "running",
+                "started_at": time.time(),
+                "scan_interval": scan_interval,
+                "scans_count": scans_count,
+                "last_scan_time": time.time()
+            })
+        except Exception:
+            pass
+    except RuntimeError as e:
+        # Обрабатываем ошибку завершения интерпретатора
+        if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
+            print(f"Scanner service stopping: interpreter is shutting down", flush=True)
+            try:
+                status.unregister_service_data(service_name)
+            except Exception:
+                pass
+            return
+        print(f"Error during initial scan: {str(e)}", flush=True)
     except Exception as e:
         print(f"Error during initial scan: {str(e)}", flush=True)
         import traceback
@@ -71,12 +98,19 @@ def run_service_loop(scan_interval: int = 20):
     while True:
         try:
             # Проверяем статус сервиса через services_manager
-            service_info = manager.get_service(service_name)
-            service_status = service_info.get("status", "ON")
+            try:
+                service_info = manager.get_service(service_name)
+                service_status = service_info.get("status", "ON")
+            except Exception as e:
+                print(f"Scanner service: Error getting service status: {e}, continuing...", flush=True)
+                service_status = "ON"  # По умолчанию продолжаем работу
             
             if service_status == "OFF":
                 print(f"Scanner service is OFF. Stopping...", flush=True)
-                status.unregister_service_data(service_name)
+                try:
+                    status.unregister_service_data(service_name)
+                except Exception:
+                    pass
                 break
             elif service_status == "SLEEP":
                 # В режиме SLEEP сервис не выполняет работу, но остается активным
@@ -87,37 +121,91 @@ def run_service_loop(scan_interval: int = 20):
             time.sleep(scan_interval)
             
             # Выполняем сканирование
-            print(f"Performing network scan...", flush=True)
-            scanner.scan_network()
-            scans_count += 1
-            
-            # Обновляем данные в status.py
-            status.register_service_data(service_name, {
-                "status": "running",
-                "started_at": status.get_service_data(service_name).get("started_at", time.time()) if status.get_service_data(service_name) else time.time(),
-                "scan_interval": scan_interval,
-                "scans_count": scans_count,
-                "last_scan_time": time.time()
-            })
+            try:
+                print(f"Performing network scan...", flush=True)
+                scanner.scan_network()
+                scans_count += 1
+                
+                # Обновляем данные в status.py
+                try:
+                    status.register_service_data(service_name, {
+                        "status": "running",
+                        "started_at": time.time(),
+                        "scan_interval": scan_interval,
+                        "scans_count": scans_count,
+                        "last_scan_time": time.time()
+                    })
+                except Exception as e:
+                    print(f"Scanner service: Error updating status: {e}", flush=True)
+            except RuntimeError as e:
+                # Обрабатываем ошибку завершения интерпретатора
+                if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
+                    print(f"Scanner service stopping: interpreter is shutting down", flush=True)
+                    try:
+                        status.unregister_service_data(service_name)
+                    except Exception:
+                        pass
+                    break
+                # Другие RuntimeError - логируем и продолжаем
+                print(f"Error in scanner.scan_network(): {str(e)}", flush=True)
+                time.sleep(5)
+            except Exception as e:
+                print(f"Error during network scan: {str(e)}", flush=True)
+                import traceback
+                traceback.print_exc()
+                
+                # Обновляем данные об ошибке
+                try:
+                    status.register_service_data(service_name, {
+                        "status": "error",
+                        "error": str(e),
+                        "last_error_time": time.time(),
+                        "scans_count": scans_count
+                    })
+                except Exception:
+                    pass
+                
+                # Продолжаем работу даже при ошибке
+                time.sleep(5)
             
         except KeyboardInterrupt:
             print(f"\nScanner service stopped by user", flush=True)
-            status.unregister_service_data(service_name)
+            try:
+                status.unregister_service_data(service_name)
+            except Exception:
+                pass
             break
+        except RuntimeError as e:
+            # Обрабатываем ошибку завершения интерпретатора
+            if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
+                print(f"Scanner service stopping: interpreter is shutting down", flush=True)
+                try:
+                    status.unregister_service_data(service_name)
+                except Exception:
+                    pass
+                break
+            # Другие RuntimeError - логируем и продолжаем
+            print(f"RuntimeError in scanner service: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+            time.sleep(5)
         except Exception as e:
-            print(f"Error in scanner service: {str(e)}", flush=True)
+            # КРИТИЧНО: Любая другая ошибка - логируем, но НЕ ПАДАЕМ
+            print(f"CRITICAL ERROR in scanner service: {str(e)}", flush=True)
             import traceback
             traceback.print_exc()
             
-            # Обновляем данные об ошибке
-            status.register_service_data(service_name, {
-                "status": "error",
-                "error": str(e),
-                "last_error_time": time.time(),
-                "scans_count": scans_count
-            })
+            try:
+                status.register_service_data(service_name, {
+                    "status": "error",
+                    "error": str(e),
+                    "last_error_time": time.time(),
+                    "scans_count": scans_count
+                })
+            except Exception:
+                pass
             
-            # Продолжаем работу даже при ошибке
+            # Продолжаем работу даже при критической ошибке
             time.sleep(5)
 
 

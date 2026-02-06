@@ -6,32 +6,44 @@ import os
 import sys
 from pathlib import Path
 
-# Добавляем корневую директорию в путь для импорта модулей
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+try:
+    import flask
+except ImportError:
+    import sys
+    print("[WEB] ERROR: Flask is not installed", flush=True)
+    print(f"[WEB] Please install: {sys.executable} -m pip install -r requirements.txt", flush=True)
+    sys.exit(1)
 
 import http.server
 import socketserver
 import json
+import threading
+import time
 from flask import Flask, request, jsonify
 import api.files as files_api
 import api.robot as robot_api
 import api.network_api as network_api_module
 import services_manager
 
-# ============================================================================
-# ИНИЦИАЛИЗАЦИЯ FLASK ПРИЛОЖЕНИЯ
-# ============================================================================
+UNITREE_MOTOR_AVAILABLE = False
+UNITREE_MOTOR_ERROR = None
+UNITREE_MOTOR_ERROR_TRACEBACK = None
+unitree_motor = None
+
+try:
+    import api.unitree_motor as unitree_motor_api
+    unitree_motor = unitree_motor_api.UnitreeMotorAPI()
+    UNITREE_MOTOR_AVAILABLE = True
+except Exception as e:
+    import traceback
+    UNITREE_MOTOR_ERROR = str(e)
+    UNITREE_MOTOR_ERROR_TRACEBACK = traceback.format_exc()
 
 flask_app = Flask(__name__)
-
-# Инициализация API модулей
 files = files_api.FilesAPI()
 robot = robot_api.RobotAPI()
 network_api = network_api_module.NetworkAPI()
-
-# ============================================================================
-# CORS НАСТРОЙКИ
-# ============================================================================
 
 @flask_app.after_request
 def after_request(response):
@@ -40,10 +52,6 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
-
-# ============================================================================
-# РЕГИСТРАЦИЯ API ENDPOINTS
-# ============================================================================
 
 def register_status_endpoints():
     """Регистрирует endpoints для статуса системы."""
@@ -258,55 +266,30 @@ def register_robot_endpoints():
         if not target_ip:
             return jsonify({"success": False, "message": "target_ip required"}), 400
         
-        # Отправляем запрос на обновление settings.json на удаленном роботе
         try:
-            # Формируем данные для отправки - всегда отправляем RobotGroup, даже если пустая строка
             settings_data = {"RobotGroup": robot_group}
+            result = network_api.send_data(target_ip, '/api/settings', settings_data)
             
-            print(f"[update_group] Sending to {target_ip}: {settings_data}")
-            result = network_api.send_data(
-                target_ip,
-                '/api/settings',
-                settings_data
-            )
-            
-            print(f"[update_group] Result from {target_ip}: {result}")
-            
-            # Проверяем структуру ответа
-            # network_api.send_data возвращает: {"success": True, "response": {...}}
-            # где response - это ответ от удаленного робота
             if result.get('success'):
                 remote_response = result.get('response')
-                if remote_response:
-                    # remote_response - это уже распарсенный JSON ответ от удаленного робота
-                    if isinstance(remote_response, dict):
-                        if remote_response.get('success'):
-                            # Успешно обновлено на удаленном роботе
-                            return jsonify({
-                                "success": True,
-                                "message": "Group updated successfully",
-                                "settings": remote_response.get('settings', {})
-                            })
-                        else:
-                            # Ошибка на удаленном роботе
-                            return jsonify({
-                                "success": False,
-                                "message": remote_response.get('message', 'Unknown error')
-                            })
+                if remote_response and isinstance(remote_response, dict):
+                    if remote_response.get('success'):
+                        return jsonify({
+                            "success": True,
+                            "message": "Group updated successfully",
+                            "settings": remote_response.get('settings', {})
+                        })
                     else:
-                        # Неожиданный формат ответа
                         return jsonify({
                             "success": False,
-                            "message": f"Unexpected response format: {type(remote_response)}"
+                            "message": remote_response.get('message', 'Unknown error')
                         })
                 else:
-                    # Нет ответа от удаленного робота
                     return jsonify({
                         "success": False,
-                        "message": "No response from remote robot"
+                        "message": f"Unexpected response format: {type(remote_response)}"
                     })
             else:
-                # Ошибка при отправке запроса
                 return jsonify(result)
         except Exception as e:
             print(f"[update_group] Error: {str(e)}")
@@ -367,7 +350,6 @@ def register_services_endpoints():
             
             manager = services_manager.get_services_manager()
             
-            # Если выключаем сервис, проверяем зависимости
             if status == 'OFF':
                 can_disable, depending_services = manager.can_disable_service(service_name)
                 if not can_disable and not disable_dependents:
@@ -378,10 +360,13 @@ def register_services_endpoints():
                         "requires_confirmation": True
                     }), 400
                 
-                # Если пользователь согласен, выключаем зависимые сервисы
                 if disable_dependents and depending_services:
-                    for dep_service in depending_services:
-                        manager.update_service_status(dep_service, 'OFF')
+                    disabled_list = manager.disable_service_with_dependencies(service_name)
+                    return jsonify({
+                        "success": True,
+                        "message": f"Service and dependencies disabled",
+                        "disabled_services": disabled_list
+                    })
             
             success = manager.update_service_status(service_name, status)
             
@@ -448,18 +433,332 @@ def register_services_endpoints():
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
+    @flask_app.route('/api/services/<service_name>/enabled', methods=['POST'])
+    def api_service_enabled(service_name):
+        """Обновляет ручной статус запуска сервиса (enabled)."""
+        try:
+            data = request.get_json() or {}
+            enabled = data.get('enabled')
+            
+            if enabled is None:
+                return jsonify({
+                    "success": False,
+                    "message": "enabled parameter required (true/false)"
+                }), 400
+            
+            if not isinstance(enabled, bool):
+                try:
+                    enabled = bool(enabled)
+                except (ValueError, TypeError):
+                    return jsonify({
+                        "success": False,
+                        "message": "Invalid enabled value. Must be boolean"
+                    }), 400
+            
+            manager = services_manager.get_services_manager()
+            success = manager.update_service_enabled(service_name, enabled)
+            
+            if success:
+                return jsonify({
+                    "success": True,
+                    "message": f"Service {'enabled' if enabled else 'disabled'} for startup"
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "message": "Failed to update enabled status"
+                }), 500
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+    
+    @flask_app.route('/api/services/<service_name>/shutdown_request', methods=['POST'])
+    def api_service_shutdown_request(service_name):
+        """Отправляет запрос на выключение сервиса (для unitree_motor_control требуется 3 запроса)."""
+        try:
+            manager = services_manager.get_services_manager()
+            service_info = manager.get_service(service_name)
+            
+            if not service_info:
+                return jsonify({
+                    "success": False,
+                    "message": f"Service {service_name} not found"
+                }), 404
+            
+            current_status = service_info.get("status", "OFF")
+            success = manager.update_service_status(service_name, "OFF")
+            
+            if success:
+                updated_info = manager.get_service(service_name)
+                updated_status = updated_info.get("status", "OFF") if updated_info else current_status
+                
+                if service_name == "unitree_motor_control":
+                    if updated_status == "ON":
+                        return jsonify({
+                            "success": True,
+                            "message": "Shutdown request sent (requires 3 consecutive requests)",
+                            "status": updated_status,
+                            "requires_more_requests": True,
+                            "service_name": service_name
+                        })
+                    else:
+                        return jsonify({
+                            "success": True,
+                            "message": "Service shutdown initiated",
+                            "status": updated_status,
+                            "requires_more_requests": False,
+                            "service_name": service_name
+                        })
+                else:
+                    return jsonify({
+                        "success": True,
+                        "message": f"Status updated to {updated_status}",
+                        "status": updated_status,
+                        "service_name": service_name
+                    })
+            else:
+                return jsonify({
+                    "success": False,
+                    "message": "Failed to update status"
+                }), 500
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
 
-# Регистрация всех endpoints
+
+def register_unitree_motor_endpoints():
+    """Регистрирует endpoints для управления моторами Unitree."""
+    
+    @flask_app.route('/api/unitree_motor/status', methods=['GET'])
+    def api_unitree_status():
+        """Получает статус сервиса моторов и информацию об ошибках."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "available": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        # Проверяем, инициализирован ли контроллер
+        try:
+            from services.unitree_motor_control.unitree_motor_control import get_controller
+            controller = get_controller()
+            if controller:
+                return jsonify({
+                    "success": True,
+                    "available": True,
+                    "controller_initialized": True,
+                    "message": "Unitree motor service is available and running"
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "available": True,
+                    "controller_initialized": False,
+                    "message": "Unitree motor service is available but controller is not initialized"
+                }), 503
+        except Exception as e:
+            import traceback
+            return jsonify({
+                "success": False,
+                "available": True,
+                "controller_initialized": False,
+                "message": f"Error checking controller status: {str(e)}",
+                "error": str(e),
+                "error_traceback": traceback.format_exc()
+            }), 503
+    
+    @flask_app.route('/api/unitree_motor/set_angle', methods=['POST'])
+    def api_unitree_set_angle():
+        """Устанавливает угол для одного мотора."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        data = request.get_json() or {}
+        motor_index = data.get('motor_index')
+        angle = data.get('angle')
+        velocity = data.get('velocity', 0.0)
+        
+        if motor_index is None or angle is None:
+            return jsonify({"success": False, "message": "motor_index and angle are required"}), 400
+        
+        try:
+            motor_index = int(motor_index)
+            angle = float(angle)
+            velocity = float(velocity)
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "message": "Invalid motor_index, angle, or velocity"}), 400
+        
+        try:
+            return jsonify(unitree_motor.set_motor_angle(motor_index, angle, velocity))
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in set_motor_angle: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error setting motor angle: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/set_angles', methods=['POST'])
+    def api_unitree_set_angles():
+        """Устанавливает углы для нескольких моторов. Поддерживает частичные обновления."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        data = request.get_json() or {}
+        angles = data.get('angles', {})
+        velocity = data.get('velocity', 0.0)
+        interpolation = data.get('interpolation', 0.0)
+        source = data.get('source', 'api')
+        
+        if not angles:
+            return jsonify({"success": False, "message": "angles dictionary is required"}), 400
+        
+        try:
+            angles_dict = {int(k): round(float(v), 4) for k, v in angles.items()}
+            velocity = float(velocity)
+            interpolation = float(interpolation)
+        except (ValueError, TypeError) as e:
+            return jsonify({"success": False, "message": f"Invalid angles, velocity or interpolation: {str(e)}"}), 400
+        
+        try:
+            return jsonify(unitree_motor.set_motor_angles(angles_dict, velocity, source, interpolation))
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in set_motor_angles: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error setting motor angles: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/get_angles', methods=['GET'])
+    def api_unitree_get_angles():
+        """Получает текущие углы всех моторов."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        try:
+            return jsonify(unitree_motor.get_motor_angles())
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in get_motor_angles: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error getting motor angles: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/neural_network', methods=['POST'])
+    def api_unitree_neural_network():
+        """Устанавливает углы моторов из данных нейронной сети."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        data = request.get_json() or {}
+        try:
+            return jsonify(unitree_motor.set_motor_angles_from_neural_network(data))
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in neural_network: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error setting motor angles from neural network: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/config', methods=['GET'])
+    def api_unitree_config_get():
+        """Получает конфигурацию контроллера."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        try:
+            return jsonify(unitree_motor.get_controller_config())
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in get_controller_config: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error getting controller config: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/config', methods=['POST'])
+    def api_unitree_config_set():
+        """Устанавливает конфигурацию контроллера."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        data = request.get_json() or {}
+        try:
+            return jsonify(unitree_motor.set_controller_config(data))
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in set_controller_config: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error setting controller config: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+
+
 register_status_endpoints()
 register_files_endpoints()
 register_directory_endpoints()
 register_network_endpoints()
 register_robot_endpoints()
 register_services_endpoints()
-
-# ============================================================================
-# HTTP REQUEST HANDLER
-# ============================================================================
+register_unitree_motor_endpoints()
 
 class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Кастомный обработчик HTTP запросов с поддержкой SPA и встроенного API."""
@@ -483,26 +782,21 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def handle_api_request(self, method='GET'):
         """Обрабатывает API запрос напрямую через Flask."""
         try:
-            # Читаем тело запроса
             body = None
             if method in ['POST', 'PUT', 'DELETE']:
                 content_length = int(self.headers.get('Content-Length', 0))
                 if content_length > 0:
                     body = self.rfile.read(content_length)
             
-            # Используем werkzeug.test.Client для обработки запроса
             from werkzeug.test import Client
             from werkzeug.wrappers import Response
             
             client = Client(self.flask_app, Response)
             
-            # Извлекаем path и query string
             path_for_request = self.path
             query_string = None
             if '?' in self.path:
                 path_for_request, query_string = self.path.split('?', 1)
-            
-            # Выполняем запрос в зависимости от метода
             if method == 'GET':
                 response = client.get(path_for_request, query_string=query_string) if query_string else client.get(path_for_request)
             elif method == 'POST':
@@ -530,25 +824,18 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 response = client.open(path_for_request, method=method, data=body if body else None)
             
-            # Отправляем ответ
             self.send_response(response.status_code)
-            
-            # Копируем заголовки
             for header, value in response.headers.items():
                 self.send_header(header, value)
-            
             self.end_headers()
             
-            # Отправляем тело ответа
             if response.data:
                 try:
                     self.wfile.write(response.data)
                 except (BrokenPipeError, ConnectionResetError, OSError):
-                    # Клиент закрыл соединение - это нормально
                     pass
                     
         except (BrokenPipeError, ConnectionResetError, OSError):
-            # Клиент закрыл соединение до получения ответа - это нормально
             pass
         except Exception as e:
             error_msg = f"API error: {str(e)}"
@@ -567,7 +854,6 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 }).encode()
                 self.wfile.write(error_response)
             except (BrokenPipeError, ConnectionResetError, OSError):
-                # Клиент уже закрыл соединение
                 pass
     
     def do_GET(self):
@@ -576,7 +862,6 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_api_request('GET')
             return
         
-        # Если файл не найден, возвращаем index.html (для SPA)
         if not os.path.exists(self.translate_path(self.path)):
             self.path = '/index.html'
         return super().do_GET()
@@ -609,12 +894,12 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
     
     def log_message(self, format, *args):
-        """Логирует запросы."""
-        if args:
-            print(f"[WEB] {args[0]}", flush=True)
-        else:
-            print(f"[WEB] {format}", flush=True)
-        sys.stdout.flush()
+        """Логирует запросы. Пропускает частые API запросы для уменьшения шума в логах."""
+        if args and args[0]:
+            log_line = args[0]
+            if '/api' in log_line:
+                return
+        return
     
     def log_error(self, format, *args):
         """Логирует ошибки."""
@@ -623,10 +908,6 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         else:
             print(f"[WEB ERROR] {format}", flush=True)
         sys.stderr.flush()
-
-# ============================================================================
-# WEB SERVER
-# ============================================================================
 
 def run_web_server(port: int = 80, build_dir: str = "build"):
     """
@@ -641,8 +922,6 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
     if not build_path.exists():
         print(f"Build directory '{build_path}' not found. Creating placeholder...")
         build_path.mkdir(parents=True, exist_ok=True)
-        
-        # Создаем простую заглушку
         index_html = build_path / "index.html"
         with open(index_html, 'w', encoding='utf-8') as f:
             f.write("""<!DOCTYPE html>
@@ -669,7 +948,94 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
             print(f"API endpoints registered: {len(flask_app.url_map._rules)} routes", flush=True)
             sys.stdout.flush()
             
-            httpd.serve_forever()
+            shutdown_requested = threading.Event()
+            web_shutdown_allowed = threading.Event()
+            
+            def check_motor_status_on_shutdown():
+                """Проверяет статус моторов при запросе на завершение."""
+                while not shutdown_requested.is_set():
+                    time.sleep(0.5)
+                
+                if web_shutdown_allowed.is_set():
+                    print("\n[WEB] Motor service shutdown completed. Shutting down web server...", flush=True)
+                    httpd.shutdown()
+                    return
+                
+                try:
+                    manager = services_manager.get_services_manager()
+                    web_dependencies = manager.get_service_dependencies("web")
+                    
+                    active_dependencies = []
+                    for dep_name in web_dependencies:
+                        dep_info = manager.get_service(dep_name)
+                        if dep_info and dep_info.get("status") == "ON":
+                            active_dependencies.append(dep_name)
+                    
+                    if active_dependencies:
+                        print(f"\n[WEB] CRITICAL: Active dependencies detected: {', '.join(active_dependencies)}. Web service will not shut down.", flush=True)
+                        print("[WEB] Please shut down dependencies first.", flush=True)
+                        shutdown_requested.clear()
+                        print("[WEB] Web service continues running...", flush=True)
+                    else:
+                        print("\n[WEB] All dependencies are inactive. Shutting down web server...", flush=True)
+                        httpd.shutdown()
+                except Exception as e:
+                    print(f"\n[WEB] Warning: Could not check dependencies status: {e}", flush=True)
+                    print("[WEB] Shutting down web server...", flush=True)
+                    httpd.shutdown()
+            
+            def monitor_dependencies_shutdown():
+                """Мониторит завершение зависимостей для завершения веб-сервера."""
+                while True:
+                    try:
+                        manager = services_manager.get_services_manager()
+                        web_dependencies = manager.get_service_dependencies("web")
+                        
+                        all_dependencies_off = True
+                        for dep_name in web_dependencies:
+                            dep_info = manager.get_service(dep_name)
+                            dep_status = dep_info.get("status", "OFF") if dep_info else "OFF"
+                            
+                            if dep_status == "ON":
+                                all_dependencies_off = False
+                                
+                                import run
+                                runner = run.ServiceRunner()
+                                
+                                dep_thread_alive = False
+                                for i, service_info in enumerate(runner.services):
+                                    if service_info.get("service_name") == dep_name:
+                                        if i < len(runner.threads):
+                                            dep_thread_alive = runner.threads[i].is_alive()
+                                        break
+                                
+                                if dep_thread_alive:
+                                    all_dependencies_off = False
+                                    break
+                        
+                        if all_dependencies_off:
+                            print("[WEB] All dependencies shutdown detected. Allowing web server shutdown...", flush=True)
+                            web_shutdown_allowed.set()
+                            if shutdown_requested.is_set():
+                                httpd.shutdown()
+                            break
+                    except Exception as e:
+                        pass
+                    time.sleep(1)
+            
+            check_thread = threading.Thread(target=check_motor_status_on_shutdown, daemon=True)
+            monitor_thread = threading.Thread(target=monitor_dependencies_shutdown, daemon=True)
+            check_thread.start()
+            monitor_thread.start()
+            
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                shutdown_requested.set()
+                check_thread.join(timeout=2.0)
+                if check_thread.is_alive():
+                    print("\n[WEB] Shutting down web server...", flush=True)
+                    httpd.shutdown()
     except OSError as e:
         if "Permission denied" in str(e) and port < 1024:
             print(f"Error: Cannot bind to port {port}. Try using a port >= 1024 or run with sudo.")
@@ -678,7 +1044,7 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
         else:
             print(f"Error starting web server: {str(e)}")
     except KeyboardInterrupt:
-        print("\nWeb server stopped")
+        print("\n[WEB] Web server stopped", flush=True)
 
 
 def run():

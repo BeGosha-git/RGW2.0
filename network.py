@@ -272,10 +272,22 @@ def find_robots_in_network(network_base: Optional[str] = None,
             pass
         return None
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        ip_addresses = [f"{network_base}.{i}" for i in range(0, 256)]
-        results = list(executor.map(check_ip, ip_addresses))
-        found_robots = [ip for ip in results if ip is not None]
-    
-    print(f"Scan complete. Found {len(found_robots)} robot(s).", flush=True)
-    return found_robots
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            ip_addresses = [f"{network_base}.{i}" for i in range(0, 256)]
+            results = list(executor.map(check_ip, ip_addresses))
+            found_robots = [ip for ip in results if ip is not None]
+        
+        print(f"Scan complete. Found {len(found_robots)} robot(s).", flush=True)
+        return found_robots
+    except RuntimeError as e:
+        # Обрабатываем ошибку "cannot schedule new futures after interpreter shutdown"
+        if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
+            print(f"Network scan interrupted: interpreter is shutting down", flush=True)
+            return []
+        raise
+    except Exception as e:
+        print(f"Error during network scan: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return []

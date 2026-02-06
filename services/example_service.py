@@ -108,7 +108,7 @@ def run_service_loop(interval: int = 10):
             })
             
             # Продолжаем работу даже при ошибке
-            time.sleep(5)
+            time.sleep(1)
 
 
 def run():

@@ -2,5 +2,5 @@
 # На этом ПК: server_host=localhost (сервер и хост на одной машине).
 # С другого ПК: укажите IP этого ПК в server_host в config на том ПК.
 # server_port=9009
-server_host=localhost
+server_host=192.168.100.1
 server_port=9009

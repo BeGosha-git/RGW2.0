@@ -102,14 +102,47 @@
 .service-actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
-.status-select-box {
+.service-status-display {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.status-badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: white;
+  min-width: 80px;
+  text-align: center;
+}
+
+.service-enabled-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.enabled-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.enabled-select-box {
   min-width: 150px;
 }
 
-.status-select-box .select-trigger {
+.enabled-select-box .select-trigger {
   padding: 0.5rem 1rem;
   font-size: 0.9rem;
 }
@@ -448,4 +481,44 @@
 
 .modal-actions .btn {
   min-width: 120px;
+}
+
+/* Кнопка выключения моторов */
+.motor-shutdown-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.motor-shutdown-btn {
+  padding: 0.5rem 1rem;
+  background: #f44336;
+  color: white;
+  border: 1px solid #d32f2f;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  min-width: 180px;
+  box-shadow: 0 2px 8px rgba(244, 67, 54, 0.3);
+}
+
+.motor-shutdown-btn:hover {
+  background: #d32f2f;
+  border-color: #b71c1c;
+  box-shadow: 0 4px 12px rgba(244, 67, 54, 0.4);
+  transform: translateY(-1px);
+}
+
+.motor-shutdown-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(244, 67, 54, 0.3);
+}
+
+.motor-shutdown-btn:disabled {
+  background: #757575;
+  border-color: #616161;
+  cursor: not-allowed;
+  opacity: 0.6;
 }

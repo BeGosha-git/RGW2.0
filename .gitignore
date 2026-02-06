@@ -4,7 +4,8 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
+# build/ - закомментировано, так как services/web/build должен быть в git
+# build/
 develop-eggs/
 dist/
 downloads/
@@ -40,8 +41,8 @@ Thumbs.db
 # Project specific
 data/
 *.log
-services/web/build/*
-!services/web/build/.gitkeep
+# Build должен быть в git для продакшена
+# services/web/build/*
 
 # Docker
 .dockerignore

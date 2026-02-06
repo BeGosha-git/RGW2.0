@@ -45,25 +45,20 @@ def scan_project_files():
     """
     files_list = []
     
-    # Сканируем все файлы в корне проекта (кроме служебных)
     exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist', 'data'}
     exclude_files = {'data/version.json', 'data/settings.json', 'data/commands.json', 'data/services.json', 'data/ips.json', '.gitignore'}
     
     services_path = "services"
     
     for root, dirs, files in os.walk('.'):
-        # Пропускаем папку services при обычном сканировании
         if root == '.' and services_path in dirs:
             dirs.remove(services_path)
         
-        # Исключаем служебные директории (включая __pycache__ в любой папке)
         dirs[:] = [d for d in dirs if d not in exclude_dirs and d != '__pycache__']
         
-        # Пропускаем файлы в __pycache__ папках
         if '__pycache__' in root:
             continue
         
-        # Пропускаем файлы внутри services/ при обычном сканировании
         if services_path in root and root != f'./{services_path}':
             continue
         
@@ -72,15 +67,12 @@ def scan_project_files():
                 continue
             
             filepath = os.path.join(root, file)
-            # Пропускаем скрытые файлы
             if filepath.startswith('./.'):
                 continue
             
-            # Пропускаем файлы внутри services/ (обработаем отдельно)
             if services_path in filepath and root != f'./{services_path}':
                 continue
             
-            # Нормализуем путь
             normalized_path = filepath.replace('\\', '/').lstrip('./')
             
             file_size = calculate_file_size(filepath)
@@ -89,28 +81,21 @@ def scan_project_files():
                 "size": file_size
             })
     
-    # Для папки services обрабатываем только первый уровень:
-    # - .py файлы в корне services/
-    # - папки первого уровня (например, services/web/)
     if os.path.exists(services_path):
-        # Обрабатываем .py файлы в корне services/
         if os.path.isdir(services_path):
             for item in os.listdir(services_path):
-                # Пропускаем __pycache__
                 if item == '__pycache__':
                     continue
                 
                 item_path = os.path.join(services_path, item)
                 normalized_item_path = item_path.replace('\\', '/')
                 
-                # Если это .py файл - добавляем его
                 if os.path.isfile(item_path) and item.endswith('.py'):
                     file_size = calculate_file_size(item_path)
                     files_list.append({
                         "path": normalized_item_path,
                         "size": file_size
                     })
-                # Если это папка первого уровня - добавляем её с общим размером
                 elif os.path.isdir(item_path):
                     dir_size = calculate_file_size(item_path)
                     files_list.append({
@@ -130,12 +115,10 @@ def check_and_update_version():
         True если версия была обновлена или не требовала обновления
     """
     try:
-        # Создаем папку data если её нет
         os.makedirs("data", exist_ok=True)
         
         version_file = "data/version.json"
         
-        # Читаем текущую версию если есть
         current_version = "1.00.01"
         current_files = []
         existing_version_type = "STABLE"
@@ -150,30 +133,23 @@ def check_and_update_version():
             except Exception as e:
                 print(f"Warning: Could not read existing version file: {str(e)}", flush=True)
         
-        # Сканируем текущие файлы
         files_list = scan_project_files()
         
-        # Сортируем списки для сравнения
         current_files_sorted = sorted(current_files, key=lambda x: x.get("path", ""))
         files_list_sorted = sorted(files_list, key=lambda x: x.get("path", ""))
         
-        # Сравниваем файлы
         files_changed = False
         
-        # Проверяем количество файлов
         if len(current_files_sorted) != len(files_list_sorted):
             files_changed = True
         else:
-            # Проверяем каждый файл
             for current_file, new_file in zip(current_files_sorted, files_list_sorted):
                 if (current_file.get("path") != new_file.get("path") or 
                     current_file.get("size") != new_file.get("size")):
                     files_changed = True
                     break
         
-        # Если файлы изменились, повышаем версию
         if files_changed:
-            # Повышаем версию (увеличиваем последнюю цифру)
             version_parts = current_version.split('.')
             if len(version_parts) >= 3:
                 try:
@@ -192,7 +168,6 @@ def check_and_update_version():
                 "files": files_list
             }
             
-            # Сохраняем обновленный version.json
             with open(version_file, 'w', encoding='utf-8') as f:
                 json.dump(version_data, f, indent=4, ensure_ascii=False)
             
@@ -567,14 +542,36 @@ def update_system():
         for file_info in files_to_update
     )
     
+    # КРИТИЧНО: Проверяем, изменился ли requirements.txt
+    requirements_changed = any(
+        file_info.get("path", "") == "requirements.txt"
+        for file_info in files_to_update
+    )
+    
+    # КРИТИЧНО: Проверяем, изменился ли main.py (может содержать изменения в логике venv)
+    main_py_changed = any(
+        file_info.get("path", "") == "main.py"
+        for file_info in files_to_update
+    )
+    
     print(f"Changed services: {changed_services if changed_services else 'none'}", flush=True)
     print(f"Has non-service changes: {has_non_service_changes}", flush=True)
+    print(f"Requirements.txt changed: {requirements_changed}", flush=True)
+    print(f"Main.py changed: {main_py_changed}", flush=True)
     
     # Обновляем файлы
     success = update_files_from_robot(source_ip, files_to_update)
     
     if success:
-        # Обновляем версию после успешного обновления
+        if requirements_changed or main_py_changed:
+            print("CRITICAL: requirements.txt or main.py changed. Venv will be recreated on next startup.", flush=True)
+            try:
+                venv_recreate_flag = Path("data/.recreate_venv")
+                venv_recreate_flag.parent.mkdir(parents=True, exist_ok=True)
+                venv_recreate_flag.touch()
+                print("Venv recreation flag created", flush=True)
+            except Exception as e:
+                print(f"Warning: Could not create venv recreation flag: {e}", flush=True)
         version_file = "data/version.json"
         if os.path.exists(version_file):
             with open(version_file, 'r', encoding='utf-8') as f:
@@ -587,16 +584,12 @@ def update_system():
         
         print("System update completed successfully!", flush=True)
         
-        # Перезапускаем сервисы или проект
         if has_non_service_changes:
-            # Если изменены файлы вне services - перезапускаем весь проект
             print("Non-service files changed. Restarting project...", flush=True)
             restart_project()
         elif has_service_changes:
-            # Если изменены только сервисы - создаем флаги для перезапуска
             print(f"Changed services detected: {', '.join(changed_services)}", flush=True)
             print("Note: Services will be automatically reloaded by run.py when files change.", flush=True)
-            # Создаем флаги для перезапуска (run.py может проверять их)
             for service_name in changed_services:
                 restart_service(service_name)
         else:

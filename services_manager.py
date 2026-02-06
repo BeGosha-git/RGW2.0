@@ -29,7 +29,7 @@ class ServicesManager:
     
     def load_services(self) -> Dict[str, Any]:
         """
-        Загружает services.json.
+        Загружает services.json и обновляет старые записи до нового формата.
         
         Returns:
             Словарь с данными о сервисах
@@ -43,7 +43,56 @@ class ServicesManager:
         try:
             with open(self.services_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                return data
+            
+            services = data.get("services", {})
+            updated = False
+            
+            for service_name, service_data in services.items():
+                defaults = self.get_service_defaults(service_name)
+                
+                if "defaults" not in service_data:
+                    service_data["defaults"] = defaults.copy()
+                    updated = True
+                else:
+                    for key, value in defaults.items():
+                        if key not in service_data["defaults"]:
+                            service_data["defaults"][key] = value
+                            updated = True
+                
+                if "parameters" not in service_data:
+                    service_data["parameters"] = {}
+                    updated = True
+                
+                if "enabled" not in service_data["parameters"]:
+                    service_data["parameters"]["enabled"] = defaults.get("enabled", True)
+                    updated = True
+                
+                if "enabled" not in service_data["defaults"]:
+                    service_data["defaults"]["enabled"] = defaults.get("enabled", True)
+                    updated = True
+                
+                enabled = service_data["parameters"].get("enabled", defaults.get("enabled", True))
+                
+                if "status" not in service_data:
+                    expected_status = "ON" if enabled else "OFF"
+                    service_data["status"] = expected_status
+                    updated = True
+                
+                if "created_at" not in service_data:
+                    service_data["created_at"] = datetime.now().isoformat()
+                    updated = True
+                
+                for key, value in defaults.items():
+                    if key not in ["status", "enabled"] and key not in service_data["parameters"]:
+                        service_data["parameters"][key] = value
+                        updated = True
+            
+            if updated:
+                data["services"] = services
+                self.save_services(data)
+                print(f"[ServicesManager] Updated services.json to new format", flush=True)
+            
+            return data
         except Exception as e:
             print(f"Error loading services.json: {str(e)}")
             return {
@@ -75,9 +124,12 @@ class ServicesManager:
         Returns:
             Дефолтные настройки
         """
+        import platform
+        
         defaults = {
             "scanner_service": {
                 "status": "ON",
+                "enabled": True,
                 "scan_interval": 20,
                 "network_range": "0-255",
                 "port": 80,
@@ -85,32 +137,47 @@ class ServicesManager:
             },
             "web": {
                 "status": "ON",
+                "enabled": True,
                 "port": 80,
                 "api_port": 5000,
                 "build_path": "services/web/build",
-                "dependencies": []
+                "dependencies": ["unitree_motor_control"]
             },
             "docker_service": {
                 "status": "SLEEP",
+                "enabled": platform.system() == "Windows",
                 "check_windows": True,
                 "prevent_restart": True,
                 "dependencies": []
             },
             "remote_desktop": {
                 "status": "ON",
+                "enabled": True,
                 "server_host": "localhost",
                 "server_port": 9009,
                 "pc_name": "",
                 "wake_password": "1055",
                 "dependencies": []
+            },
+            "unitree_motor_control": {
+                "status": "ON",
+                "enabled": True,
+                "id": 1,
+                "network": "lo",
+                "dependencies": []
             }
         }
         
-        return defaults.get(service_name, {
+        defaults_result = defaults.get(service_name, {
             "status": "ON",
             "enabled": True,
             "dependencies": []
         })
+        
+        if service_name == "api":
+            defaults_result["dependencies"] = ["web"]
+        
+        return defaults_result
     
     def get_service(self, service_name: str) -> Dict[str, Any]:
         """
@@ -128,9 +195,16 @@ class ServicesManager:
         if service_name not in services:
             # Создаем дефолтные настройки
             defaults = self.get_service_defaults(service_name)
+            enabled = defaults.get("enabled", True)
+            status = "ON" if enabled else "OFF"
+            
+            parameters = defaults.get("parameters", defaults)
+            if "enabled" not in parameters:
+                parameters["enabled"] = enabled
+            
             services[service_name] = {
-                "status": defaults.get("status", "ON"),
-                "parameters": defaults.get("parameters", defaults),
+                "status": status,
+                "parameters": parameters,
                 "defaults": defaults,
                 "created_at": datetime.now().isoformat()
             }
@@ -141,7 +215,8 @@ class ServicesManager:
     
     def update_service_status(self, service_name: str, status: str) -> bool:
         """
-        Обновляет статус сервиса.
+        Обновляет программный статус сервиса (ON/OFF/SLEEP).
+        Используется программно для управления состоянием работы сервиса.
         
         Args:
             service_name: Имя сервиса
@@ -163,6 +238,40 @@ class ServicesManager:
         
         services[service_name]["status"] = status
         services[service_name]["last_status_change"] = datetime.now().isoformat()
+        
+        data["services"] = services
+        self.save_services(data)
+        return True
+    
+    def update_service_enabled(self, service_name: str, enabled: bool) -> bool:
+        """
+        Обновляет ручной статус запуска сервиса (enabled).
+        Используется для ручного управления запуском сервиса через веб-интерфейс.
+        
+        Args:
+            service_name: Имя сервиса
+            enabled: Включен ли сервис для запуска (True/False)
+            
+        Returns:
+            True если успешно
+        """
+        data = self.load_services()
+        services = data.get("services", {})
+        
+        if service_name not in services:
+            self.get_service(service_name)  # Создаем если нет
+            data = self.load_services()
+            services = data.get("services", {})
+        
+        if "parameters" not in services[service_name]:
+            services[service_name]["parameters"] = {}
+        
+        services[service_name]["parameters"]["enabled"] = bool(enabled)
+        services[service_name]["last_enabled_change"] = datetime.now().isoformat()
+        
+        expected_status = "ON" if enabled else "OFF"
+        if services[service_name].get("status") != expected_status:
+            services[service_name]["status"] = expected_status
         
         data["services"] = services
         self.save_services(data)
@@ -325,9 +434,33 @@ class ServicesManager:
                     
                     # Проверяем main.py
                     if main_file.exists():
-                        # Проверяем, импортирует ли main.py services_manager
+                        # Для main.py проверяем, импортирует ли он services_manager напрямую
                         if self._file_imports_services_manager(main_file):
                             services.append(item.name)
+                        else:
+                            # Если main.py не импортирует напрямую, проверяем импортируемый модуль
+                            # Например, main.py может импортировать unitree_motor_control, который импортирует services_manager
+                            try:
+                                with open(main_file, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                # Ищем импорты из текущей директории
+                                tree = ast.parse(content, filename=str(main_file))
+                                for node in ast.walk(tree):
+                                    if isinstance(node, ast.ImportFrom):
+                                        if node.module:
+                                            module_parts = node.module.split('.')
+                                            # Проверяем импорты вида: services.unitree_motor_control.unitree_motor_control
+                                            if (len(module_parts) >= 2 and 
+                                                module_parts[0] == 'services' and 
+                                                module_parts[1] == item.name):
+                                                # Берем последнюю часть как имя модуля
+                                                imported_module = module_parts[-1]
+                                                module_file = item / f"{imported_module}.py"
+                                                if module_file.exists() and self._file_imports_services_manager(module_file):
+                                                    services.append(item.name)
+                                                    break
+                            except Exception:
+                                pass
                     # Проверяем файл с именем папки (например, web/web.py)
                     elif service_file.exists():
                         # Проверяем, импортирует ли файл services_manager
@@ -355,14 +488,22 @@ class ServicesManager:
         for service_name in discovered:
             if service_name not in services:
                 defaults = self.get_service_defaults(service_name)
+                enabled = defaults.get("enabled", True)
+                status = "ON" if enabled else "OFF"
+                
                 services[service_name] = {
-                    "status": defaults.get("status", "ON"),
+                    "status": status,
                     "parameters": defaults.get("parameters", defaults),
                     "defaults": defaults,
                     "created_at": datetime.now().isoformat()
                 }
+                
+                if "parameters" not in services[service_name]:
+                    services[service_name]["parameters"] = {}
+                services[service_name]["parameters"]["enabled"] = enabled
+                
                 new_services_count += 1
-                print(f"[ServicesManager] Added new service: {service_name}", flush=True)
+                print(f"[ServicesManager] Added new service: {service_name} (enabled={enabled}, status={status})", flush=True)
         
         # Удаляем несуществующие сервисы (кроме системных)
         services_to_remove = []
@@ -387,17 +528,20 @@ class ServicesManager:
     
     def is_service_enabled(self, service_name: str) -> bool:
         """
-        Проверяет, включен ли сервис.
+        Проверяет, должен ли сервис быть запущен (ручное управление через enabled).
         
         Args:
             service_name: Имя сервиса
             
         Returns:
-            True если сервис включен
+            True если сервис включен для запуска (enabled=True)
         """
         service = self.get_service(service_name)
-        status = service.get("status", "ON")
-        return status == "ON"
+        defaults = service.get("defaults", {})
+        parameters = service.get("parameters", {})
+        
+        enabled = parameters.get("enabled", defaults.get("enabled", True))
+        return bool(enabled)
     
     def get_service_parameters(self, service_name: str) -> Dict[str, Any]:
         """
@@ -474,7 +618,40 @@ class ServicesManager:
             Кортеж (можно_ли_выключить, список_зависимых_сервисов)
         """
         depending_services = self.get_services_depending_on(service_name)
-        return (len(depending_services) == 0, depending_services)
+        active_depending = [dep for dep in depending_services if self.get_service(dep).get("status") == "ON"]
+        return (len(active_depending) == 0, active_depending)
+    
+    def disable_service_with_dependencies(self, service_name: str, visited: set = None) -> List[str]:
+        """
+        Выключает сервис и все зависящие от него сервисы каскадно.
+        
+        Args:
+            service_name: Имя сервиса для выключения
+            visited: Множество уже обработанных сервисов (для предотвращения циклов)
+            
+        Returns:
+            Список выключенных сервисов в порядке выключения
+        """
+        if visited is None:
+            visited = set()
+        
+        if service_name in visited:
+            return []
+        
+        visited.add(service_name)
+        disabled_services = []
+        depending_services = self.get_services_depending_on(service_name)
+        
+        for dep_service in depending_services:
+            dep_status = self.get_service(dep_service).get("status", "OFF")
+            if dep_status == "ON":
+                disabled_services.extend(self.disable_service_with_dependencies(dep_service, visited))
+        
+        if self.get_service(service_name).get("status", "OFF") == "ON":
+            self.update_service_status(service_name, "OFF")
+            disabled_services.append(service_name)
+        
+        return disabled_services
     
     def analyze_service_dependencies(self, filepath: str) -> List[str]:
         """

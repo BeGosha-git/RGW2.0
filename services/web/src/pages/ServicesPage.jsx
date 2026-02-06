@@ -13,13 +13,14 @@ function ServicesPage() {
   const [expandedService, setExpandedService] = useState(null)
   const [editingParam, setEditingParam] = useState(null)
   const [serviceDetails, setServiceDetails] = useState({}) // { serviceName: { dependencies, depending_services } }
-  const [confirmDialog, setConfirmDialog] = useState(null) // { serviceName, dependingServices, newStatus }
+  const [motorShutdownCount, setMotorShutdownCount] = useState(0) // Счетчик запросов на выключение моторов (0-3)
 
   useEffect(() => {
     fetchServices()
     const interval = setInterval(fetchServices, 10000) // Обновление каждые 10 секунд
     return () => clearInterval(interval)
   }, [])
+
 
   const fetchServices = async () => {
     try {
@@ -68,34 +69,24 @@ function ServicesPage() {
     }
   }
 
-  const updateServiceStatus = async (serviceName, newStatus, disableDependents = false) => {
+  const updateServiceEnabled = async (serviceName, enabled) => {
     try {
-      const response = await fetch(`/api/services/${serviceName}/status`, {
+      const response = await fetch(`/api/services/${serviceName}/enabled`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus, disable_dependents: disableDependents })
+        body: JSON.stringify({ enabled })
       })
       const result = await response.json()
       if (result.success) {
         fetchServices()
-        setConfirmDialog(null)
       } else {
-        // Если требуется подтверждение из-за зависимостей
-        if (result.requires_confirmation && result.depending_services) {
-          setConfirmDialog({
-            serviceName,
-            dependingServices: result.depending_services,
-            newStatus
-          })
-        } else {
-          setError(result.message || 'Ошибка обновления статуса')
-          if (errorTimeoutRef.current) {
-            clearTimeout(errorTimeoutRef.current)
-          }
-          errorTimeoutRef.current = setTimeout(() => {
-            setError(null)
-          }, 10000)
+        setError(result.message || 'Ошибка обновления enabled')
+        if (errorTimeoutRef.current) {
+          clearTimeout(errorTimeoutRef.current)
         }
+        errorTimeoutRef.current = setTimeout(() => {
+          setError(null)
+        }, 10000)
       }
     } catch (err) {
       setError(`Ошибка: ${err.message}`)
@@ -108,20 +99,44 @@ function ServicesPage() {
     }
   }
 
-  const handleStatusChange = (serviceName, newStatus) => {
-    const details = serviceDetails[serviceName]
-    const dependingServices = details?.depending_services || []
-    
-    // Если выключаем и есть зависимости - показываем диалог
-    if (newStatus === 'OFF' && dependingServices.length > 0) {
-      setConfirmDialog({
-        serviceName,
-        dependingServices,
-        newStatus
+  const handleMotorShutdownRequest = async (serviceName) => {
+    try {
+      const response = await fetch(`/api/services/${serviceName}/shutdown_request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
       })
-    } else {
-      // Иначе сразу обновляем
-      updateServiceStatus(serviceName, newStatus)
+      const result = await response.json()
+      
+      if (result.success) {
+        if (result.requires_more_requests) {
+          // Требуется больше запросов
+          setMotorShutdownCount(prev => {
+            const newCount = Math.min(prev + 1, 3)
+            return newCount
+          })
+          // Обновляем список сервисов
+          fetchServices()
+        } else {
+          // Сервис выключен, но счетчик не сбрасываем - кнопка остается видимой
+          fetchServices()
+        }
+      } else {
+        setError(result.message || 'Ошибка отправки запроса на выключение')
+        if (errorTimeoutRef.current) {
+          clearTimeout(errorTimeoutRef.current)
+        }
+        errorTimeoutRef.current = setTimeout(() => {
+          setError(null)
+        }, 10000)
+      }
+    } catch (err) {
+      setError(`Ошибка: ${err.message}`)
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current)
+      }
+      errorTimeoutRef.current = setTimeout(() => {
+        setError(null)
+      }, 10000)
     }
   }
 
@@ -206,12 +221,6 @@ function ServicesPage() {
     setConfirmDialog(null)
   }
 
-  const confirmDisableWithDependents = () => {
-    if (confirmDialog) {
-      updateServiceStatus(confirmDialog.serviceName, confirmDialog.newStatus, true)
-    }
-  }
-
   if (loading) {
     return (
       <div className="services-page">
@@ -267,15 +276,40 @@ function ServicesPage() {
                     </div>
                   </div>
                   <div className="service-actions">
-                    <SelectBox
-                      value={status === 'SLEEP' ? 'OFF' : status}
-                      onChange={(value) => handleStatusChange(serviceName, value)}
-                      options={[
-                        { value: 'ON', label: 'Включен', color: '#4caf50' },
-                        { value: 'OFF', label: 'Выключен', color: '#f44336' }
-                      ]}
-                      className="status-select-box"
-                    />
+                    <div className="service-status-display">
+                      <span className="status-label">Статус:</span>
+                      <span 
+                        className="status-badge" 
+                        style={{ backgroundColor: getStatusColor(status) }}
+                        title={getStatusLabel(status)}
+                      >
+                        {getStatusLabel(status)}
+                      </span>
+                    </div>
+                    <div className="service-enabled-control">
+                      <span className="enabled-label">Запуск:</span>
+                      <SelectBox
+                        value={parameters.enabled !== false ? 'enabled' : 'disabled'}
+                        onChange={(value) => updateServiceEnabled(serviceName, value === 'enabled')}
+                        options={[
+                          { value: 'enabled', label: 'Включен', color: '#4caf50' },
+                          { value: 'disabled', label: 'Выключен', color: '#f44336' }
+                        ]}
+                        className="enabled-select-box"
+                      />
+                    </div>
+                    {serviceName === 'unitree_motor_control' && (
+                      <div className="motor-shutdown-control">
+                        <button
+                          className="motor-shutdown-btn"
+                          onClick={() => handleMotorShutdownRequest(serviceName)}
+                          disabled={status === 'OFF'}
+                          title={`Выключение моторов (требуется 3 запроса). Статус: ${status}`}
+                        >
+                          Выключить моторы
+                        </button>
+                      </div>
+                    )}
                     <button
                       className="expand-btn"
                       onClick={() => setExpandedService(isExpanded ? null : serviceName)}
@@ -410,37 +444,6 @@ function ServicesPage() {
         )}
       </div>
 
-      {/* Диалог подтверждения выключения с зависимостями */}
-      {confirmDialog && (
-        <div className="modal-overlay" onClick={closeConfirmDialog}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Предупреждение о зависимостях</h3>
-            <p>
-              Сервис <strong>{confirmDialog.serviceName}</strong> используется следующими сервисами:
-            </p>
-            <ul className="depending-services-list">
-              {confirmDialog.dependingServices.map(service => (
-                <li key={service}>{service}</li>
-              ))}
-            </ul>
-            <p>Выключить эти сервисы тоже?</p>
-            <div className="modal-actions">
-              <Button
-                variant="secondary"
-                onClick={closeConfirmDialog}
-              >
-                Отмена
-              </Button>
-              <Button
-                variant="danger"
-                onClick={confirmDisableWithDependents}
-              >
-                Выключить все
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

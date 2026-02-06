@@ -3,3 +3,5 @@ requests>=2.28.0
 mss>=9.0.0
 Pillow>=10.0.0
 pynput>=1.7.0
+numpy>=1.20.0
+cyclonedds==0.10.2

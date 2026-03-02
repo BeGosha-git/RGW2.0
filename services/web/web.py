@@ -224,9 +224,10 @@ def register_network_endpoints():
         target_ip = data.get('target_ip')
         endpoint = data.get('endpoint')
         payload = data.get('data', {})
+        port = data.get('port', 8080)
         if not target_ip or not endpoint:
             return jsonify({"success": False, "message": "target_ip and endpoint required"}), 400
-        return jsonify(network_api.send_data(target_ip, endpoint, payload))
+        return jsonify(network_api.send_data(target_ip, endpoint, payload, port=port))
 
 
 def register_robot_endpoints():
@@ -1152,23 +1153,43 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                     print("\n[WEB] Shutting down web server...", flush=True)
                     httpd.shutdown()
     except OSError as e:
-        if "Permission denied" in str(e) and port < 1024:
-            print(f"Error: Cannot bind to port {port}. Try using a port >= 1024 or run with sudo.")
+        error_msg = str(e)
+        if "Permission denied" in error_msg and port < 1024:
+            print(f"Error: Cannot bind to port {port}. Try using a port >= 1024 or run with sudo.", flush=True)
             for try_port in [8080, 8081, 8082, 8083, 8084, 8085]:
                 if check_port_available(try_port):
-                    print(f"Port {try_port} is available. Using it instead...")
+                    print(f"Port {try_port} is available. Using it instead...", flush=True)
                     run_web_server(port=try_port, build_dir=build_dir)
                     return
-            print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.")
-        elif "Address already in use" in str(e):
+            print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.", flush=True)
+        elif "Address already in use" in error_msg:
+            print(f"Port {port} is already in use. Trying alternative ports...", flush=True)
+            found_port = None
             for try_port in [8080, 8081, 8082, 8083, 8084, 8085]:
-                if check_port_available(try_port):
-                    print(f"Port {port} is in use. Port {try_port} is available. Using it instead...")
-                    run_web_server(port=try_port, build_dir=build_dir)
-                    return
-            print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.")
+                if try_port != port and check_port_available(try_port):
+                    found_port = try_port
+                    break
+            if found_port:
+                print(f"Port {found_port} is available. Using it instead...", flush=True)
+                run_web_server(port=found_port, build_dir=build_dir)
+                return
+            else:
+                print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.", flush=True)
+                print(f"Attempting to kill process on port {port}...", flush=True)
+                try:
+                    import subprocess
+                    subprocess.run(["fuser", "-k", f"{port}/tcp"], 
+                                 capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
+                    time.sleep(1)
+                    if check_port_available(port):
+                        print(f"Port {port} is now available. Retrying...", flush=True)
+                        run_web_server(port=port, build_dir=build_dir)
+                        return
+                except Exception:
+                    pass
+                print(f"Error: Could not free port {port}. Please manually kill the process using it.", flush=True)
         else:
-            print(f"Error starting web server: {str(e)}")
+            print(f"Error starting web server: {str(e)}", flush=True)
     except KeyboardInterrupt:
         print("\n[WEB] Web server stopped", flush=True)
 

@@ -226,6 +226,7 @@ def update_version_file():
         
         # Читаем текущую версию если есть
         version_file = "data/version.json"
+        existing_data = {}
         if os.path.exists(version_file):
             with open(version_file, 'r', encoding='utf-8') as f:
                 existing_data = json.load(f)
@@ -236,6 +237,14 @@ def update_version_file():
         create_venv_archive()
         
         files_list = scan_project_files()
+        # Размер venv.tar.gz берём из version.json (уже посчитан), не с диска
+        existing_files = existing_data.get("files", [])
+        venv_size = next((f.get("size") for f in existing_files if f.get("path") == "venv.tar.gz"), None)
+        if venv_size is not None:
+            for f in files_list:
+                if f.get("path") == "venv.tar.gz":
+                    f["size"] = venv_size
+                    break
         version_data["files"] = files_list
         
         # Сохраняем обновленный version.json
@@ -666,13 +675,12 @@ def update_system():
     except Exception:
         pass
     
-    update_version_file()
-    
-    priority = get_version_priority_from_settings()
     robot_ips = get_ips_from_file()
     if not robot_ips:
+        print("No robots in network, skipping update check.", flush=True)
         return True
     
+    priority = get_version_priority_from_settings()
     version_info = find_best_version_by_priority(robot_ips, priority)
     
     if not version_info or not version_info.get("success"):
@@ -701,6 +709,9 @@ def update_system():
         print(f"Remote version {remote_version} (from {source_ip}) is not newer than current {current_version}, skipping update", flush=True)
         print(f"Checked all {len(robot_ips)} robot(s); no update needed.", flush=True)
         return True
+    
+    # Только при реальном обновлении обновляем version.json и venv-архив (иначе create_venv_archive тормозит на минуты)
+    update_version_file()
     
     files_to_update = version_data.get("files", [])
     print(f"Files to update: {len(files_to_update)}", flush=True)

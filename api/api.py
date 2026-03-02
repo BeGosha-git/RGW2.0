@@ -106,23 +106,24 @@ def list_directory():
 
 @app.route('/api/files/download', methods=['GET'])
 def download_file():
-    """Скачивает файл."""
+    """Скачивает файл. path — относительно корня проекта (RGW2.0)."""
     from flask import send_file
-    import os
     from pathlib import Path
-    
+
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
     filepath = request.args.get('path')
     if not filepath:
         return jsonify({"success": False, "message": "path parameter required"}), 400
-    
-    # Преобразуем в абсолютный путь для безопасности
+
     try:
-        abs_path = Path(filepath).resolve()
-        # Проверяем, что файл существует и это файл (не директория)
+        # Путь всегда относительно корня проекта, не от cwd
+        abs_path = (PROJECT_ROOT / filepath).resolve()
+        # Запрет path traversal: файл должен быть внутри PROJECT_ROOT
+        if not str(abs_path).startswith(str(PROJECT_ROOT.resolve())):
+            return jsonify({"success": False, "message": "Access denied"}), 403
         if abs_path.exists() and abs_path.is_file():
-            return send_file(str(abs_path), as_attachment=True)
-        else:
-            return jsonify({"success": False, "message": f"File not found: {filepath}"}), 404
+            return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
+        return jsonify({"success": False, "message": f"File not found: {filepath}"}), 404
     except Exception as e:
         return jsonify({"success": False, "message": f"Error accessing file {filepath}: {str(e)}"}), 500
 

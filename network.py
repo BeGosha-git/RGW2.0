@@ -265,7 +265,7 @@ def find_robots_in_network(network_base: Optional[str] = None,
             if not check_client.check_connection(ip_address, port):
                 return None
             
-            base_url = f"http://{ip_address}"
+            base_url = f"http://{ip_address}:{port}"
             try:
                 robot_info = check_client.get_robot_info(base_url)
                 if robot_info and isinstance(robot_info, dict) and robot_info.get("success") is not False:

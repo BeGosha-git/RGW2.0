@@ -146,24 +146,62 @@ def get_robot_status() -> Dict[str, Any]:
     # Сетевая информация
     try:
         hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
         
-        status_data["network"] = {
-            "hostname": hostname,
-            "local_ip": local_ip
-        }
-        
-        # Пытаемся получить внешний IP (может не работать без интернета)
+        # Получаем реальный локальный IP через подключение к внешнему адресу
+        local_ip = None
+        interface_ip = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
-            status_data["network"]["interface_ip"] = s.getsockname()[0]
+            interface_ip = s.getsockname()[0]
             s.close()
+            local_ip = interface_ip
         except Exception:
             pass
+        
+        # Если не удалось получить через внешнее подключение, пробуем через hostname
+        if not local_ip:
+            try:
+                local_ip = socket.gethostbyname(hostname)
+                # Проверяем, что это не localhost
+                if local_ip in ["127.0.0.1", "127.0.1.1", "::1"]:
+                    local_ip = None
+            except Exception:
+                pass
+        
+        # Если все еще нет IP, пробуем через сетевые интерфейсы (опционально)
+        if not local_ip:
+            try:
+                import netifaces
+                for interface in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        for addr_info in addrs[netifaces.AF_INET]:
+                            ip = addr_info.get('addr')
+                            if ip and not ip.startswith('127.'):
+                                local_ip = ip
+                                break
+                    if local_ip:
+                        break
+            except ImportError:
+                # netifaces не установлен - это нормально
+                pass
+            except Exception:
+                pass
+        
+        status_data["network"] = {
+            "hostname": hostname,
+            "local_ip": local_ip or "UNKNOWN",
+            "interface_ip": interface_ip or local_ip or "UNKNOWN"
+        }
             
     except Exception as e:
         status_data["network"]["error"] = str(e)
+        status_data["network"] = {
+            "hostname": socket.gethostname() if 'socket' in dir() else "UNKNOWN",
+            "local_ip": "UNKNOWN",
+            "interface_ip": "UNKNOWN"
+        }
     
     return status_data
 

@@ -262,7 +262,7 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
     """
     try:
         client = network.NetworkClient()
-        url = f"http://{source_ip}/api/files/download?path={filepath}"
+        url = f"http://{source_ip}:8080/api/files/download?path={filepath}"
         
         # Создаем директорию если нужно
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -290,7 +290,7 @@ def download_venv_from_robot(source_ip: str) -> bool:
         venv_archive = "venv.tar.gz"
         
         client = network.NetworkClient()
-        url = f"http://{source_ip}/api/files/download?path={venv_archive}"
+        url = f"http://{source_ip}:8080/api/files/download?path={venv_archive}"
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.tar.gz') as tmp_file:
             tmp_path = tmp_file.name
@@ -333,7 +333,7 @@ def check_venv_exists_on_robot(source_ip: str) -> bool:
     """
     try:
         import requests
-        url = f"http://{source_ip}/api/files/download?path=venv.tar.gz"
+        url = f"http://{source_ip}:8080/api/files/download?path=venv.tar.gz"
         response = requests.head(url, timeout=5)
         return response.status_code == 200
     except Exception:
@@ -440,7 +440,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     
     for ip in robot_ips:
         try:
-            base_url = f"http://{ip}"
+            base_url = f"http://{ip}:8080"
             robot_info = network_api.client.get_robot_info(base_url)
             
             if robot_info and robot_info.get("success"):
@@ -463,7 +463,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
             "success": True,
             "version": best_version_info,
             "source_ip": best_source_ip,
-            "source_url": f"http://{best_source_ip}"
+            "source_url": f"http://{best_source_ip}:8080"
         }
     else:
         return None

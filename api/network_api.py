@@ -13,12 +13,13 @@ class NetworkAPI:
         # Используем таймаут 3 секунды для быстрых проверок статуса и health
         self.client = network.NetworkClient(timeout=3)
     
-    def get_actual_version(self, robot_ips: List[str] = None) -> Dict[str, Any]:
+    def get_actual_version(self, robot_ips: List[str] = None, port: int = 8080) -> Dict[str, Any]:
         """
         Получает самую актуальную версию от других роботов.
         
         Args:
             robot_ips: Список IP адресов роботов для проверки (если None, ищет автоматически)
+            port: Порт для подключения (по умолчанию 8080)
             
         Returns:
             Информация о самой актуальной версии и IP откуда её получить
@@ -26,7 +27,7 @@ class NetworkAPI:
         try:
             if robot_ips is None:
                 # Автоматический поиск роботов в сети
-                robot_ips = network.find_robots_in_network()
+                robot_ips = network.find_robots_in_network(port=port)
             
             latest_version = None
             latest_version_info = None
@@ -34,7 +35,7 @@ class NetworkAPI:
             
             for ip in robot_ips:
                 try:
-                    base_url = f"http://{ip}"
+                    base_url = f"http://{ip}:8080"
                     robot_info = self.client.get_robot_info(base_url)
                     
                     if robot_info and robot_info.get("success"):
@@ -55,7 +56,7 @@ class NetworkAPI:
                     "success": True,
                     "version": latest_version_info,
                     "source_ip": source_ip,
-                    "source_url": f"http://{source_ip}"
+                    "source_url": f"http://{source_ip}:8080"
                 }
             else:
                 return {
@@ -96,7 +97,7 @@ class NetworkAPI:
         except Exception:
             return 0
     
-    def send_data(self, target_ip: str, endpoint: str, data: Dict) -> Dict[str, Any]:
+    def send_data(self, target_ip: str, endpoint: str, data: Dict, port: int = 8080) -> Dict[str, Any]:
         """
         Отправляет данные другому роботу.
         
@@ -104,12 +105,13 @@ class NetworkAPI:
             target_ip: IP адрес целевого робота
             endpoint: Конечная точка API (например, '/status' или '/health')
             data: Данные для отправки
-            
+            port: Порт для подключения (по умолчанию 8080)
+        
         Returns:
             Результат отправки
         """
         try:
-            base_url = f"http://{target_ip}"
+            base_url = f"http://{target_ip}:{port}"
             # Для GET endpoints используем get_from_robot
             if endpoint in ['/status', 'status', '/health', 'health']:
                 response = self.client.get_from_robot(base_url, endpoint)
@@ -135,19 +137,20 @@ class NetworkAPI:
                 "message": f"Error getting data: {str(e)}"
             }
     
-    def receive_data(self, source_ip: str, endpoint: str) -> Dict[str, Any]:
+    def receive_data(self, source_ip: str, endpoint: str, port: int = 8080) -> Dict[str, Any]:
         """
         Получает данные от другого робота.
         
         Args:
             source_ip: IP адрес робота-источника
             endpoint: Конечная точка API
+            port: Порт для подключения (по умолчанию 8080)
             
         Returns:
             Полученные данные
         """
         try:
-            base_url = f"http://{source_ip}"
+            base_url = f"http://{source_ip}:{port}"
             url = f"{base_url}/api/{endpoint}"
             response = self.client.get(url)
             
@@ -168,7 +171,7 @@ class NetworkAPI:
             }
     
     def download_file_from_robot(self, source_ip: str, filepath: str, 
-                                  local_path: str) -> Dict[str, Any]:
+                                  local_path: str, port: int = 8080) -> Dict[str, Any]:
         """
         Скачивает файл с другого робота.
         
@@ -176,12 +179,13 @@ class NetworkAPI:
             source_ip: IP адрес робота-источника
             filepath: Путь к файлу на роботе
             local_path: Локальный путь для сохранения
+            port: Порт для подключения (по умолчанию 8080)
             
         Returns:
             Результат операции
         """
         try:
-            url = f"http://{source_ip}/api/files/download?path={filepath}"
+            url = f"http://{source_ip}:{port}/api/files/download?path={filepath}"
             success = self.client.download_file(url, local_path)
             
             if success:
@@ -201,20 +205,23 @@ class NetworkAPI:
                 "message": f"Error downloading file: {str(e)}"
             }
     
-    def find_robots(self) -> Dict[str, Any]:
+    def find_robots(self, port: int = 8080) -> Dict[str, Any]:
         """
         Ищет роботов в сети.
+        
+        Args:
+            port: Порт для подключения к роботам (по умолчанию 8080)
         
         Returns:
             Список найденных роботов
         """
         try:
-            robots = network.find_robots_in_network()
+            robots = network.find_robots_in_network(port=port)
             robot_info_list = []
             
             for ip in robots:
                 try:
-                    base_url = f"http://{ip}"
+                    base_url = f"http://{ip}:{port}"
                     info = self.client.get_robot_info(base_url)
                     if info:
                         robot_info_list.append({

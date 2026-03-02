@@ -91,7 +91,6 @@ def scan_network(port: int = 8080):
         True если успешно
     """
     try:
-        print(f"Starting network scan on port {port}...", flush=True)
         scan_start = time.time()
         
         # Сканируем сеть

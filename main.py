@@ -429,6 +429,50 @@ def main():
         raise
 
 
+def cleanup_ports():
+    """Освобождает порты, используемые сервисами."""
+    try:
+        import subprocess
+        manager = services_manager.get_services_manager()
+        
+        ports_to_clean = set()
+        
+        web_service = manager.get_service("web")
+        if web_service:
+            web_params = manager.get_service_parameters("web")
+            web_port = web_params.get("port", 8080)
+            api_port = web_params.get("api_port", 5000)
+            ports_to_clean.add(web_port)
+            ports_to_clean.add(api_port)
+        
+        scanner_service = manager.get_service("scanner_service")
+        if scanner_service:
+            scanner_params = manager.get_service_parameters("scanner_service")
+            scanner_port = scanner_params.get("port", 8080)
+            ports_to_clean.add(scanner_port)
+        
+        for port in ports_to_clean:
+            try:
+                subprocess.run(["fuser", "-k", f"{port}/tcp"], 
+                             capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
+            except Exception:
+                try:
+                    result = subprocess.run(["lsof", "-ti", f":{port}"], 
+                                           capture_output=True, timeout=2, text=True)
+                    if result.returncode == 0 and result.stdout.strip():
+                        pids = result.stdout.strip().split('\n')
+                        for pid in pids:
+                            try:
+                                subprocess.run(["kill", "-9", pid], 
+                                             capture_output=True, timeout=1, stderr=subprocess.DEVNULL)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 if __name__ == '__main__':
     import signal
     
@@ -445,6 +489,7 @@ if __name__ == '__main__':
             motor_status = "OFF"
         
         if motor_status == "OFF":
+            cleanup_ports()
             sys.exit(0)
         
         if not _sig_received:
@@ -486,8 +531,11 @@ if __name__ == '__main__':
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
+        cleanup_ports()
         sys.exit(0)
     except SystemExit:
+        cleanup_ports()
         raise
     except Exception:
+        cleanup_ports()
         sys.exit(1)

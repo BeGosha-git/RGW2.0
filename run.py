@@ -371,6 +371,7 @@ class ServiceRunner:
         
         if not self.running:
             self.stop_all_services()
+            self.cleanup_ports()
             sys.exit(0)
     
     def stop_all_services(self):
@@ -389,6 +390,50 @@ class ServiceRunner:
         
         for thread in self.threads:
             thread.join(timeout=5)
+        
+        self.cleanup_ports()
+    
+    def cleanup_ports(self):
+        """Освобождает порты, используемые сервисами."""
+        try:
+            import subprocess
+            
+            ports_to_clean = set()
+            
+            web_service = self.manager.get_service("web")
+            if web_service:
+                web_params = self.manager.get_service_parameters("web")
+                web_port = web_params.get("port", 8080)
+                api_port = web_params.get("api_port", 5000)
+                ports_to_clean.add(web_port)
+                ports_to_clean.add(api_port)
+            
+            scanner_service = self.manager.get_service("scanner_service")
+            if scanner_service:
+                scanner_params = self.manager.get_service_parameters("scanner_service")
+                scanner_port = scanner_params.get("port", 8080)
+                ports_to_clean.add(scanner_port)
+            
+            for port in ports_to_clean:
+                try:
+                    subprocess.run(["fuser", "-k", f"{port}/tcp"], 
+                                 capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
+                except Exception:
+                    try:
+                        result = subprocess.run(["lsof", "-ti", f":{port}"], 
+                                               capture_output=True, timeout=2, text=True)
+                        if result.returncode == 0 and result.stdout.strip():
+                            pids = result.stdout.strip().split('\n')
+                            for pid in pids:
+                                try:
+                                    subprocess.run(["kill", "-9", pid], 
+                                                 capture_output=True, timeout=1, stderr=subprocess.DEVNULL)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 
 def run_services():

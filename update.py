@@ -184,10 +184,49 @@ def check_and_update_version():
         return False
 
 
+def create_venv_archive() -> bool:
+    """
+    Создает архив venv для распространения на другие роботы.
+    
+    Returns:
+        True если успешно
+    """
+    try:
+        import tarfile
+        
+        venv_path = Path("venv")
+        venv_archive = "venv.tar.gz"
+        
+        if not venv_path.exists():
+            print("Venv does not exist, skipping archive creation", flush=True)
+            return False
+        
+        venv_ready_flag = venv_path / ".ready"
+        if not venv_ready_flag.exists():
+            print("Venv is not ready, skipping archive creation", flush=True)
+            return False
+        
+        print(f"Creating venv archive ({venv_archive})...", flush=True)
+        
+        with tarfile.open(venv_archive, 'w:gz') as tar:
+            tar.add(venv_path, arcname='venv', filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+        
+        archive_size = os.path.getsize(venv_archive) / 1024 / 1024
+        print(f"  ✓ Venv archive created ({archive_size:.2f} MB)", flush=True)
+        return True
+        
+    except Exception as e:
+        print(f"Error creating venv archive: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def update_version_file():
     """
     Обновляет version.json с актуальным списком файлов и их размерами.
     Всегда обновляет список файлов, но не меняет версию.
+    Также создает архив venv если он готов.
     """
     try:
         version_data = {
@@ -206,6 +245,9 @@ def update_version_file():
                 existing_data = json.load(f)
                 version_data["version"] = existing_data.get("version", "1.00.01")
                 version_data["version_type"] = existing_data.get("version_type", "STABLE")
+        
+        # Создаем архив venv если он готов
+        create_venv_archive()
         
         files_list = scan_project_files()
         version_data["files"] = files_list
@@ -246,6 +288,90 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         return client.download_file(url, local_path)
     except Exception as e:
         print(f"Error downloading file {filepath} from {source_ip}: {str(e)}")
+        return False
+
+
+def download_venv_from_robot(source_ip: str) -> bool:
+    """
+    Скачивает venv с другого робота как архив.
+    
+    Args:
+        source_ip: IP адрес робота-источника
+        
+    Returns:
+        True если успешно
+    """
+    try:
+        import tarfile
+        import tempfile
+        
+        venv_path = Path("venv")
+        venv_archive = "venv.tar.gz"
+        
+        print(f"Downloading venv from {source_ip}...", flush=True)
+        
+        client = network.NetworkClient()
+        url = f"http://{source_ip}/api/files/download?path={venv_archive}"
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.tar.gz') as tmp_file:
+            tmp_path = tmp_file.name
+        
+        try:
+            if not client.download_file(url, tmp_path):
+                print(f"  ✗ Failed to download venv archive from {source_ip}", flush=True)
+                return False
+            
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+                print(f"  ✗ Downloaded venv archive is empty or missing", flush=True)
+                return False
+            
+            print(f"  ✓ Venv archive downloaded ({os.path.getsize(tmp_path) / 1024 / 1024:.2f} MB)", flush=True)
+            
+            if venv_path.exists():
+                print("  Removing existing venv...", flush=True)
+                shutil.rmtree(venv_path)
+            
+            print("  Extracting venv archive...", flush=True)
+            with tarfile.open(tmp_path, 'r:gz') as tar:
+                tar.extractall(path='.')
+            
+            print("  ✓ Venv extracted successfully", flush=True)
+            
+            venv_ready_flag = venv_path / ".ready"
+            if venv_ready_flag.exists():
+                print("  ✓ Venv ready flag preserved", flush=True)
+            else:
+                venv_ready_flag.touch()
+                print("  ✓ Venv ready flag created", flush=True)
+            
+            return True
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+                
+    except Exception as e:
+        print(f"  ✗ Error downloading/extracting venv: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def check_venv_exists_on_robot(source_ip: str) -> bool:
+    """
+    Проверяет наличие venv на другом роботе.
+    
+    Args:
+        source_ip: IP адрес робота-источника
+        
+    Returns:
+        True если venv существует
+    """
+    try:
+        import requests
+        url = f"http://{source_ip}/api/files/download?path=venv.tar.gz"
+        response = requests.head(url, timeout=5)
+        return response.status_code == 200
+    except Exception:
         return False
 
 
@@ -559,11 +685,25 @@ def update_system():
     print(f"Requirements.txt changed: {requirements_changed}", flush=True)
     print(f"Main.py changed: {main_py_changed}", flush=True)
     
+    # Проверяем и обновляем venv если он есть на источнике
+    venv_updated = False
+    if check_venv_exists_on_robot(source_ip):
+        print("Venv found on source robot, downloading...", flush=True)
+        venv_updated = download_venv_from_robot(source_ip)
+        if venv_updated:
+            print("Venv updated successfully from source robot", flush=True)
+        else:
+            print("Warning: Failed to update venv, will use local or recreate", flush=True)
+    else:
+        print("No venv found on source robot, skipping venv update", flush=True)
+    
     # Обновляем файлы
     success = update_files_from_robot(source_ip, files_to_update)
     
     if success:
-        if requirements_changed or main_py_changed:
+        if venv_updated:
+            print("Venv was updated from source robot, no recreation needed", flush=True)
+        elif requirements_changed or main_py_changed:
             print("CRITICAL: requirements.txt or main.py changed. Venv will be recreated on next startup.", flush=True)
             try:
                 venv_recreate_flag = Path("data/.recreate_venv")

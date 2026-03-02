@@ -18,6 +18,35 @@ if str(ROOT) not in sys.path:
 from services.unitree_motor_control.dependencies import setup_dependencies, setup_cyclonedds_environment
 
 setup_cyclonedds_environment()
+
+import os
+venv_path = None
+if 'VIRTUAL_ENV' in os.environ:
+    venv_path = os.environ['VIRTUAL_ENV']
+elif sys.executable and '/bin/' in sys.executable:
+    venv_path = sys.executable.rsplit('/bin/', 1)[0]
+    if not os.path.exists(os.path.join(venv_path, 'lib')):
+        venv_path = None
+
+if venv_path:
+    venv_lib = os.path.join(venv_path, 'lib')
+    venv_lib64 = os.path.join(venv_path, 'lib64')
+    
+    ld_library_path = os.environ.get('LD_LIBRARY_PATH', '')
+    paths_to_add = []
+    
+    if os.path.exists(venv_lib):
+        if venv_lib not in ld_library_path:
+            paths_to_add.append(venv_lib)
+    
+    if os.path.exists(venv_lib64) and venv_lib64 not in ld_library_path:
+        paths_to_add.append(venv_lib64)
+    
+    if paths_to_add:
+        new_ld_path = ':'.join(paths_to_add)
+        os.environ['LD_LIBRARY_PATH'] = f"{new_ld_path}:{ld_library_path}" if ld_library_path else new_ld_path
+        print(f"[UnitreeMotorControl] Added venv lib paths to LD_LIBRARY_PATH: {paths_to_add}", flush=True)
+
 NUMPY_AVAILABLE, CYCLONEDDS_AVAILABLE = setup_dependencies()
 
 try:
@@ -185,12 +214,27 @@ class MotorController:
             H1JointIndex.kLeftElbow,
         }
     
-    def init(self, domain_id: int = 0, network_interface: str = "lo"):
+    def init(self, domain_id: int = 1, network_interface: str = "lo"):
         """Инициализирует подключение к роботу."""
+        print(f"[UnitreeMotorControl] init() called with domain_id={domain_id}, network_interface={network_interface}", flush=True)
+        print(f"[UnitreeMotorControl] Python: {sys.executable}", flush=True)
+        print(f"[UnitreeMotorControl] LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'not set')}", flush=True)
+        
         if not SDK_AVAILABLE:
             raise RuntimeError("Unitree SDK not available")
         
-        ChannelFactoryInitialize(domain_id, network_interface)
+        print(f"[UnitreeMotorControl] SDK is available, initializing ChannelFactory...", flush=True)
+        print(f"[UnitreeMotorControl] Domain ID: {domain_id}, Network Interface: {network_interface}", flush=True)
+        
+        try:
+            print(f"[UnitreeMotorControl] Calling ChannelFactoryInitialize...", flush=True)
+            ChannelFactoryInitialize(domain_id, network_interface)
+            print(f"[UnitreeMotorControl] ChannelFactory initialized successfully", flush=True)
+        except Exception as e:
+            print(f"[UnitreeMotorControl] ERROR: ChannelFactoryInitialize failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            raise
         
         if MotionSwitcherClient and hasattr(MotionSwitcherClient, '__call__'):
             try:
@@ -210,31 +254,54 @@ class MotorController:
         else:
             self.msc = None
         
-        from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmd_, BmsCmd_
+        print(f"[UnitreeMotorControl] Creating LowCmd_ structure...", flush=True)
+        try:
+            from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_
+            print(f"[UnitreeMotorControl] Using default factory for LowCmd_...", flush=True)
+            self.low_cmd = unitree_go_msg_dds__LowCmd_()
+            self.low_cmd.head[0] = 0xFE
+            self.low_cmd.head[1] = 0xEF
+            self.low_cmd.level_flag = 0xFF
+            print(f"[UnitreeMotorControl] LowCmd_ created successfully using default factory", flush=True)
+        except Exception as e:
+            print(f"[UnitreeMotorControl] Default factory failed: {e}, using manual creation...", flush=True)
+            import traceback
+            traceback.print_exc()
+            from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmd_, BmsCmd_
+            print(f"[UnitreeMotorControl] Creating MotorCmd_ and BmsCmd_...", flush=True)
+            motor_cmds = [MotorCmd_(mode=0, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.0, reserve=[0, 0, 0]) for _ in range(20)]
+            print(f"[UnitreeMotorControl] Created {len(motor_cmds)} MotorCmd_ instances", flush=True)
+            bms_cmd = BmsCmd_(off=0, reserve=[0, 0, 0])
+            print(f"[UnitreeMotorControl] Creating LowCmd_ manually...", flush=True)
+            self.low_cmd = LowCmd_(
+                head=[0xFE, 0xEF],
+                level_flag=0xFF,
+                frame_reserve=0,
+                sn=[0, 0],
+                version=[0, 0],
+                bandwidth=0,
+                motor_cmd=motor_cmds,
+                bms_cmd=bms_cmd,
+                wireless_remote=[0] * 40,
+                led=[0] * 12,
+                fan=[0, 0],
+                gpio=0,
+                reserve=0,
+                crc=0
+            )
+            print(f"[UnitreeMotorControl] LowCmd_ created successfully manually", flush=True)
         
-        self.low_cmd = LowCmd_(
-            head=[0xFE, 0xEF],
-            level_flag=0xFF,
-            frame_reserve=0,
-            sn=[0, 0],
-            version=[0, 0],
-            bandwidth=0,
-            motor_cmd=[MotorCmd_(mode=0, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.0, reserve=[0, 0, 0]) for _ in range(20)],
-            bms_cmd=BmsCmd_(off=0, reserve=[0, 0, 0]),
-            wireless_remote=[0] * 40,
-            led=[0] * 12,
-            fan=[0, 0],
-            gpio=0,
-            reserve=0,
-            crc=0
-        )
+        print(f"[UnitreeMotorControl] Creating CRC instance...", flush=True)
         self.crc = CRC()
-        
+        print(f"[UnitreeMotorControl] Creating channel publisher...", flush=True)
         self.lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+        print(f"[UnitreeMotorControl] Initializing channel publisher...", flush=True)
         self.lowcmd_publisher.Init()
-        
+        print(f"[UnitreeMotorControl] Creating channel subscriber...", flush=True)
         self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        print(f"[UnitreeMotorControl] Initializing channel subscriber...", flush=True)
         self.lowstate_subscriber.Init(self.low_state_handler, 10)
+        print(f"[UnitreeMotorControl] Channels initialized successfully", flush=True)
         
         time.sleep(2.0)
         
@@ -329,13 +396,23 @@ class MotorController:
         if self.running:
             return
         
+        print(f"[UnitreeMotorControl] Starting control loop...", flush=True)
         self.running = True
-        self.control_thread = RecurrentThread(
-            interval=self.control_dt,
-            target=self.control_loop,
-            name="motor_control"
-        )
-        self.control_thread.Start()
+        
+        try:
+            self.control_thread = RecurrentThread(
+                interval=self.control_dt,
+                target=self.control_loop,
+                name="motor_control"
+            )
+            self.control_thread.Start()
+            print(f"[UnitreeMotorControl] Control loop started successfully", flush=True)
+        except Exception as e:
+            print(f"[UnitreeMotorControl] ERROR starting control loop: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            self.running = False
+            raise
     
     def stop_control(self):
         """Останавливает поток управления."""
@@ -352,17 +429,24 @@ class MotorController:
             return
         
         try:
+            if not self.low_cmd or not self.initial_positions or not self.lowcmd_publisher or not self.crc:
+                return
+            
             with self.lock:
-                if not self.low_cmd or not self.initial_positions:
-                    return
-                
                 if self.low_state and hasattr(self.low_state, 'motor_state'):
-                    for i in range(min(H1_NUM_MOTOR, len(self.low_state.motor_state))):
-                        if hasattr(self.low_state.motor_state[i], 'q'):
-                            self.current_angles[i] = self.low_state.motor_state[i].q
+                    try:
+                        motor_state_len = len(self.low_state.motor_state) if hasattr(self.low_state, 'motor_state') else 0
+                        for i in range(min(H1_NUM_MOTOR, motor_state_len)):
+                            if hasattr(self.low_state.motor_state[i], 'q'):
+                                self.current_angles[i] = self.low_state.motor_state[i].q
+                    except Exception as e:
+                        print(f"[UnitreeMotorControl] Error reading motor_state: {e}", flush=True)
                     
                 for i in range(H1_NUM_MOTOR):
                     try:
+                        if not hasattr(self.low_cmd, 'motor_cmd') or i >= len(self.low_cmd.motor_cmd):
+                            continue
+                        
                         if self.is_weak_motor(i):
                             self.low_cmd.motor_cmd[i].mode = 0x01
                             self.low_cmd.motor_cmd[i].kp = self.kp_low
@@ -418,10 +502,27 @@ class MotorController:
             
             try:
                 if self.low_cmd and self.crc and self.lowcmd_publisher:
-                    self.low_cmd.crc = self.crc.Crc(self.low_cmd)
-                    self.lowcmd_publisher.Write(self.low_cmd)
-            except Exception:
-                pass
+                    try:
+                        self.low_cmd.crc = self.crc.Crc(self.low_cmd)
+                    except Exception as crc_e:
+                        print(f"[UnitreeMotorControl] Error computing CRC: {crc_e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+                        return
+                    
+                    try:
+                        if not hasattr(self.lowcmd_publisher, '__inited') or not self.lowcmd_publisher.__inited:
+                            return
+                        
+                        self.lowcmd_publisher.Write(self.low_cmd, timeout=0.1)
+                    except Exception as write_e:
+                        print(f"[UnitreeMotorControl] Error writing to publisher: {write_e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+            except Exception as e:
+                print(f"[UnitreeMotorControl] Error in control_loop write section: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
         except Exception as e:
             print(f"[UnitreeMotorControl] CRITICAL: Error in control_loop: {e}", flush=True)
     
@@ -535,6 +636,40 @@ class MotorController:
                 self.msc.ReleaseMode()
             except Exception:
                 pass
+    
+    def reinitialize_controller(self, domain_id: int = None, network_interface: str = None):
+        """
+        Переинициализирует контроллер с новыми параметрами.
+        
+        Args:
+            domain_id: ID домена для DDS (если None, используется текущий)
+            network_interface: Имя сетевого интерфейса (если None, используется текущий)
+        """
+        if not SDK_AVAILABLE:
+            raise RuntimeError("Unitree SDK not available")
+        
+        was_running = self.running
+        if was_running:
+            self.stop_control()
+        
+        try:
+            if domain_id is None or network_interface is None:
+                import services_manager
+                manager = services_manager.get_services_manager()
+                params = manager.get_service_parameters("unitree_motor_control")
+                if domain_id is None:
+                    domain_id = params.get("id", 1)
+                if network_interface is None:
+                    network_interface = params.get("network", "lo")
+            
+            self.initialized = False
+            self.init(domain_id=domain_id, network_interface=network_interface)
+            
+            if was_running:
+                self.start_control()
+        except Exception as e:
+            self.initialized = False
+            raise
 
 
 _controller: Optional[MotorController] = None
@@ -570,7 +705,7 @@ def run():
         params = {}
     
     # Параметры конфигурации
-    domain_id = params.get("id", 0)
+    domain_id = params.get("id", 1)
     network_interface = params.get("network", "lo")
     
     # Проверяем доступность SDK

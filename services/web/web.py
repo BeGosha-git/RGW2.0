@@ -7,12 +7,20 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+venv_path = Path(__file__).parent.parent.parent / "venv"
+if venv_path.exists():
+    venv_site_packages = venv_path / "lib" / "python3.11" / "site-packages"
+    if venv_site_packages.exists() and str(venv_site_packages) not in sys.path:
+        sys.path.insert(0, str(venv_site_packages))
+
 try:
     import flask
 except ImportError:
-    import sys
     print("[WEB] ERROR: Flask is not installed", flush=True)
-    print(f"[WEB] Please install: {sys.executable} -m pip install -r requirements.txt", flush=True)
+    print(f"[WEB] Python: {sys.executable}", flush=True)
+    print(f"[WEB] sys.path: {sys.path[:3]}", flush=True)
+    print(f"[WEB] Please install: {sys.executable} -m pip install flask", flush=True)
     sys.exit(1)
 
 import http.server
@@ -543,7 +551,7 @@ def register_unitree_motor_endpoints():
         try:
             from services.unitree_motor_control.unitree_motor_control import get_controller
             controller = get_controller()
-            if controller:
+            if controller and controller.initialized:
                 return jsonify({
                     "success": True,
                     "available": True,
@@ -747,6 +755,90 @@ def register_unitree_motor_endpoints():
             return jsonify({
                 "success": False,
                 "message": f"Error setting controller config: {str(e)}",
+                "error": str(e),
+                "error_traceback": error_traceback
+            }), 500
+    
+    @flask_app.route('/api/unitree_motor/initialize', methods=['POST'])
+    def api_unitree_initialize():
+        """Инициализирует контроллер моторов."""
+        if not UNITREE_MOTOR_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "message": "Unitree motor service is not available",
+                "error": UNITREE_MOTOR_ERROR,
+                "error_traceback": UNITREE_MOTOR_ERROR_TRACEBACK
+            }), 503
+        
+        try:
+            from services.unitree_motor_control.unitree_motor_control import get_controller
+            from services_manager import get_services_manager
+            
+            manager = get_services_manager()
+            service_info = manager.get_service("unitree_motor_control")
+            params = manager.get_service_parameters("unitree_motor_control")
+            
+            domain_id = params.get("id", 1)
+            network_interface = params.get("network", "lo")
+            
+            controller = get_controller()
+            
+            if not controller:
+                return jsonify({
+                    "success": False,
+                    "message": "Controller not available. Service may not be running.",
+                    "initialized": False
+                }), 503
+            
+            if controller.initialized:
+                try:
+                    controller.reinitialize_controller(domain_id=domain_id, network_interface=network_interface)
+                    return jsonify({
+                        "success": True,
+                        "message": "Controller reinitialized successfully",
+                        "initialized": True,
+                        "domain_id": domain_id,
+                        "network_interface": network_interface
+                    })
+                except Exception as e:
+                    import traceback
+                    error_traceback = traceback.format_exc()
+                    return jsonify({
+                        "success": False,
+                        "message": f"Error reinitializing controller: {str(e)}",
+                        "error": str(e),
+                        "error_traceback": error_traceback,
+                        "initialized": False
+                    }), 500
+            
+            try:
+                controller.init(domain_id=domain_id, network_interface=network_interface)
+                controller.start_control()
+                return jsonify({
+                    "success": True,
+                    "message": "Controller initialized successfully",
+                    "initialized": True,
+                    "domain_id": domain_id,
+                    "network_interface": network_interface
+                })
+            except Exception as e:
+                import traceback
+                error_traceback = traceback.format_exc()
+                return jsonify({
+                    "success": False,
+                    "message": f"Error initializing controller: {str(e)}",
+                    "error": str(e),
+                    "error_traceback": error_traceback,
+                    "initialized": False
+                }), 500
+        except Exception as e:
+            import traceback
+            error_traceback = traceback.format_exc()
+            print(f"[WEB ERROR] Error in initialize: {e}", flush=True)
+            print(f"[WEB ERROR] Traceback:\n{error_traceback}", flush=True)
+            return jsonify({
+                "success": False,
+                "message": f"Error initializing controller: {str(e)}",
                 "error": str(e),
                 "error_traceback": error_traceback
             }), 500
@@ -988,37 +1080,47 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                 """Мониторит завершение зависимостей для завершения веб-сервера."""
                 while True:
                     try:
-                        manager = services_manager.get_services_manager()
-                        web_dependencies = manager.get_service_dependencies("web")
-                        
-                        all_dependencies_off = True
-                        for dep_name in web_dependencies:
-                            dep_info = manager.get_service(dep_name)
-                            dep_status = dep_info.get("status", "OFF") if dep_info else "OFF"
+                        if shutdown_requested.is_set():
+                            manager = services_manager.get_services_manager()
+                            web_dependencies = manager.get_service_dependencies("web")
                             
-                            if dep_status == "ON":
-                                all_dependencies_off = False
+                            if not web_dependencies:
+                                web_shutdown_allowed.set()
+                                if shutdown_requested.is_set():
+                                    httpd.shutdown()
+                                break
+                            
+                            all_dependencies_off = True
+                            for dep_name in web_dependencies:
+                                dep_info = manager.get_service(dep_name)
+                                dep_status = dep_info.get("status", "OFF") if dep_info else "OFF"
                                 
-                                import run
-                                runner = run.ServiceRunner()
-                                
-                                dep_thread_alive = False
-                                for i, service_info in enumerate(runner.services):
-                                    if service_info.get("service_name") == dep_name:
-                                        if i < len(runner.threads):
-                                            dep_thread_alive = runner.threads[i].is_alive()
-                                        break
-                                
-                                if dep_thread_alive:
+                                if dep_status == "ON":
                                     all_dependencies_off = False
                                     break
-                        
-                        if all_dependencies_off:
-                            print("[WEB] All dependencies shutdown detected. Allowing web server shutdown...", flush=True)
-                            web_shutdown_allowed.set()
-                            if shutdown_requested.is_set():
+                                
+                                import run
+                                try:
+                                    runner = run.ServiceRunner()
+                                    if hasattr(runner, 'services') and hasattr(runner, 'threads'):
+                                        dep_thread_alive = False
+                                        for i, service_info in enumerate(runner.services):
+                                            if service_info.get("service_name") == dep_name:
+                                                if i < len(runner.threads):
+                                                    dep_thread_alive = runner.threads[i].is_alive()
+                                                break
+                                        
+                                        if dep_thread_alive:
+                                            all_dependencies_off = False
+                                            break
+                                except Exception:
+                                    pass
+                            
+                            if all_dependencies_off and shutdown_requested.is_set():
+                                print("[WEB] All dependencies shutdown detected. Allowing web server shutdown...", flush=True)
+                                web_shutdown_allowed.set()
                                 httpd.shutdown()
-                            break
+                                break
                     except Exception as e:
                         pass
                     time.sleep(1)

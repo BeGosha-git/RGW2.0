@@ -108,6 +108,8 @@ function MotorControlPage() {
   const sendTimeoutRef = useRef(null)
   const [motorShutdownCount, setMotorShutdownCount] = useState(0)
   const [motorServiceStatus, setMotorServiceStatus] = useState(null)
+  const [controllerInitialized, setControllerInitialized] = useState(false)
+  const [initializing, setInitializing] = useState(false)
 
   useEffect(() => {
     velocityRef.current = velocity
@@ -116,11 +118,14 @@ function MotorControlPage() {
   useEffect(() => {
     loadCurrentAngles()
     loadMotorServiceStatus()
+    loadControllerStatus()
     const interval = setInterval(loadCurrentAngles, 2000)
     const statusInterval = setInterval(loadMotorServiceStatus, 2000)
+    const controllerInterval = setInterval(loadControllerStatus, 2000)
     return () => {
       clearInterval(interval)
       clearInterval(statusInterval)
+      clearInterval(controllerInterval)
     }
   }, [])
 
@@ -145,6 +150,46 @@ function MotorControlPage() {
       }
     } catch (err) {
       console.error('Error loading motor service status:', err)
+    }
+  }
+
+  const loadControllerStatus = async () => {
+    try {
+      const response = await fetch('/api/unitree_motor/status')
+      const result = await response.json()
+      if (result.success !== undefined) {
+        setControllerInitialized(result.controller_initialized || false)
+      }
+    } catch (err) {
+      console.error('Error loading controller status:', err)
+    }
+  }
+
+  const handleInitialize = async () => {
+    try {
+      setInitializing(true)
+      setError(null)
+      
+      const response = await fetch('/api/unitree_motor/initialize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      const result = await response.json()
+      
+      if (result.success) {
+        setSuccess('Моторы успешно инициализированы')
+        setTimeout(() => setSuccess(null), 3000)
+        setControllerInitialized(true)
+        setTimeout(() => loadControllerStatus(), 500)
+      } else {
+        setError(result.message || 'Ошибка инициализации моторов')
+        setTimeout(() => setError(null), 10000)
+      }
+    } catch (err) {
+      setError(`Ошибка: ${err.message}`)
+      setTimeout(() => setError(null), 10000)
+    } finally {
+      setInitializing(false)
     }
   }
 
@@ -376,6 +421,14 @@ function MotorControlPage() {
           </label>
           <button className="reset-button" onClick={handleReset}>
             Сброс
+          </button>
+          <button 
+            className="motor-initialize-button" 
+            onClick={handleInitialize}
+            disabled={initializing || controllerInitialized || motorServiceStatus === 'OFF'}
+            title={controllerInitialized ? 'Моторы уже инициализированы' : 'Инициализация контроллера моторов'}
+          >
+            {initializing ? 'Инициализация...' : controllerInitialized ? 'Инициализировано' : 'Инициализировать моторы'}
           </button>
           <button 
             className="motor-shutdown-button" 

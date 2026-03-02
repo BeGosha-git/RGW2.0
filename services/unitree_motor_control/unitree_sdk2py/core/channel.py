@@ -207,20 +207,38 @@ class ChannelFactory(Singleton):
             if self.__class__.__initialized:
                 return True
             
-            config = None
-            # choose config
-            if networkInterface is None:
-                config = ChannelConfigAutoDetermine
-            else:
-                config = ChannelConfigHasInterface.replace('$__IF_NAME__$', networkInterface)
-
             try:
-                self.__class__.__domain = Domain(id, config)
+                print(f"[ChannelFactory] Creating Domain with id={id}, networkInterface={networkInterface}", flush=True)
+                
+                if networkInterface:
+                    config_xml = f'''<?xml version="1.0" encoding="UTF-8" ?>
+<CycloneDDS>
+    <Domain Id="{id}">
+        <General>
+            <Interfaces>
+                <NetworkInterface name="{networkInterface}" priority="default" multicast="default"/>
+            </Interfaces>
+        </General>
+    </Domain>
+</CycloneDDS>'''
+                    print(f"[ChannelFactory] Using XML config with interface '{networkInterface}'", flush=True)
+                    try:
+                        self.__class__.__domain = Domain(id, config_xml)
+                        print(f"[ChannelFactory] Domain created successfully with config", flush=True)
+                    except Exception as config_e:
+                        print(f"[ChannelFactory] Failed to create Domain with config: {config_e}, trying without config...", flush=True)
+                        self.__class__.__domain = Domain(id)
+                        print(f"[ChannelFactory] Domain created successfully without config", flush=True)
+                else:
+                    self.__class__.__domain = Domain(id)
+                    print(f"[ChannelFactory] Domain created successfully without config", flush=True)
             except DDSException as e:
-                print("[ChannelFactory] create domain error. msg:", e.msg)
+                print(f"[ChannelFactory] create domain error. msg: {e.msg}", flush=True)
                 return False
-            except:
-                print("[ChannelFactory] create domain error.")
+            except Exception as e:
+                print(f"[ChannelFactory] create domain error: {type(e).__name__}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
                 return False
 
             try:
@@ -295,7 +313,7 @@ class ChannelSubscriber:
 """
 " function ChannelFactoryInitialize. used to intialize channel everenment.
 """
-def ChannelFactoryInitialize(id: int = 0, networkInterface: str = None):
+def ChannelFactoryInitialize(id: int = 1, networkInterface: str = None):
     factory = ChannelFactory()
     if not factory.Init(id, networkInterface):
         raise Exception("channel factory init error.")

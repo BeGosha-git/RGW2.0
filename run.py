@@ -24,6 +24,47 @@ if 'PYTHONUNBUFFERED' not in os.environ:
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
+venv_path = Path("venv").resolve()
+if venv_path.exists():
+    venv_python = venv_path / "bin" / "python3"
+    if not venv_python.exists():
+        venv_python = venv_path / "bin" / "python"
+    
+    if venv_python.exists():
+        venv_python_resolved = venv_python.resolve()
+        current_python = Path(sys.executable).resolve()
+        
+        try:
+            venv_same = venv_python_resolved.samefile(current_python)
+        except (OSError, ValueError):
+            venv_same = (str(venv_python_resolved) == str(current_python))
+        
+        if not venv_same:
+            print(f"[ServiceRunner] WARNING: Not using venv Python! Current: {current_python}, Expected: {venv_python_resolved}", flush=True)
+            print(f"[ServiceRunner] Services may fail due to missing dependencies in system Python", flush=True)
+        else:
+            print(f"[ServiceRunner] Using venv Python: {venv_python_resolved}", flush=True)
+        
+        if 'VIRTUAL_ENV' not in os.environ:
+            os.environ['VIRTUAL_ENV'] = str(venv_path)
+        
+        venv_lib = venv_path / 'lib'
+        venv_lib64 = venv_path / 'lib64'
+        
+        ld_library_path = os.environ.get('LD_LIBRARY_PATH', '')
+        paths_to_add = []
+        
+        if venv_lib.exists() and str(venv_lib) not in ld_library_path:
+            paths_to_add.append(str(venv_lib))
+        
+        if venv_lib64.exists() and str(venv_lib64) not in ld_library_path:
+            paths_to_add.append(str(venv_lib64))
+        
+        if paths_to_add:
+            new_ld_path = ':'.join(paths_to_add)
+            os.environ['LD_LIBRARY_PATH'] = f"{new_ld_path}:{ld_library_path}" if ld_library_path else new_ld_path
+            print(f"[ServiceRunner] Added venv lib paths to LD_LIBRARY_PATH: {paths_to_add}", flush=True)
+
 
 class ServiceRunner:
     """Класс для запуска сервисов из папки services."""
@@ -146,6 +187,10 @@ class ServiceRunner:
             
             module_name = service_name
             
+            print(f"[ServiceRunner] Loading service {service_name} from {filepath}", flush=True)
+            print(f"[ServiceRunner] Using Python: {sys.executable}", flush=True)
+            print(f"[ServiceRunner] VIRTUAL_ENV: {os.environ.get('VIRTUAL_ENV', 'not set')}", flush=True)
+            
             spec = importlib.util.spec_from_file_location(module_name, filepath)
             if spec is None or spec.loader is None:
                 print(f"Failed to load spec for {filepath}")
@@ -166,12 +211,14 @@ class ServiceRunner:
             if run_func:
                 def service_wrapper():
                     try:
-                        print(f"Starting service: {filepath}", flush=True)
+                        print(f"[ServiceRunner] Starting service: {filepath}", flush=True)
+                        print(f"[ServiceRunner] Service Python: {sys.executable}", flush=True)
+                        print(f"[ServiceRunner] Service VIRTUAL_ENV: {os.environ.get('VIRTUAL_ENV', 'not set')}", flush=True)
                         sys.stdout.flush()
                         sys.stderr.flush()
                         run_func()
                     except Exception as e:
-                        print(f"Error in service {filepath}: {str(e)}", flush=True)
+                        print(f"[ServiceRunner] Error in service {filepath}: {str(e)}", flush=True)
                         import traceback
                         traceback.print_exc()
                         sys.stdout.flush()
@@ -259,11 +306,47 @@ class ServiceRunner:
         
         last_service_check = time.time()
         service_check_interval = 60
+        last_motor_check = time.time()
+        motor_check_interval = 5
         
         print("Entering main service loop...", flush=True)
         try:
             while self.running:
                 current_time = time.time()
+                
+                if current_time - last_motor_check >= motor_check_interval:
+                    try:
+                        motor_service_info = self.manager.get_service("unitree_motor_control")
+                        motor_status = motor_service_info.get("status", "OFF") if motor_service_info else "OFF"
+                        motor_enabled = motor_service_info.get("parameters", {}).get("enabled", True) if motor_service_info else True
+                        
+                        if motor_status == "OFF":
+                            motor_was_loaded = False
+                            motor_thread_alive = False
+                            
+                            for i, service_info in enumerate(self.services):
+                                if service_info.get("service_name") == "unitree_motor_control":
+                                    motor_was_loaded = True
+                                    if i < len(self.threads):
+                                        motor_thread_alive = self.threads[i].is_alive()
+                                    break
+                            
+                            if motor_was_loaded and not motor_thread_alive:
+                                if motor_enabled:
+                                    print("Motor service was running but stopped unexpectedly. Shutting down main.py...", flush=True)
+                                    sys.stdout.flush()
+                                    sys.stderr.flush()
+                                    self.running = False
+                                    break
+                                else:
+                                    print("Motor service stopped and is disabled via API. This is expected.", flush=True)
+                            elif not motor_was_loaded and not motor_enabled:
+                                pass
+                    except Exception as e:
+                        print(f"Warning: Could not check motor service status: {e}", flush=True)
+                    
+                    last_motor_check = current_time
+                
                 if current_time - last_service_check >= service_check_interval:
                     print("Checking for new services...", flush=True)
                     self.manager.refresh_services()
@@ -372,6 +455,14 @@ class ServiceRunner:
             traceback.print_exc()
             sys.stdout.flush()
             sys.stderr.flush()
+        
+        if not self.running:
+            print("Service runner stopped. Stopping all services...", flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            self.stop_all_services()
+            print("Exiting...", flush=True)
+            sys.exit(0)
     
     def stop_all_services(self):
         """Останавливает все сервисы."""

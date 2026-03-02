@@ -35,11 +35,6 @@
 }
 
 .joystick-stick {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  margin-top: -15%;
-  margin-left: -15%;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
   border: 2px solid rgba(255, 255, 255, 0.3);
@@ -48,8 +43,6 @@
     inset 0 0 10px rgba(255, 255, 255, 0.2);
   cursor: grab;
   transition: transform 0.1s ease-out;
-  transform-origin: center center;
-  will-change: transform;
 }
 
 .joystick-stick:active {

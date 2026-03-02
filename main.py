@@ -25,7 +25,7 @@ def is_windows():
 def setup_virtual_environment():
     """
     Проверяет наличие виртуального окружения, создает если нет,
-    и устанавливает зависимости из requirements.txt.
+    и устанавливает зависимости из requirements.txt ОДИН РАЗ.
     Использует Python 3.11 для совместимости с симулятором.
     
     КРИТИЧНО: Автоматически пересоздает venv при:
@@ -33,6 +33,7 @@ def setup_virtual_environment():
     - Наличии флага data/.recreate_venv (создается при обновлении requirements.txt или main.py)
     - Отсутствии venv
     - Несоответствии версии Python в существующем venv
+    - Отсутствии флага готовности venv/.ready
     
     Returns:
         True если окружение готово, False при ошибке
@@ -40,6 +41,50 @@ def setup_virtual_environment():
     venv_name = "venv"
     venv_path = Path(venv_name)
     requirements_file = Path("requirements.txt")
+    venv_ready_flag = venv_path / ".ready"
+    system_deps_flag = Path("data/.system_deps_installed")
+    
+    if is_windows():
+        python_path = venv_path / "Scripts" / "python.exe"
+    else:
+        python_path = venv_path / "bin" / "python"
+    
+    if venv_path.exists() and venv_ready_flag.exists() and python_path.exists():
+        if not is_windows():
+            lib_paths = []
+            for path in ["/usr/lib/x86_64-linux-gnu", "/usr/local/lib", "/lib/x86_64-linux-gnu"]:
+                if Path(path).exists():
+                    lib_paths.append(path)
+            
+            try:
+                find_cmd = ["find", "/usr", "-name", "libddsc.so*", "-type", "f", "2>/dev/null"]
+                result = subprocess.run(
+                    " ".join(find_cmd),
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    found_libs = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                    if found_libs:
+                        lib_dir = str(Path(found_libs[0]).parent)
+                        if lib_dir not in ld_library_path:
+                            ld_library_path = f"{ld_library_path}:{lib_dir}" if ld_library_path else lib_dir
+                
+                for lib_path in lib_paths:
+                    if lib_path not in ld_library_path:
+                        ld_library_path = f"{ld_library_path}:{lib_path}" if ld_library_path else lib_path
+                
+                os.environ["LD_LIBRARY_PATH"] = ld_library_path
+            except Exception:
+                pass
+        
+        print("Virtual environment is ready, using existing setup", flush=True)
+        return True
     
     python311_paths = [
         "/usr/bin/python3.11",
@@ -71,10 +116,8 @@ def setup_virtual_environment():
     
     if is_windows():
         pip_path = venv_path / "Scripts" / "pip.exe"
-        python_path = venv_path / "Scripts" / "python.exe"
     else:
         pip_path = venv_path / "bin" / "pip"
-        python_path = venv_path / "bin" / "python"
     
     venv_recreate_flag = Path("data/.recreate_venv")
     if venv_recreate_flag.exists():
@@ -150,6 +193,8 @@ def setup_virtual_environment():
             print("Removing old virtual environment...", flush=True)
             try:
                 import shutil
+                if venv_ready_flag.exists():
+                    venv_ready_flag.unlink()
                 shutil.rmtree(venv_path)
             except Exception as e:
                 print(f"Warning: Error removing old venv: {e}", flush=True)
@@ -170,9 +215,11 @@ def setup_virtual_environment():
                 print(f"stderr: {e.stderr.decode()}", flush=True)
             return False
     
-    if requirements_file.exists():
+    if venv_ready_flag.exists() and not need_recreate:
+        print("Virtual environment is ready, skipping dependency installation", flush=True)
+    elif requirements_file.exists():
         try:
-            print("Installing/updating dependencies from requirements.txt...", flush=True)
+            print("Installing dependencies from requirements.txt (this may take a while)...", flush=True)
             subprocess.run(
                 [str(pip_path), "install", "--upgrade", "pip", "setuptools", "wheel"],
                 check=False,
@@ -187,8 +234,8 @@ def setup_virtual_environment():
                 timeout=600
             )
             print("Dependencies installed successfully", flush=True)
-            if result.stdout:
-                print(f"Installation output: {result.stdout[:500]}...", flush=True)
+            venv_ready_flag.touch()
+            print("Venv ready flag created", flush=True)
         except subprocess.CalledProcessError as e:
             print(f"Error installing dependencies: {e}", flush=True)
             if e.stdout:
@@ -202,10 +249,63 @@ def setup_virtual_environment():
     else:
         print(f"Warning: {requirements_file} not found", flush=True)
     
-    # Проверяем, что основные зависимости установлены
+    if not is_windows():
+        if system_deps_flag.exists():
+            print("System dependencies already installed, skipping", flush=True)
+        else:
+            try:
+                print("Installing cyclonedds system dependencies (one-time setup)...", flush=True)
+                subprocess.run(
+                    ["sudo", "apt-get", "update"],
+                    check=False,
+                    capture_output=True,
+                    timeout=60
+                )
+                install_result = subprocess.run(
+                    ["sudo", "apt-get", "install", "-y", "libddsc0t64", "cyclonedds-dev", "build-essential", "cmake", "libssl-dev"],
+                    check=False,
+                    capture_output=True,
+                    timeout=300
+                )
+                stdout_output = install_result.stdout.decode() if install_result.stdout else ''
+                stderr_output = install_result.stderr.decode() if install_result.stderr else ''
+                
+                if install_result.returncode == 0 or "libddsc0t64" in stdout_output or "cyclonedds-dev" in stdout_output:
+                    print("System dependencies installed", flush=True)
+                    
+                    libddsc_so0 = Path("/usr/lib/x86_64-linux-gnu/libddsc.so.0")
+                    libddsc_so0debian = Path("/usr/lib/x86_64-linux-gnu/libddsc.so.0debian")
+                    
+                    if libddsc_so0debian.exists() and not libddsc_so0.exists():
+                        try:
+                            subprocess.run(
+                                ["sudo", "ln", "-sf", str(libddsc_so0debian), str(libddsc_so0)],
+                                check=False,
+                                capture_output=True,
+                                timeout=10
+                            )
+                            print("Created libddsc.so.0 symlink", flush=True)
+                        except Exception:
+                            pass
+                    
+                    subprocess.run(
+                        ["sudo", "ldconfig"],
+                        check=False,
+                        capture_output=True,
+                        timeout=30
+                    )
+                    print("Library cache updated", flush=True)
+                    system_deps_flag.parent.mkdir(parents=True, exist_ok=True)
+                    system_deps_flag.touch()
+                    print("System dependencies flag created", flush=True)
+                else:
+                    print(f"Warning: Some packages may not have installed: {stderr_output[:500] if stderr_output else 'Unknown error'}", flush=True)
+            except Exception as e:
+                print(f"Warning: Could not install system dependencies: {e}", flush=True)
+    
     try:
         result = subprocess.run(
-            [str(python_path), "-c", "import requests, numpy, cyclonedds; print('Core dependencies OK')"],
+            [str(python_path), "-c", "import requests, numpy, flask; print('Core dependencies OK')"],
             capture_output=True,
             text=True,
             timeout=10
@@ -214,11 +314,75 @@ def setup_virtual_environment():
             print("Core dependencies verified", flush=True)
         else:
             print(f"Warning: Some dependencies may be missing: {result.stderr}", flush=True)
-            if "cyclonedds" in result.stderr or "numpy" in result.stderr:
-                print("CRITICAL: Core dependencies missing. Venv may need recreation.", flush=True)
-                return False
+            if "numpy" in result.stderr or "flask" in result.stderr:
+                print("CRITICAL: Core dependencies missing. Installing...", flush=True)
+                try:
+                    install_result = subprocess.run(
+                        [str(pip_path), "install", "-r", str(requirements_file)],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=600
+                    )
+                    if install_result.returncode == 0:
+                        print("Dependencies installed successfully", flush=True)
+                    else:
+                        print(f"Failed to install dependencies: {install_result.stderr[:500]}", flush=True)
+                        return False
+                except Exception as install_e:
+                    print(f"Error installing dependencies: {install_e}", flush=True)
+                    return False
     except Exception as e:
         print(f"Warning: Could not verify dependencies: {e}", flush=True)
+        
+        try:
+            lib_paths = []
+            for path in ["/usr/lib/x86_64-linux-gnu", "/usr/local/lib", "/lib/x86_64-linux-gnu"]:
+                if Path(path).exists():
+                    lib_paths.append(path)
+            
+            find_cmd = ["find", "/usr", "-name", "libddsc.so*", "-type", "f", "2>/dev/null"]
+            result = subprocess.run(
+                " ".join(find_cmd),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            env = os.environ.copy()
+            ld_library_path = env.get("LD_LIBRARY_PATH", "")
+            
+            if result.returncode == 0 and result.stdout.strip():
+                found_libs = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+                if found_libs:
+                    print(f"Found cyclonedds libraries: {found_libs[0]}", flush=True)
+                    lib_dir = str(Path(found_libs[0]).parent)
+                    if lib_dir not in ld_library_path:
+                        ld_library_path = f"{ld_library_path}:{lib_dir}" if ld_library_path else lib_dir
+            
+            for lib_path in lib_paths:
+                if lib_path not in ld_library_path:
+                    ld_library_path = f"{ld_library_path}:{lib_path}" if ld_library_path else lib_path
+            
+            env["LD_LIBRARY_PATH"] = ld_library_path
+            
+            result = subprocess.run(
+                [str(python_path), "-c", "import cyclonedds; print('cyclonedds OK')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env
+            )
+            if result.returncode == 0:
+                print("cyclonedds verified successfully", flush=True)
+                os.environ["LD_LIBRARY_PATH"] = ld_library_path
+            else:
+                print(f"Warning: cyclonedds import failed: {result.stderr[:500] if result.stderr else 'No error message'}", flush=True)
+                print(f"LD_LIBRARY_PATH set to: {ld_library_path}", flush=True)
+                os.environ["LD_LIBRARY_PATH"] = ld_library_path
+        except Exception as e:
+            print(f"Warning: Could not verify cyclonedds: {e}", flush=True)
     
     try:
         result = subprocess.run(
@@ -320,6 +484,27 @@ def main():
             if not setup_virtual_environment():
                 print("ERROR: Virtual environment setup failed", flush=True)
                 sys.exit(1)
+            
+            venv_path = Path("venv").resolve()
+            if is_windows():
+                venv_python = venv_path / "Scripts" / "python.exe"
+            else:
+                venv_python = venv_path / "bin" / "python3"
+                if not venv_python.exists():
+                    venv_python = venv_path / "bin" / "python"
+            
+            if venv_python.exists():
+                venv_python_resolved = venv_python.resolve()
+                current_python = Path(sys.executable).resolve()
+                
+                try:
+                    venv_same = venv_python_resolved.samefile(current_python)
+                except (OSError, ValueError):
+                    venv_same = (str(venv_python_resolved) == str(current_python))
+                
+                if not venv_same:
+                    print(f"Switching to venv Python: {venv_python_resolved} (current: {current_python})", flush=True)
+                    os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
         
         if is_windows():
             try:

@@ -9,11 +9,25 @@ function Joystick({ size = 200, onChange, label = '' }) {
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const joystickIdRef = useRef(joystickCounter++)
-  const containerRectRef = useRef(null)
+  const baseRectRef = useRef(null)
 
   const radius = size / 2
   const stickRadius = size * 0.15
   const maxDistance = radius - stickRadius
+
+  useEffect(() => {
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      baseRectRef.current = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        centerX: rect.left + rect.width / 2,
+        centerY: rect.top + rect.height / 2
+      }
+    }
+  }, [])
 
   const updatePosition = useCallback((x, y) => {
     const clampedX = Math.max(-1, Math.min(1, x))
@@ -24,12 +38,11 @@ function Joystick({ size = 200, onChange, label = '' }) {
     }
   }, [onChange])
 
-  const calculatePosition = useCallback((clientX, clientY) => {
-    if (!containerRectRef.current) return { x: 0, y: 0 }
+  const getPositionFromEvent = useCallback((clientX, clientY) => {
+    if (!baseRectRef.current) return { x: 0, y: 0 }
 
-    const rect = containerRectRef.current
-    const centerX = rect.left + rect.width / 2
-    const centerY = rect.top + rect.height / 2
+    const centerX = baseRectRef.current.centerX
+    const centerY = baseRectRef.current.centerY
 
     const deltaX = clientX - centerX
     const deltaY = clientY - centerY
@@ -57,14 +70,16 @@ function Joystick({ size = 200, onChange, label = '' }) {
       return
     }
 
-    if (!containerRef.current) return
-
-    const rect = containerRef.current.getBoundingClientRect()
-    containerRectRef.current = {
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-      height: rect.height
+    if (!containerRef.current || !baseRectRef.current) {
+      const rect = containerRef.current.getBoundingClientRect()
+      baseRectRef.current = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        centerX: rect.left + rect.width / 2,
+        centerY: rect.top + rect.height / 2
+      }
     }
 
     activeJoystickId = joystickIdRef.current
@@ -72,9 +87,9 @@ function Joystick({ size = 200, onChange, label = '' }) {
 
     const clientX = e.touches ? e.touches[0].clientX : e.clientX
     const clientY = e.touches ? e.touches[0].clientY : e.clientY
-    const pos = calculatePosition(clientX, clientY)
+    const pos = getPositionFromEvent(clientX, clientY)
     updatePosition(pos.x, pos.y)
-  }, [calculatePosition, updatePosition])
+  }, [getPositionFromEvent, updatePosition])
 
   const handleMove = useCallback((e) => {
     if (activeJoystickId !== joystickIdRef.current) return
@@ -82,19 +97,18 @@ function Joystick({ size = 200, onChange, label = '' }) {
     e.preventDefault()
     e.stopPropagation()
 
-    if (!containerRectRef.current) return
+    if (!baseRectRef.current) return
 
     const clientX = e.touches ? e.touches[0].clientX : e.clientX
     const clientY = e.touches ? e.touches[0].clientY : e.clientY
-    const pos = calculatePosition(clientX, clientY)
+    const pos = getPositionFromEvent(clientX, clientY)
     updatePosition(pos.x, pos.y)
-  }, [calculatePosition, updatePosition])
+  }, [getPositionFromEvent, updatePosition])
 
   const handleEnd = useCallback(() => {
     if (activeJoystickId !== joystickIdRef.current) return
 
     activeJoystickId = null
-    containerRectRef.current = null
     setIsDragging(false)
   }, [])
 
@@ -138,6 +152,7 @@ function Joystick({ size = 200, onChange, label = '' }) {
         style={{ 
           width: size, 
           height: size,
+          position: 'relative',
           pointerEvents: activeJoystickId !== null && activeJoystickId !== joystickIdRef.current ? 'none' : 'auto',
           opacity: activeJoystickId !== null && activeJoystickId !== joystickIdRef.current ? 0.5 : 1
         }}
@@ -149,7 +164,10 @@ function Joystick({ size = 200, onChange, label = '' }) {
           style={{
             width: stickRadius * 2,
             height: stickRadius * 2,
-            transform: `translate(${stickX}px, ${stickY}px)`,
+            position: 'absolute',
+            left: '50%',
+            top: '50%',
+            transform: `translate(calc(-50% + ${stickX}px), calc(-50% + ${stickY}px))`,
             transition: isDragging ? 'none' : 'transform 0.1s ease-out'
           }}
         />

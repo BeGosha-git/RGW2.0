@@ -160,8 +160,8 @@ class ServicesManager:
                 "dependencies": []
             },
             "unitree_motor_control": {
-                "status": "ON",
-                "enabled": True,
+                "status": "OFF",
+                "enabled": False,
                 "id": 1,
                 "network": "lo",
                 "dependencies": []

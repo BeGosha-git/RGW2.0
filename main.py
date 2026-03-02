@@ -446,8 +446,12 @@ def cleanup_ports():
         if web_service:
             web_params = manager.get_service_parameters("web")
             web_port = web_params.get("port", 8080)
-            api_port = web_params.get("api_port", 5000)
             ports_to_clean.add(web_port)
+        
+        api_service = manager.get_service("api")
+        if api_service:
+            api_params = manager.get_service_parameters("api")
+            api_port = api_params.get("port", 5000)
             ports_to_clean.add(api_port)
         
         scanner_service = manager.get_service("scanner_service")

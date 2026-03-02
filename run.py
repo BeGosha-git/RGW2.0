@@ -75,17 +75,18 @@ class ServiceRunner:
     
     def find_services(self, services_dir: str = "services", api_dir: str = "api") -> List[str]:
         """
-        Находит все .py файлы в папке services.
+        Находит все .py файлы в папке services и api.
         
         Args:
             services_dir: Путь к папке services
-            api_dir: Путь к папке api (не используется, оставлено для обратной совместимости)
+            api_dir: Путь к папке api
             
         Returns:
             Список путей к .py файлам сервисов
         """
         service_files = []
         
+        # Ищем сервисы в папке services
         if os.path.exists(services_dir):
             for root, dirs, files in os.walk(services_dir):
                 dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
@@ -110,6 +111,21 @@ class ServiceRunner:
                         if file == 'protocol.py':
                             continue
                         if file == 'example_service.py':
+                            continue
+                        filepath = os.path.join(root, file)
+                        service_files.append(filepath)
+        
+        # Ищем сервисы в папке api
+        if os.path.exists(api_dir):
+            for root, dirs, files in os.walk(api_dir):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+                
+                if '__pycache__' in root:
+                    continue
+                
+                for file in files:
+                    if file.endswith('.py') and file != '__init__.py':
+                        if file.endswith('_client.py'):
                             continue
                         filepath = os.path.join(root, file)
                         service_files.append(filepath)
@@ -157,6 +173,8 @@ class ServiceRunner:
                     service_name = filepath_obj.parent.name
                 else:
                     service_name = filepath_obj.stem
+            elif filepath_obj.parent.name == "api":
+                service_name = "api"
             else:
                 service_name = os.path.splitext(os.path.basename(filepath))[0]
             
@@ -404,8 +422,12 @@ class ServiceRunner:
             if web_service:
                 web_params = self.manager.get_service_parameters("web")
                 web_port = web_params.get("port", 8080)
-                api_port = web_params.get("api_port", 5000)
                 ports_to_clean.add(web_port)
+            
+            api_service = self.manager.get_service("api")
+            if api_service:
+                api_params = self.manager.get_service_parameters("api")
+                api_port = api_params.get("port", 5000)
                 ports_to_clean.add(api_port)
             
             scanner_service = self.manager.get_service("scanner_service")

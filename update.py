@@ -256,13 +256,15 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         source_ip: IP адрес робота-источника
         filepath: Путь к файлу на роботе
         local_path: Локальный путь для сохранения
-        
+    
     Returns:
         True если успешно
     """
     try:
+        import services_manager
+        api_port = services_manager.get_api_port()
         client = network.NetworkClient()
-        url = f"http://{source_ip}:8080/api/files/download?path={filepath}"
+        url = f"http://{source_ip}:{api_port}/api/files/download?path={filepath}"
         
         # Создаем директорию если нужно
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -285,12 +287,14 @@ def download_venv_from_robot(source_ip: str) -> bool:
     try:
         import tarfile
         import tempfile
+        import services_manager
         
         venv_path = Path("venv")
         venv_archive = "venv.tar.gz"
+        api_port = services_manager.get_api_port()
         
         client = network.NetworkClient()
-        url = f"http://{source_ip}:8080/api/files/download?path={venv_archive}"
+        url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.tar.gz') as tmp_file:
             tmp_path = tmp_file.name
@@ -333,7 +337,9 @@ def check_venv_exists_on_robot(source_ip: str) -> bool:
     """
     try:
         import requests
-        url = f"http://{source_ip}:8080/api/files/download?path=venv.tar.gz"
+        import services_manager
+        api_port = services_manager.get_api_port()
+        url = f"http://{source_ip}:{api_port}/api/files/download?path=venv.tar.gz"
         response = requests.head(url, timeout=5)
         return response.status_code == 200
     except Exception:
@@ -353,7 +359,9 @@ def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
     """
     try:
         import requests
-        url = f"http://{source_ip}:8080/api/files/info?filepath={filepath}"
+        import services_manager
+        api_port = services_manager.get_api_port()
+        url = f"http://{source_ip}:{api_port}/api/files/info?filepath={filepath}"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
@@ -494,6 +502,8 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     Returns:
         Словарь с информацией о версии и IP источника, или None
     """
+    import services_manager
+    api_port = services_manager.get_api_port()
     network_api = network_api_module.NetworkAPI()
     best_version = None
     best_version_info = None
@@ -501,7 +511,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     
     for ip in robot_ips:
         try:
-            base_url = f"http://{ip}:8080"
+            base_url = f"http://{ip}:{api_port}"
             robot_info = network_api.client.get_robot_info(base_url)
             
             if robot_info and robot_info.get("success"):
@@ -524,7 +534,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
             "success": True,
             "version": best_version_info,
             "source_ip": best_source_ip,
-            "source_url": f"http://{best_source_ip}:8080"
+            "source_url": f"http://{best_source_ip}:{api_port}"
         }
     else:
         return None
@@ -600,7 +610,7 @@ def update_system():
     """
     try:
         import scanner
-        scanner.scan_network()
+        scanner.scan_network()  # Использует порт из конфигурации scanner_service
     except Exception:
         pass
     

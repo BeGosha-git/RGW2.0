@@ -7,7 +7,7 @@ import sys
 import json
 import time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import network
 
 # Путь к файлу для сохранения результатов
@@ -80,17 +80,24 @@ def save_ips(ips: List[str], scan_timestamp: float):
         print(f"Error saving ips.json: {str(e)}", flush=True)
 
 
-def scan_network(port: int = 8080):
+def scan_network(port: Optional[int] = None):
     """
     Выполняет сканирование сети и сохраняет результаты.
     
     Args:
-        port: Порт для сканирования (по умолчанию 8080)
+        port: Порт для сканирования (None = из конфигурации, по умолчанию 8080)
     
     Returns:
         True если успешно
     """
     try:
+        if port is None:
+            try:
+                import services_manager
+                port = services_manager.get_scanner_port()
+            except Exception:
+                port = 8080
+        
         scan_start = time.time()
         
         # Сканируем сеть

@@ -224,10 +224,17 @@ def register_network_endpoints():
         target_ip = data.get('target_ip')
         endpoint = data.get('endpoint')
         payload = data.get('data', {})
-        port = data.get('port', 8080)
+        port = data.get('port')
+        if port is None:
+            try:
+                import services_manager
+                port = services_manager.get_api_port()
+            except Exception:
+                port = 5000
+        timeout = data.get('timeout')  # Опциональный таймаут в секундах
         if not target_ip or not endpoint:
             return jsonify({"success": False, "message": "target_ip and endpoint required"}), 400
-        return jsonify(network_api.send_data(target_ip, endpoint, payload, port=port))
+        return jsonify(network_api.send_data(target_ip, endpoint, payload, port=port, timeout=timeout))
 
 
 def register_robot_endpoints():

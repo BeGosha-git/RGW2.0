@@ -6,6 +6,15 @@ import requests
 from typing import Dict, Any, Optional, List
 
 
+def _get_default_api_port() -> int:
+    """Получает дефолтный порт API из конфигурации."""
+    try:
+        import services_manager
+        return services_manager.get_api_port()
+    except Exception:
+        return 5000
+
+
 class NetworkAPI:
     """API для сетевого взаимодействия с другими роботами."""
     
@@ -13,19 +22,24 @@ class NetworkAPI:
         """Инициализация сетевого API."""
         # Используем таймаут 3 секунды для быстрых проверок статуса и health
         self.client = network.NetworkClient(timeout=3)
+        # Отдельный клиент с увеличенным таймаутом для выполнения команд (5 минут)
+        self.command_client = network.NetworkClient(timeout=60)
     
-    def get_actual_version(self, robot_ips: List[str] = None, port: int = 8080) -> Dict[str, Any]:
+    def get_actual_version(self, robot_ips: List[str] = None, port: Optional[int] = None) -> Dict[str, Any]:
         """
         Получает самую актуальную версию от других роботов.
         
         Args:
             robot_ips: Список IP адресов роботов для проверки (если None, ищет автоматически)
-            port: Порт для подключения (по умолчанию 8080)
+            port: Порт для подключения (None = из конфигурации, по умолчанию 5000)
             
         Returns:
             Информация о самой актуальной версии и IP откуда её получить
         """
         try:
+            if port is None:
+                port = _get_default_api_port()
+            
             if robot_ips is None:
                 # Автоматический поиск роботов в сети
                 robot_ips = network.find_robots_in_network(port=port)
@@ -36,7 +50,7 @@ class NetworkAPI:
             
             for ip in robot_ips:
                 try:
-                    base_url = f"http://{ip}:8080"
+                    base_url = f"http://{ip}:{port}"
                     robot_info = self.client.get_robot_info(base_url)
                     
                     if robot_info and robot_info.get("success"):
@@ -57,7 +71,7 @@ class NetworkAPI:
                     "success": True,
                     "version": latest_version_info,
                     "source_ip": source_ip,
-                    "source_url": f"http://{source_ip}:8080"
+                    "source_url": f"http://{source_ip}:{port}"
                 }
             else:
                 return {
@@ -98,7 +112,7 @@ class NetworkAPI:
         except Exception:
             return 0
     
-    def send_data(self, target_ip: str, endpoint: str, data: Dict, port: int = 8080) -> Dict[str, Any]:
+    def send_data(self, target_ip: str, endpoint: str, data: Dict, port: Optional[int] = None, timeout: Optional[int] = None) -> Dict[str, Any]:
         """
         Отправляет данные другому роботу.
         
@@ -106,22 +120,36 @@ class NetworkAPI:
             target_ip: IP адрес целевого робота
             endpoint: Конечная точка API (например, '/api/robot/execute', '/status', '/health')
             data: Данные для отправки
-            port: Порт для подключения (по умолчанию 8080)
+            port: Порт для подключения (None = из конфигурации, по умолчанию 5000)
+            timeout: Таймаут в секундах (None = использовать дефолтный, для команд обновления рекомендуется 300)
         
         Returns:
             Результат отправки с полной структурой ответа
         """
         try:
+            if port is None:
+                port = _get_default_api_port()
             base_url = f"http://{target_ip}:{port}"
             
             # Нормализуем endpoint: убираем начальный слэш и проверяем формат
             endpoint = endpoint.lstrip('/')
             
+            # Определяем, нужен ли увеличенный таймаут (для команд выполнения)
+            use_long_timeout = endpoint in ['robot/execute', 'api/robot/execute'] or (timeout is not None and timeout > 30)
+            
+            # Выбираем клиент в зависимости от типа запроса
+            if use_long_timeout or timeout:
+                # Для команд выполнения используем клиент с увеличенным таймаутом
+                client_to_use = self.command_client if timeout is None else network.NetworkClient(timeout=timeout)
+            else:
+                # Для быстрых запросов используем обычный клиент
+                client_to_use = self.client
+            
             # Для GET endpoints используем get_from_robot
             if endpoint in ['status', 'health'] or endpoint == 'api/status':
                 if endpoint == 'api/status':
                     endpoint = 'status'
-                response = self.client.get_from_robot(base_url, endpoint)
+                response = client_to_use.get_from_robot(base_url, endpoint)
             else:
                 # Для POST endpoints используем send_data_to_robot
                 # Убираем 'api/' префикс если есть, так как send_data_to_robot добавляет /api/
@@ -129,7 +157,7 @@ class NetworkAPI:
                     clean_endpoint = endpoint[4:]  # Убираем 'api/'
                 else:
                     clean_endpoint = endpoint
-                response = self.client.send_data_to_robot(base_url, clean_endpoint, data)
+                response = client_to_use.send_data_to_robot(base_url, clean_endpoint, data)
             
             # Проверяем ответ более надежно
             if response is None:
@@ -174,19 +202,21 @@ class NetworkAPI:
                 "endpoint": endpoint
             }
     
-    def receive_data(self, source_ip: str, endpoint: str, port: int = 8080) -> Dict[str, Any]:
+    def receive_data(self, source_ip: str, endpoint: str, port: Optional[int] = None) -> Dict[str, Any]:
         """
         Получает данные от другого робота.
         
         Args:
             source_ip: IP адрес робота-источника
             endpoint: Конечная точка API
-            port: Порт для подключения (по умолчанию 8080)
+            port: Порт для подключения (None = из конфигурации, по умолчанию 5000)
             
         Returns:
             Полученные данные
         """
         try:
+            if port is None:
+                port = _get_default_api_port()
             base_url = f"http://{source_ip}:{port}"
             url = f"{base_url}/api/{endpoint}"
             response = self.client.get(url)
@@ -208,7 +238,7 @@ class NetworkAPI:
             }
     
     def download_file_from_robot(self, source_ip: str, filepath: str, 
-                                  local_path: str, port: int = 8080) -> Dict[str, Any]:
+                                  local_path: str, port: Optional[int] = None) -> Dict[str, Any]:
         """
         Скачивает файл с другого робота.
         
@@ -216,12 +246,14 @@ class NetworkAPI:
             source_ip: IP адрес робота-источника
             filepath: Путь к файлу на роботе
             local_path: Локальный путь для сохранения
-            port: Порт для подключения (по умолчанию 8080)
+            port: Порт для подключения (None = из конфигурации, по умолчанию 5000)
             
         Returns:
             Результат операции
         """
         try:
+            if port is None:
+                port = _get_default_api_port()
             url = f"http://{source_ip}:{port}/api/files/download?path={filepath}"
             success = self.client.download_file(url, local_path)
             
@@ -242,17 +274,23 @@ class NetworkAPI:
                 "message": f"Error downloading file: {str(e)}"
             }
     
-    def find_robots(self, port: int = 8080) -> Dict[str, Any]:
+    def find_robots(self, port: Optional[int] = None) -> Dict[str, Any]:
         """
         Ищет роботов в сети.
         
         Args:
-            port: Порт для подключения к роботам (по умолчанию 8080)
+            port: Порт для подключения к роботам (None = из конфигурации веб-сервера, по умолчанию 8080)
         
         Returns:
             Список найденных роботов
         """
         try:
+            if port is None:
+                try:
+                    import services_manager
+                    port = services_manager.get_web_port()
+                except Exception:
+                    port = 8080
             robots = network.find_robots_in_network(port=port)
             robot_info_list = []
             

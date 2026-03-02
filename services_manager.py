@@ -141,7 +141,7 @@ class ServicesManager:
                 "port": 8080,
                 "api_port": 5000,
                 "build_path": "services/web/build",
-                "dependencies": ["unitree_motor_control"]
+                "dependencies": ["api"]
             },
             "docker_service": {
                 "status": "SLEEP",
@@ -165,6 +165,12 @@ class ServicesManager:
                 "id": 1,
                 "network": "lo",
                 "dependencies": []
+            },
+            "api": {
+                "status": "ON",
+                "enabled": True,
+                "port": 5000,
+                "dependencies": []
             }
         }
         
@@ -173,9 +179,6 @@ class ServicesManager:
             "enabled": True,
             "dependencies": []
         })
-        
-        if service_name == "api":
-            defaults_result["dependencies"] = ["web"]
         
         return defaults_result
     
@@ -820,3 +823,48 @@ def get_services_manager() -> ServicesManager:
     if _services_manager is None:
         _services_manager = ServicesManager()
     return _services_manager
+
+
+def get_api_port() -> int:
+    """
+    Получает порт API сервиса из конфигурации.
+    
+    Returns:
+        Порт API (по умолчанию 5000)
+    """
+    try:
+        manager = get_services_manager()
+        params = manager.get_service_parameters("api")
+        return params.get("port", 5000)
+    except Exception:
+        return 5000
+
+
+def get_web_port() -> int:
+    """
+    Получает порт веб-сервиса из конфигурации.
+    
+    Returns:
+        Порт веб-сервера (по умолчанию 8080)
+    """
+    try:
+        manager = get_services_manager()
+        params = manager.get_service_parameters("web")
+        return params.get("port", 8080)
+    except Exception:
+        return 8080
+
+
+def get_scanner_port() -> int:
+    """
+    Получает порт для сканирования сети из конфигурации.
+    
+    Returns:
+        Порт для сканирования (по умолчанию 8080)
+    """
+    try:
+        manager = get_services_manager()
+        params = manager.get_service_parameters("scanner_service")
+        return params.get("port", 8080)
+    except Exception:
+        return 8080

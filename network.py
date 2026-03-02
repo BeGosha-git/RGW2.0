@@ -237,7 +237,7 @@ def get_local_network_base() -> str:
 
 
 def find_robots_in_network(network_base: Optional[str] = None, 
-                           port: int = 80,
+                           port: Optional[int] = None,
                            timeout: float = 0.5) -> List[str]:
     """
     Ищет роботов в локальной сети.
@@ -245,12 +245,19 @@ def find_robots_in_network(network_base: Optional[str] = None,
     Args:
         network_base: Базовый адрес сети (например, "192.168.1"). 
                      Если None, определяется автоматически.
-        port: Порт для проверки
+        port: Порт для проверки (None = из конфигурации веб-сервера, по умолчанию 8080)
         timeout: Таймаут проверки каждого адреса
         
     Returns:
         Список IP адресов доступных роботов
     """
+    if port is None:
+        try:
+            import services_manager
+            port = services_manager.get_web_port()
+        except Exception:
+            port = 8080
+    
     # Автоматически определяем подсеть если не указана
     if network_base is None:
         network_base = get_local_network_base()

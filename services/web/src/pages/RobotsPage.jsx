@@ -760,6 +760,11 @@ function RobotsPage() {
 
       console.log(`Executing command "${button.command}" for robot ${robotId} (${robot.ip})`)
 
+      // Определяем таймаут в зависимости от типа команды
+      // Для команд обновления используем увеличенный таймаут (5 минут)
+      const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && button.args.includes('update.py')
+      const timeout = isUpdateCommand ? 60 : undefined // 5 минут для обновления
+      
       const response = await fetch('/api/network/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -769,7 +774,8 @@ function RobotsPage() {
           data: { 
             command: button.command,
             args: button.args || []
-          }
+          },
+          timeout: timeout
         })
       })
 
@@ -846,6 +852,10 @@ function RobotsPage() {
         }
 
         try {
+          // Определяем таймаут в зависимости от типа команды
+          const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && button.args.includes('update.py')
+          const timeout = isUpdateCommand ? 300 : undefined // 5 минут для обновления
+          
           const response = await fetch('/api/network/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -855,7 +865,8 @@ function RobotsPage() {
               data: { 
                 command: button.command,
                 args: button.args || []
-              }
+              },
+              timeout: timeout
             })
           })
 

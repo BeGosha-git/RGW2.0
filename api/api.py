@@ -238,12 +238,21 @@ def run_api(host='0.0.0.0', port=5000, debug=False):
 def run():
     """
     Функция для запуска API как сервиса из run.py.
-    Запускает API сервер в фоне на порту 5000.
+    Запускает API сервер на порту из конфигурации (по умолчанию 5000).
     """
-    print("Starting API service on port 5000...", flush=True)
+    import services_manager
+    
+    try:
+        manager = services_manager.get_services_manager()
+        params = manager.get_service_parameters("api")
+        port = params.get("port", 5000)
+    except Exception:
+        port = 5000
+    
+    print(f"Starting API service on port {port}...", flush=True)
     import sys
     sys.stdout.flush()
-    run_api(host='0.0.0.0', port=5000, debug=False)
+    run_api(host='0.0.0.0', port=port, debug=False)
 
 
 if __name__ == '__main__':

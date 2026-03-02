@@ -340,28 +340,78 @@ def check_venv_exists_on_robot(source_ip: str) -> bool:
         return False
 
 
+def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
+    """
+    Получает размер файла на удаленном роботе.
+    
+    Args:
+        source_ip: IP адрес робота-источника
+        filepath: Путь к файлу на роботе
+    
+    Returns:
+        Размер файла в байтах или None если не удалось получить
+    """
+    try:
+        import requests
+        url = f"http://{source_ip}:8080/api/files/info?filepath={filepath}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success") and data.get("is_file"):
+                return data.get("size")
+    except Exception:
+        pass
+    return None
+
+
 def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
     """
-    Обновляет файлы с другого робота.
+    Обновляет файлы с другого робота, загружая только файлы с отличающимся размером.
     
     Args:
         source_ip: IP адрес робота-источника
         files_to_update: Список файлов для обновления
-        
+    
     Returns:
         True если все файлы обновлены успешно
     """
     success = True
+    skipped_count = 0
+    updated_count = 0
     
     for file_info in files_to_update:
         filepath = file_info.get("path")
         if not filepath:
             continue
         
-        local_path = filepath
+        # Пропускаем директории
+        if file_info.get("is_directory"):
+            continue
         
-        if not download_file_from_robot(source_ip, filepath, local_path):
+        local_path = filepath
+        remote_size = file_info.get("size")
+        
+        # Проверяем размер локального файла
+        local_size = None
+        if os.path.exists(local_path):
+            try:
+                local_size = os.path.getsize(local_path)
+            except Exception:
+                pass
+        
+        # Если размеры совпадают, пропускаем файл
+        if local_size is not None and remote_size is not None and local_size == remote_size:
+            skipped_count += 1
+            continue
+        
+        # Загружаем файл
+        if download_file_from_robot(source_ip, filepath, local_path):
+            updated_count += 1
+        else:
             success = False
+    
+    if skipped_count > 0 or updated_count > 0:
+        print(f"Update complete: {updated_count} files updated, {skipped_count} files skipped (same size)", flush=True)
     
     return success
 

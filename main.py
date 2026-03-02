@@ -372,6 +372,11 @@ def run_services():
 def main():
     """Главная функция приложения."""
     try:
+        try:
+            import api.robot as robot_api
+            robot_api.RobotAPI.ensure_default_commands()
+        except Exception:
+            pass
         
         try:
             check_and_update_version()

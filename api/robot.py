@@ -199,6 +199,44 @@ class RobotAPI:
             }
     
     @staticmethod
+    def ensure_default_commands() -> None:
+        """
+        Создает дефолтный commands.json если файл не существует.
+        """
+        commands_path = PROJECT_ROOT / "data" / "commands.json"
+        if commands_path.exists():
+            return
+        
+        data_dir = commands_path.parent
+        data_dir.mkdir(parents=True, exist_ok=True)
+        
+        default_commands = {
+            "version": "1.0.0",
+            "lastUpdated": None,
+            "commands": [
+                {
+                    "id": "update_system",
+                    "name": "Обновление системы",
+                    "description": "Ищет более новую версию и загружает только измененные файлы",
+                    "command": "python3",
+                    "args": ["update.py"],
+                    "showButton": True,
+                    "buttonConfig": {
+                        "position": 1,
+                        "color": "primary",
+                        "icon": "update"
+                    }
+                }
+            ]
+        }
+        
+        try:
+            with open(commands_path, 'w', encoding='utf-8') as f:
+                json.dump(default_commands, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+    
+    @staticmethod
     def get_commands() -> Dict[str, Any]:
         """
         Получает список быстрых команд из commands.json.
@@ -207,6 +245,7 @@ class RobotAPI:
             Список команд
         """
         try:
+            RobotAPI.ensure_default_commands()
             commands_path = PROJECT_ROOT / "data" / "commands.json"
             if commands_path.exists():
                 with open(commands_path, 'r', encoding='utf-8') as f:

@@ -540,15 +540,16 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     best_version_info = None
     best_source_ip = None
     
-    print(f"Checking versions from {len(robot_ips)} robot(s) on port {api_port}...", flush=True)
+    print(f"Checking versions from {len(robot_ips)} robot(s) on port {api_port}: {robot_ips}", flush=True)
     
     for ip in robot_ips:
         try:
             base_url = f"http://{ip}:{api_port}"
             print(f"Checking version from {ip}:{api_port}...", flush=True)
-            
-            # Используем /api/version для получения полного version.json со списком файлов
-            version_response = network_api.client.get_from_robot(base_url, "version")
+            # Явный таймаут 5 сек на адрес, чтобы не зависнуть на одном роботе
+            import network as net_mod
+            check_client = net_mod.NetworkClient(timeout=5)
+            version_response = check_client.get_from_robot(base_url, "version")
             
             if version_response and version_response.get("success"):
                 version_data = version_response.get("version", {})
@@ -559,6 +560,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
                 
                 if not version_matches_priority(version_type, priority):
                     print(f"Version {version_str} ({version_type}) does not match priority {priority}, skipping", flush=True)
+                    print(f"Done with {ip}", flush=True)
                     continue
                 
                 if best_version is None or network_api._compare_versions(version_str, best_version) > 0:
@@ -568,10 +570,12 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
                     best_source_ip = ip
             else:
                 print(f"No version info from {ip}: {version_response}", flush=True)
+            print(f"Done with {ip}", flush=True)
         except Exception as e:
             print(f"Error checking version from {ip}: {str(e)}", flush=True)
             import traceback
             traceback.print_exc()
+            print(f"Done with {ip} (error), continuing to next", flush=True)
             continue
     
     if best_version_info and best_source_ip:
@@ -694,7 +698,8 @@ def update_system():
     print(f"Version comparison result: {version_comparison} (1 = remote newer, 0 = same, -1 = remote older)", flush=True)
     
     if version_comparison <= 0:
-        print(f"Remote version {remote_version} is not newer than current {current_version}, skipping update", flush=True)
+        print(f"Remote version {remote_version} (from {source_ip}) is not newer than current {current_version}, skipping update", flush=True)
+        print(f"Checked all {len(robot_ips)} robot(s); no update needed.", flush=True)
         return True
     
     files_to_update = version_data.get("files", [])

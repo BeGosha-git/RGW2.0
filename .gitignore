@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+# Исключение для необходимых CRC библиотек
+!services/unitree_motor_control/unitree_sdk2py/utils/lib/crc_amd64.so
+!services/unitree_motor_control/unitree_sdk2py/utils/lib/crc_aarch64.so
 .Python
 # build/ - закомментировано, так как services/web/build должен быть в git
 # build/
@@ -13,6 +16,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Исключение для необходимых CRC библиотек
+!services/unitree_motor_control/unitree_sdk2py/utils/lib/
 parts/
 sdist/
 var/

@@ -75,7 +75,7 @@ MotionSwitcherClient = None
 
 try:
     from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
+    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
     from unitree_sdk2py.utils.crc import CRC
     from unitree_sdk2py.utils.thread import RecurrentThread
     import unitree_legged_const as h1
@@ -256,37 +256,26 @@ class MotorController:
         
         print(f"[UnitreeMotorControl] Creating LowCmd_ structure...", flush=True)
         try:
-            from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_
+            from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
             print(f"[UnitreeMotorControl] Using default factory for LowCmd_...", flush=True)
-            self.low_cmd = unitree_go_msg_dds__LowCmd_()
-            self.low_cmd.head[0] = 0xFE
-            self.low_cmd.head[1] = 0xEF
-            self.low_cmd.level_flag = 0xFF
+            self.low_cmd = unitree_hg_msg_dds__LowCmd_()
+            self.low_cmd.mode_pr = 0
+            self.low_cmd.mode_machine = 0
             print(f"[UnitreeMotorControl] LowCmd_ created successfully using default factory", flush=True)
         except Exception as e:
             print(f"[UnitreeMotorControl] Default factory failed: {e}, using manual creation...", flush=True)
             import traceback
             traceback.print_exc()
-            from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmd_, BmsCmd_
-            print(f"[UnitreeMotorControl] Creating MotorCmd_ and BmsCmd_...", flush=True)
-            motor_cmds = [MotorCmd_(mode=0, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.0, reserve=[0, 0, 0]) for _ in range(20)]
+            from unitree_sdk2py.idl.unitree_hg.msg.dds_ import MotorCmd_
+            print(f"[UnitreeMotorControl] Creating MotorCmd_...", flush=True)
+            motor_cmds = [MotorCmd_(mode=0, q=0.0, dq=0.0, tau=0.0, kp=0.0, kd=0.0, reserve=0) for _ in range(35)]
             print(f"[UnitreeMotorControl] Created {len(motor_cmds)} MotorCmd_ instances", flush=True)
-            bms_cmd = BmsCmd_(off=0, reserve=[0, 0, 0])
             print(f"[UnitreeMotorControl] Creating LowCmd_ manually...", flush=True)
             self.low_cmd = LowCmd_(
-                head=[0xFE, 0xEF],
-                level_flag=0xFF,
-                frame_reserve=0,
-                sn=[0, 0],
-                version=[0, 0],
-                bandwidth=0,
+                mode_pr=0,
+                mode_machine=0,
                 motor_cmd=motor_cmds,
-                bms_cmd=bms_cmd,
-                wireless_remote=[0] * 40,
-                led=[0] * 12,
-                fan=[0, 0],
-                gpio=0,
-                reserve=0,
+                reserve=[0, 0, 0, 0],
                 crc=0
             )
             print(f"[UnitreeMotorControl] LowCmd_ created successfully manually", flush=True)
@@ -307,25 +296,26 @@ class MotorController:
         
         timeout = 30.0
         start_time = time.time()
-        check_interval = 2.0
+        check_interval = 1.0
         last_check = start_time
-        use_read_method = False
+        
+        print(f"[UnitreeMotorControl] Waiting for robot state...", flush=True)
         
         while self.low_state is None and (time.time() - start_time) < timeout:
             current_time = time.time()
             if current_time - last_check >= check_interval:
                 elapsed = current_time - start_time
                 last_check = current_time
+                print(f"[UnitreeMotorControl] Waiting for state... ({elapsed:.1f}s/{timeout}s)", flush=True)
                 
-                if elapsed > 10.0 and not use_read_method:
-                    use_read_method = True
-                    try:
-                        msg = self.lowstate_subscriber.Read(timeout=2.0)
-                        if msg:
-                            self.low_state_handler(msg)
-                            break
-                    except Exception:
-                        pass
+                try:
+                    msg = self.lowstate_subscriber.Read(timeout=1.0)
+                    if msg:
+                        print(f"[UnitreeMotorControl] Received state via Read()", flush=True)
+                        self.low_state_handler(msg)
+                        break
+                except Exception as e:
+                    print(f"[UnitreeMotorControl] Read() error: {e}", flush=True)
             
             time.sleep(0.1)
         
@@ -351,19 +341,16 @@ class MotorController:
     
     def init_low_cmd(self):
         """Инициализирует команды низкого уровня."""
-        self.low_cmd.head[0] = 0xFE
-        self.low_cmd.head[1] = 0xEF
-        self.low_cmd.level_flag = 0xFF
-        self.low_cmd.gpio = 0
+        self.low_cmd.mode_pr = 0
+        self.low_cmd.mode_machine = 0
         
         with self.lock:
             for i in range(H1_NUM_MOTOR):
+                self.low_cmd.motor_cmd[i].mode = 1
                 if self.is_weak_motor(i):
-                    self.low_cmd.motor_cmd[i].mode = 0x01
                     self.low_cmd.motor_cmd[i].kp = self.kp_low
                     self.low_cmd.motor_cmd[i].kd = self.kd_low
                 else:
-                    self.low_cmd.motor_cmd[i].mode = 0x0A
                     self.low_cmd.motor_cmd[i].kp = self.kp_high
                     self.low_cmd.motor_cmd[i].kd = self.kd_high
                 
@@ -381,12 +368,15 @@ class MotorController:
             self.low_state = msg
             
             if msg and hasattr(msg, 'motor_state'):
+                motor_count = len(msg.motor_state) if hasattr(msg, 'motor_state') else 0
                 with self.lock:
-                    for i in range(min(H1_NUM_MOTOR, len(msg.motor_state))):
+                    for i in range(min(H1_NUM_MOTOR, motor_count)):
                         if hasattr(msg.motor_state[i], 'q'):
                             self.current_angles[i] = msg.motor_state[i].q
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[UnitreeMotorControl] Error in low_state_handler: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
     
     def start_control(self):
         """Запускает поток управления."""
@@ -439,20 +429,24 @@ class MotorController:
                         for i in range(min(H1_NUM_MOTOR, motor_state_len)):
                             if hasattr(self.low_state.motor_state[i], 'q'):
                                 self.current_angles[i] = self.low_state.motor_state[i].q
+                        
+                        if hasattr(self.low_state, 'mode_machine'):
+                            self.low_cmd.mode_machine = self.low_state.mode_machine
                     except Exception as e:
                         print(f"[UnitreeMotorControl] Error reading motor_state: {e}", flush=True)
-                    
+                
+                self.low_cmd.mode_pr = 0
+                
                 for i in range(H1_NUM_MOTOR):
                     try:
                         if not hasattr(self.low_cmd, 'motor_cmd') or i >= len(self.low_cmd.motor_cmd):
                             continue
                         
+                        self.low_cmd.motor_cmd[i].mode = 1
                         if self.is_weak_motor(i):
-                            self.low_cmd.motor_cmd[i].mode = 0x01
                             self.low_cmd.motor_cmd[i].kp = self.kp_low
                             self.low_cmd.motor_cmd[i].kd = self.kd_low
                         else:
-                            self.low_cmd.motor_cmd[i].mode = 0x0A
                             self.low_cmd.motor_cmd[i].kp = self.kp_high
                             self.low_cmd.motor_cmd[i].kd = self.kd_high
                         
@@ -473,19 +467,19 @@ class MotorController:
                             
                             delta = target_angle - current_angle
                             
-                            if abs(delta) > 0.01:
+                            if abs(delta) > 0.001:
                                 if velocity > 0:
                                     max_delta = velocity * self.control_dt
                                     
                                     if abs(delta) <= max_delta:
                                         new_angle = target_angle
-                                        dq = delta / self.control_dt
+                                        dq = 0.0
                                     else:
                                         new_angle = current_angle + np.sign(delta) * max_delta
                                         dq = velocity * np.sign(delta)
                                 else:
                                     new_angle = target_angle
-                                    dq = delta / self.control_dt if abs(delta) > 0.01 else 0.0
+                                    dq = 0.0
                             else:
                                 new_angle = target_angle
                                 dq = 0.0
@@ -585,7 +579,7 @@ class MotorController:
                         angle = max(min_limit, min(max_limit, angle))
                     
                     if interpolation > 0:
-                        effective_velocity = max(0.0, min(100.0, interpolation))
+                        effective_velocity = max(0.0, min(1000.0, interpolation))
                     else:
                         effective_velocity = 0.0
                     

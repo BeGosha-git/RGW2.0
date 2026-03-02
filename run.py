@@ -40,10 +40,7 @@ if venv_path.exists():
             venv_same = (str(venv_python_resolved) == str(current_python))
         
         if not venv_same:
-            print(f"[ServiceRunner] WARNING: Not using venv Python! Current: {current_python}, Expected: {venv_python_resolved}", flush=True)
-            print(f"[ServiceRunner] Services may fail due to missing dependencies in system Python", flush=True)
-        else:
-            print(f"[ServiceRunner] Using venv Python: {venv_python_resolved}", flush=True)
+            pass
         
         if 'VIRTUAL_ENV' not in os.environ:
             os.environ['VIRTUAL_ENV'] = str(venv_path)
@@ -63,7 +60,6 @@ if venv_path.exists():
         if paths_to_add:
             new_ld_path = ':'.join(paths_to_add)
             os.environ['LD_LIBRARY_PATH'] = f"{new_ld_path}:{ld_library_path}" if ld_library_path else new_ld_path
-            print(f"[ServiceRunner] Added venv lib paths to LD_LIBRARY_PATH: {paths_to_add}", flush=True)
 
 
 class ServiceRunner:
@@ -134,7 +130,6 @@ class ServiceRunner:
             filepath_obj = Path(filepath)
             
             if filepath_obj.name == "init_settings.py":
-                print(f"Skipping utility file: {filepath}", flush=True)
                 return False
             
             if 'unitree_sdk2py' in str(filepath_obj):
@@ -166,7 +161,6 @@ class ServiceRunner:
                 service_name = os.path.splitext(os.path.basename(filepath))[0]
             
             if not self.manager.is_service_enabled(service_name):
-                print(f"Service {service_name} is disabled. Skipping...", flush=True)
                 service_info = self.manager.get_service(service_name)
                 current_status = service_info.get("status", "OFF")
                 if current_status != "OFF":
@@ -183,17 +177,11 @@ class ServiceRunner:
             
             if current_status != expected_status:
                 self.manager.update_service_status(service_name, expected_status)
-                print(f"[ServiceRunner] Synchronized status for {service_name}: {current_status} -> {expected_status} (enabled={enabled})", flush=True)
             
             module_name = service_name
             
-            print(f"[ServiceRunner] Loading service {service_name} from {filepath}", flush=True)
-            print(f"[ServiceRunner] Using Python: {sys.executable}", flush=True)
-            print(f"[ServiceRunner] VIRTUAL_ENV: {os.environ.get('VIRTUAL_ENV', 'not set')}", flush=True)
-            
             spec = importlib.util.spec_from_file_location(module_name, filepath)
             if spec is None or spec.loader is None:
-                print(f"Failed to load spec for {filepath}")
                 return False
             
             module = importlib.util.module_from_spec(spec)
@@ -211,18 +199,9 @@ class ServiceRunner:
             if run_func:
                 def service_wrapper():
                     try:
-                        print(f"[ServiceRunner] Starting service: {filepath}", flush=True)
-                        print(f"[ServiceRunner] Service Python: {sys.executable}", flush=True)
-                        print(f"[ServiceRunner] Service VIRTUAL_ENV: {os.environ.get('VIRTUAL_ENV', 'not set')}", flush=True)
-                        sys.stdout.flush()
-                        sys.stderr.flush()
                         run_func()
-                    except Exception as e:
-                        print(f"[ServiceRunner] Error in service {filepath}: {str(e)}", flush=True)
-                        import traceback
-                        traceback.print_exc()
-                        sys.stdout.flush()
-                        sys.stderr.flush()
+                    except Exception:
+                        pass
                 
                 thread = threading.Thread(target=service_wrapper, daemon=False)
                 thread.start()
@@ -236,66 +215,46 @@ class ServiceRunner:
                     "service_name": service_name
                 })
                 
-                print(f"Service {filepath} started", flush=True)
-                sys.stdout.flush()
                 return True
             else:
-                print(f"No run/main function found in {filepath}")
                 return False
                 
-        except Exception as e:
-            print(f"Error loading service {filepath}: {str(e)}")
+        except Exception:
             return False
     
     def run_all_services(self):
         """Запускает все найденные сервисы."""
         self.running = True
-        print("Discovering services...", flush=True)
         service_files = self.find_services()
         
         if not service_files:
-            print("No services found. Waiting indefinitely...", flush=True)
             try:
                 while True:
                     time.sleep(60)
-                    sys.stdout.flush()
             except KeyboardInterrupt:
                 pass
             return
         
         self.service_files = service_files
-        
-        print(f"Found {len(service_files)} service(s)", flush=True)
-        for sf in service_files:
-            print(f"  - {sf}", flush=True)
-        
         self.running = True
         
         for service_file in service_files:
             self.load_service(service_file)
             time.sleep(0.5)
         
-        print(f"Started {len(self.services)} service(s)", flush=True)
-        
         if len(self.services) == 0:
-            print("No services started. Waiting indefinitely...", flush=True)
             try:
                 while True:
                     time.sleep(60)
-                    sys.stdout.flush()
             except KeyboardInterrupt:
                 pass
             return
         
-        print("Waiting 5 seconds for services to initialize...", flush=True)
         time.sleep(5)
         
         alive_threads = [t for t in self.threads if t.is_alive()]
-        print(f"After initialization: {len(alive_threads)}/{len(self.threads)} threads alive", flush=True)
         
         if len(alive_threads) == 0:
-            print("ERROR: All service threads died immediately after start!", flush=True)
-            print("Waiting indefinitely to prevent container exit...", flush=True)
             try:
                 while True:
                     time.sleep(60)
@@ -333,22 +292,16 @@ class ServiceRunner:
                             
                             if motor_was_loaded and not motor_thread_alive:
                                 if motor_enabled:
-                                    print("Motor service was running but stopped unexpectedly. Shutting down main.py...", flush=True)
-                                    sys.stdout.flush()
-                                    sys.stderr.flush()
                                     self.running = False
                                     break
-                                else:
-                                    print("Motor service stopped and is disabled via API. This is expected.", flush=True)
                             elif not motor_was_loaded and not motor_enabled:
                                 pass
-                    except Exception as e:
-                        print(f"Warning: Could not check motor service status: {e}", flush=True)
+                    except Exception:
+                        pass
                     
                     last_motor_check = current_time
                 
                 if current_time - last_service_check >= service_check_interval:
-                    print("Checking for new services...", flush=True)
                     self.manager.refresh_services()
                     
                     discovered_services = self.manager.discover_services()
@@ -374,7 +327,6 @@ class ServiceRunner:
                                             break
                             
                             if service_file and self.manager.is_service_enabled(service_name):
-                                print(f"Found new service: {service_name}. Starting...", flush=True)
                                 self.load_service(service_file)
                     
                     last_service_check = current_time
@@ -382,17 +334,7 @@ class ServiceRunner:
                 alive_threads = [t for t in self.threads if t.is_alive()]
                 dead_threads = [t for t in self.threads if not t.is_alive()]
                 
-                if dead_threads:
-                    print(f"Warning: {len(dead_threads)} service thread(s) stopped", flush=True)
-                    for i, thread in enumerate(dead_threads):
-                        service_info = self.services[i] if i < len(self.services) else None
-                        service_name = service_info.get("service_name", "unknown") if service_info else "unknown"
-                        print(f"  - Thread for service '{service_name}' is dead", flush=True)
-                
                 if not alive_threads and len(self.services) > 0:
-                    print("All services stopped unexpectedly", flush=True)
-                    sys.stdout.flush()
-                    
                     all_sleep = True
                     for service_info in self.services:
                         service_name = service_info.get("service_name")
@@ -403,91 +345,50 @@ class ServiceRunner:
                                 break
                     
                     if all_sleep:
-                        print("All services are in SLEEP status. Not restarting.", flush=True)
-                        sys.stdout.flush()
                         break
                     
-                    print("Restarting services...", flush=True)
-                    sys.stdout.flush()
                     self.threads = []
                     self.services = []
                     for service_file in getattr(self, 'service_files', []):
                         self.load_service(service_file)
                         time.sleep(0.5)
                     if not self.threads:
-                        print("Failed to restart services. Exiting.", flush=True)
-                        sys.stdout.flush()
                         break
-                elif len(alive_threads) > 0:
-                    print(f"Services running: {len(alive_threads)}/{len(self.threads)} threads alive", flush=True)
-                else:
-                    if len(self.services) == 0:
-                        print("No services to run. Waiting indefinitely...", flush=True)
-                        sys.stdout.flush()
-                        try:
-                            while True:
-                                time.sleep(60)
-                                sys.stdout.flush()
-                        except KeyboardInterrupt:
-                            break
+                elif len(self.services) == 0:
+                    try:
+                        while True:
+                            time.sleep(60)
+                    except KeyboardInterrupt:
                         break
-                    else:
-                        print(f"ERROR: All {len(self.services)} service(s) stopped but services list is not empty!", flush=True)
-                        print("This should not happen. Waiting indefinitely to prevent container exit...", flush=True)
-                        try:
-                            while True:
-                                time.sleep(60)
-                                sys.stdout.flush()
-                        except KeyboardInterrupt:
-                            break
-                        break
+                    break
                 time.sleep(60)
-                sys.stdout.flush()
         except KeyboardInterrupt:
-            print("\nStopping services...", flush=True)
-            sys.stdout.flush()
             self.stop_all_services()
         except SystemExit:
             raise
-        except Exception as e:
-            print(f"Error in service runner: {str(e)}", flush=True)
-            import traceback
-            traceback.print_exc()
-            sys.stdout.flush()
-            sys.stderr.flush()
+        except Exception:
+            pass
         
         if not self.running:
-            print("Service runner stopped. Stopping all services...", flush=True)
-            sys.stdout.flush()
-            sys.stderr.flush()
             self.stop_all_services()
-            print("Exiting...", flush=True)
             sys.exit(0)
     
     def stop_all_services(self):
         """Останавливает все сервисы."""
         self.running = False
-        print("Waiting for services to stop...")
         
         try:
             motor_service_status = self.manager.get_service("unitree_motor_control")
             if motor_service_status.get("status") == "ON":
-                print("CRITICAL: Motor service is active. Skipping forced shutdown for safety.", flush=True)
-                print("Motor service will continue running. Use API to shutdown (requires 3 consecutive OFF requests).", flush=True)
-                services_to_stop = [s for s in self.services if s.get("service_name") != "unitree_motor_control"]
                 threads_to_stop = [t for i, t in enumerate(self.threads) if i < len(self.services) and self.services[i].get("service_name") != "unitree_motor_control"]
-                
                 for thread in threads_to_stop:
                     thread.join(timeout=5)
-                print(f"Stopped {len(threads_to_stop)} service(s) (motor service excluded)", flush=True)
                 return
-        except Exception as e:
-            print(f"Warning: Could not check motor service status: {e}", flush=True)
+        except Exception:
+            pass
         
         for thread in self.threads:
             thread.join(timeout=5)
-        
-        print("All services stopped")
 
 
 def run_services():
@@ -495,17 +396,10 @@ def run_services():
     try:
         runner = ServiceRunner()
         runner.run_all_services()
-    except Exception as e:
-        print(f"Fatal error in run_services: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        print("Waiting indefinitely after fatal error to prevent container exit...", flush=True)
+    except Exception:
         try:
             while True:
                 time.sleep(60)
-                sys.stdout.flush()
         except KeyboardInterrupt:
             pass
         raise

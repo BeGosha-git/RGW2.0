@@ -130,8 +130,8 @@ def check_and_update_version():
                     current_version = existing_data.get("version", "1.00.01")
                     current_files = existing_data.get("files", [])
                     existing_version_type = existing_data.get("version_type", "STABLE")
-            except Exception as e:
-                print(f"Warning: Could not read existing version file: {str(e)}", flush=True)
+            except Exception:
+                pass
         
         files_list = scan_project_files()
         
@@ -171,16 +171,11 @@ def check_and_update_version():
             with open(version_file, 'w', encoding='utf-8') as f:
                 json.dump(version_data, f, indent=4, ensure_ascii=False)
             
-            print(f"Version updated: {current_version} -> {new_version} ({len(files_list)} files)", flush=True)
             return True
         else:
-            print(f"Version check: No changes detected (version {current_version}, {len(files_list)} files)", flush=True)
             return True
             
-    except Exception as e:
-        print(f"Error checking/updating version: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return False
 
 
@@ -198,27 +193,18 @@ def create_venv_archive() -> bool:
         venv_archive = "venv.tar.gz"
         
         if not venv_path.exists():
-            print("Venv does not exist, skipping archive creation", flush=True)
             return False
         
         venv_ready_flag = venv_path / ".ready"
         if not venv_ready_flag.exists():
-            print("Venv is not ready, skipping archive creation", flush=True)
             return False
-        
-        print(f"Creating venv archive ({venv_archive})...", flush=True)
         
         with tarfile.open(venv_archive, 'w:gz') as tar:
             tar.add(venv_path, arcname='venv', filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
         
-        archive_size = os.path.getsize(venv_archive) / 1024 / 1024
-        print(f"  ✓ Venv archive created ({archive_size:.2f} MB)", flush=True)
         return True
         
-    except Exception as e:
-        print(f"Error creating venv archive: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return False
 
 
@@ -256,13 +242,9 @@ def update_version_file():
         with open(version_file, 'w', encoding='utf-8') as f:
             json.dump(version_data, f, indent=4, ensure_ascii=False)
         
-        print(f"Version file updated: {len(files_list)} files/directories", flush=True)
         return True
         
-    except Exception as e:
-        print(f"Error updating version file: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return False
 
 
@@ -286,8 +268,7 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         
         return client.download_file(url, local_path)
-    except Exception as e:
-        print(f"Error downloading file {filepath} from {source_ip}: {str(e)}")
+    except Exception:
         return False
 
 
@@ -308,8 +289,6 @@ def download_venv_from_robot(source_ip: str) -> bool:
         venv_path = Path("venv")
         venv_archive = "venv.tar.gz"
         
-        print(f"Downloading venv from {source_ip}...", flush=True)
-        
         client = network.NetworkClient()
         url = f"http://{source_ip}/api/files/download?path={venv_archive}"
         
@@ -318,41 +297,27 @@ def download_venv_from_robot(source_ip: str) -> bool:
         
         try:
             if not client.download_file(url, tmp_path):
-                print(f"  ✗ Failed to download venv archive from {source_ip}", flush=True)
                 return False
             
             if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-                print(f"  ✗ Downloaded venv archive is empty or missing", flush=True)
                 return False
             
-            print(f"  ✓ Venv archive downloaded ({os.path.getsize(tmp_path) / 1024 / 1024:.2f} MB)", flush=True)
-            
             if venv_path.exists():
-                print("  Removing existing venv...", flush=True)
                 shutil.rmtree(venv_path)
             
-            print("  Extracting venv archive...", flush=True)
             with tarfile.open(tmp_path, 'r:gz') as tar:
                 tar.extractall(path='.')
             
-            print("  ✓ Venv extracted successfully", flush=True)
-            
             venv_ready_flag = venv_path / ".ready"
-            if venv_ready_flag.exists():
-                print("  ✓ Venv ready flag preserved", flush=True)
-            else:
+            if not venv_ready_flag.exists():
                 venv_ready_flag.touch()
-                print("  ✓ Venv ready flag created", flush=True)
             
             return True
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
                 
-    except Exception as e:
-        print(f"  ✗ Error downloading/extracting venv: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return False
 
 
@@ -395,12 +360,7 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
         
         local_path = filepath
         
-        print(f"Updating {filepath}...")
-        
-        if download_file_from_robot(source_ip, filepath, local_path):
-            print(f"  ✓ {filepath} updated")
-        else:
-            print(f"  ✗ Failed to update {filepath}")
+        if not download_file_from_robot(source_ip, filepath, local_path):
             success = False
     
     return success
@@ -419,8 +379,8 @@ def get_version_priority_from_settings() -> str:
             with open(settings_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
                 return settings.get("VersionPriority", "STABLE")
-    except Exception as e:
-        print(f"Warning: Could not read VersionPriority from settings.json: {str(e)}", flush=True)
+    except Exception:
+        pass
     return "STABLE"
 
 
@@ -488,19 +448,14 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
                 version_str = version_data.get("version", "0.00.00")
                 version_type = version_data.get("version_type", "STABLE")
                 
-                # Проверяем соответствие приоритету
                 if not version_matches_priority(version_type, priority):
-                    print(f"Robot {ip} has version {version_str} ({version_type}), but priority is {priority}. Skipping.", flush=True)
                     continue
                 
-                # Сравниваем версии
                 if best_version is None or network_api._compare_versions(version_str, best_version) > 0:
                     best_version = version_str
                     best_version_info = version_data
                     best_source_ip = ip
-                    print(f"Found better version: {version_str} ({version_type}) from {ip}", flush=True)
-        except Exception as e:
-            print(f"Error checking robot {ip}: {str(e)}", flush=True)
+        except Exception:
             continue
     
     if best_version_info and best_source_ip:
@@ -561,28 +516,18 @@ def restart_service(service_name: str) -> bool:
         True если успешно
     """
     try:
-        # Создаем файл-флаг для перезапуска сервиса
         restart_flag_file = Path("data") / f".restart_{service_name}"
         restart_flag_file.parent.mkdir(parents=True, exist_ok=True)
         restart_flag_file.touch()
-        
-        print(f"Service {service_name} restart flag created. Service will be restarted by run.py", flush=True)
         return True
-    except Exception as e:
-        print(f"Error creating restart flag for service {service_name}: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return False
 
 
 def restart_project() -> None:
-    """
-    Перезапускает весь проект.
-    В Docker контейнере это приведет к перезапуску контейнера.
-    """
-    print("Restarting project...", flush=True)
+    """Перезапускает весь проект."""
     import sys
-    sys.exit(1)  # Выход с кодом ошибки для перезапуска контейнера
+    sys.exit(1)
 
 
 def update_system():
@@ -592,39 +537,22 @@ def update_system():
     соответствующую приоритету, и обновляет файлы.
     Если изменены сервисы - перезапускает только их, иначе перезапускает проект.
     """
-    print("Starting system update...", flush=True)
-    
-    # Сканируем сеть перед обновлением для генерации ips.json
-    print("Scanning network to update ips.json...", flush=True)
     try:
         import scanner
         scanner.scan_network()
-    except Exception as e:
-        print(f"Warning: Network scan failed: {str(e)}", flush=True)
-        print("Continuing with existing ips.json if available...", flush=True)
+    except Exception:
+        pass
     
-    # Обновляем локальный version.json
-    print("Updating local version file...", flush=True)
     update_version_file()
     
-    # Получаем приоритет версии из settings.json
     priority = get_version_priority_from_settings()
-    print(f"Version priority: {priority}", flush=True)
-    
-    # Загружаем IP адреса из ips.json
     robot_ips = get_ips_from_file()
     if not robot_ips:
-        print("No robot IPs found in ips.json. Skipping update.", flush=True)
         return True
     
-    print(f"Found {len(robot_ips)} robot IP(s) in ips.json", flush=True)
-    
-    # Находим наивысшую версию, соответствующую приоритету
-    print("Checking for updates from other robots...", flush=True)
     version_info = find_best_version_by_priority(robot_ips, priority)
     
     if not version_info or not version_info.get("success"):
-        print("No updates available or no matching versions found.", flush=True)
         return True
     
     source_ip = version_info.get("source_ip")
@@ -632,7 +560,6 @@ def update_system():
     remote_version = version_data.get("version", "0.00.00")
     remote_version_type = version_data.get("version_type", "STABLE")
     
-    # Читаем текущую версию
     current_version = "0.00.00"
     version_file = "data/version.json"
     if os.path.exists(version_file):
@@ -640,78 +567,47 @@ def update_system():
             current_data = json.load(f)
             current_version = current_data.get("version", "0.00.00")
     
-    print(f"Current version: {current_version}", flush=True)
-    print(f"Latest matching version: {remote_version} ({remote_version_type}) from {source_ip}", flush=True)
-    
-    # Сравниваем версии
     network_api = network_api_module.NetworkAPI()
     if network_api._compare_versions(remote_version, current_version) <= 0:
-        print("System is up to date.", flush=True)
         return True
     
-    # Получаем список файлов для обновления
     files_to_update = version_data.get("files", [])
-    
     if not files_to_update:
-        print("No files to update.", flush=True)
         return True
     
-    print(f"Updating {len(files_to_update)} files from {source_ip}...", flush=True)
-    
-    # Определяем какие сервисы изменились
     changed_services = get_changed_services(files_to_update)
     has_service_changes = len(changed_services) > 0
     
-    # Определяем есть ли изменения вне services/
     has_non_service_changes = any(
         not file_info.get("path", "").startswith("services/")
         for file_info in files_to_update
     )
     
-    # КРИТИЧНО: Проверяем, изменился ли requirements.txt
     requirements_changed = any(
         file_info.get("path", "") == "requirements.txt"
         for file_info in files_to_update
     )
     
-    # КРИТИЧНО: Проверяем, изменился ли main.py (может содержать изменения в логике venv)
     main_py_changed = any(
         file_info.get("path", "") == "main.py"
         for file_info in files_to_update
     )
     
-    print(f"Changed services: {changed_services if changed_services else 'none'}", flush=True)
-    print(f"Has non-service changes: {has_non_service_changes}", flush=True)
-    print(f"Requirements.txt changed: {requirements_changed}", flush=True)
-    print(f"Main.py changed: {main_py_changed}", flush=True)
-    
-    # Проверяем и обновляем venv если он есть на источнике
     venv_updated = False
     if check_venv_exists_on_robot(source_ip):
-        print("Venv found on source robot, downloading...", flush=True)
         venv_updated = download_venv_from_robot(source_ip)
-        if venv_updated:
-            print("Venv updated successfully from source robot", flush=True)
-        else:
-            print("Warning: Failed to update venv, will use local or recreate", flush=True)
-    else:
-        print("No venv found on source robot, skipping venv update", flush=True)
     
-    # Обновляем файлы
     success = update_files_from_robot(source_ip, files_to_update)
     
     if success:
-        if venv_updated:
-            print("Venv was updated from source robot, no recreation needed", flush=True)
-        elif requirements_changed or main_py_changed:
-            print("CRITICAL: requirements.txt or main.py changed. Venv will be recreated on next startup.", flush=True)
+        if not venv_updated and (requirements_changed or main_py_changed):
             try:
                 venv_recreate_flag = Path("data/.recreate_venv")
                 venv_recreate_flag.parent.mkdir(parents=True, exist_ok=True)
                 venv_recreate_flag.touch()
-                print("Venv recreation flag created", flush=True)
-            except Exception as e:
-                print(f"Warning: Could not create venv recreation flag: {e}", flush=True)
+            except Exception:
+                pass
+        
         version_file = "data/version.json"
         if os.path.exists(version_file):
             with open(version_file, 'r', encoding='utf-8') as f:
@@ -722,20 +618,11 @@ def update_system():
                 with open(version_file, 'w', encoding='utf-8') as f:
                     json.dump(version_data_local, f, indent=4, ensure_ascii=False)
         
-        print("System update completed successfully!", flush=True)
-        
         if has_non_service_changes:
-            print("Non-service files changed. Restarting project...", flush=True)
             restart_project()
         elif has_service_changes:
-            print(f"Changed services detected: {', '.join(changed_services)}", flush=True)
-            print("Note: Services will be automatically reloaded by run.py when files change.", flush=True)
             for service_name in changed_services:
                 restart_service(service_name)
-        else:
-            print("No restart needed.", flush=True)
-    else:
-        print("System update completed with errors.", flush=True)
     
     return success
 

@@ -236,7 +236,7 @@ function MotorControlPage() {
         roundedAngles[key] = parseFloat(value.toFixed(4))
       }
       
-      const result = await unitreeMotorApi.setAngles(roundedAngles, velocityRef.current, velocityRef.current)
+      const result = await unitreeMotorApi.setAngles(roundedAngles, 0, Math.max(0.1, velocityRef.current))
       
       if (result.success) {
         setSuccess('Углы успешно установлены')

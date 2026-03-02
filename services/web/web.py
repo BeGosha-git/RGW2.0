@@ -1028,6 +1028,19 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
 </body>
 </html>""")
     
+    def check_port_available(check_port):
+        """Проверяет, свободен ли порт."""
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        try:
+            result = sock.connect_ex(('127.0.0.1', check_port))
+            sock.close()
+            return result != 0
+        except:
+            sock.close()
+            return False
+    
     try:
         def handler_factory(*args, **kwargs):
             kwargs['directory'] = str(build_path.absolute())
@@ -1141,8 +1154,19 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
     except OSError as e:
         if "Permission denied" in str(e) and port < 1024:
             print(f"Error: Cannot bind to port {port}. Try using a port >= 1024 or run with sudo.")
-            print(f"Attempting to use port 8080 instead...")
-            run_web_server(port=8080, build_dir=build_dir)
+            for try_port in [8080, 8081, 8082, 8083, 8084, 8085]:
+                if check_port_available(try_port):
+                    print(f"Port {try_port} is available. Using it instead...")
+                    run_web_server(port=try_port, build_dir=build_dir)
+                    return
+            print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.")
+        elif "Address already in use" in str(e):
+            for try_port in [8080, 8081, 8082, 8083, 8084, 8085]:
+                if check_port_available(try_port):
+                    print(f"Port {port} is in use. Port {try_port} is available. Using it instead...")
+                    run_web_server(port=try_port, build_dir=build_dir)
+                    return
+            print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.")
         else:
             print(f"Error starting web server: {str(e)}")
     except KeyboardInterrupt:

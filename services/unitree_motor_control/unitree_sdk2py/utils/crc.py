@@ -34,14 +34,22 @@ class CRC(Singleton):
         
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.platform = platform.system()
+        self.crc_lib = None
+        
         if self.platform == "Linux":
-            if platform.machine()=="x86_64":
-                self.crc_lib = ctypes.CDLL(script_dir + '/lib/crc_amd64.so')
-            elif platform.machine()=="aarch64":
-                self.crc_lib = ctypes.CDLL(script_dir + '/lib/crc_aarch64.so')
-
-            self.crc_lib.crc32_core.argtypes = (ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32)
-            self.crc_lib.crc32_core.restype = ctypes.c_uint32
+            lib_path = None
+            if platform.machine() == "x86_64":
+                lib_path = os.path.join(script_dir, 'lib', 'crc_amd64.so')
+            elif platform.machine() == "aarch64":
+                lib_path = os.path.join(script_dir, 'lib', 'crc_aarch64.so')
+            
+            if lib_path and os.path.exists(lib_path):
+                try:
+                    self.crc_lib = ctypes.CDLL(lib_path)
+                    self.crc_lib.crc32_core.argtypes = (ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32)
+                    self.crc_lib.crc32_core.restype = ctypes.c_uint32
+                except Exception:
+                    self.crc_lib = None
     
     def Crc(self, msg: idl.IdlStruct):
         if msg.__idl_typename__ == 'unitree_go.msg.dds_.LowCmd_':
@@ -229,7 +237,10 @@ class CRC(Singleton):
         return crc
 
     def __Crc32(self, data):
-        if self.platform == "Linux":
-            return self._crc_ctypes(data)
+        if self.platform == "Linux" and self.crc_lib is not None:
+            try:
+                return self._crc_ctypes(data)
+            except Exception:
+                return self._crc_py(data)
         else:
             return self._crc_py(data)

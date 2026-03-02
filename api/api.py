@@ -109,12 +109,22 @@ def download_file():
     """Скачивает файл."""
     from flask import send_file
     import os
+    from pathlib import Path
     
     filepath = request.args.get('path')
-    if filepath and os.path.exists(filepath):
-        return send_file(filepath, as_attachment=True)
-    else:
-        return jsonify({"success": False, "message": "File not found"}), 404
+    if not filepath:
+        return jsonify({"success": False, "message": "path parameter required"}), 400
+    
+    # Преобразуем в абсолютный путь для безопасности
+    try:
+        abs_path = Path(filepath).resolve()
+        # Проверяем, что файл существует и это файл (не директория)
+        if abs_path.exists() and abs_path.is_file():
+            return send_file(str(abs_path), as_attachment=True)
+        else:
+            return jsonify({"success": False, "message": f"File not found: {filepath}"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Error accessing file {filepath}: {str(e)}"}), 500
 
 
 @app.route('/api/directory/create', methods=['POST'])

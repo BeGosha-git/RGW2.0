@@ -24,8 +24,10 @@ class FilesAPI:
             Результат операции
         """
         try:
-            # Создаем директорию если не существует
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Создаем директорию если не существует (только если есть поддиректории)
+            dir_path = os.path.dirname(filepath)
+            if dir_path:  # Проверяем, что путь не пустой (для корневых файлов dir_path будет '')
+                os.makedirs(dir_path, exist_ok=True)
             
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
@@ -182,7 +184,10 @@ class FilesAPI:
             Результат операции
         """
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Создаем директорию если не существует (только если есть поддиректории)
+            dir_path = os.path.dirname(filepath)
+            if dir_path:  # Проверяем, что путь не пустой (для корневых файлов dir_path будет '')
+                os.makedirs(dir_path, exist_ok=True)
             
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)

@@ -266,11 +266,28 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         client = network.NetworkClient()
         url = f"http://{source_ip}:{api_port}/api/files/download?path={filepath}"
         
-        # Создаем директорию если нужно
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        # Создаем директорию если нужно (только если есть поддиректории)
+        dir_path = os.path.dirname(local_path)
+        if dir_path:  # Проверяем, что путь не пустой (для корневых файлов dir_path будет '')
+            os.makedirs(dir_path, exist_ok=True)
         
-        return client.download_file(url, local_path)
-    except Exception:
+        # Для корневых файлов local_path будет просто имя файла (например, "run.py")
+        # Это нормально - файл будет создан в текущей рабочей директории
+        result = client.download_file(url, local_path)
+        if not result:
+            print(f"Failed to download {filepath} from {source_ip}:{api_port}", flush=True)
+            return False
+        
+        # Проверяем, что файл действительно был создан
+        if not os.path.exists(local_path):
+            print(f"Download reported success but file {local_path} does not exist", flush=True)
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"Exception downloading {filepath} from {source_ip}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -372,7 +389,7 @@ def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
     return None
 
 
-def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
+def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
     """
     Обновляет файлы с другого робота, загружая только файлы с отличающимся размером.
     
@@ -381,10 +398,11 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
         files_to_update: Список файлов для обновления (каждый элемент должен содержать 'path' и 'size')
     
     Returns:
-        True если все файлы обновлены успешно
+        (success: bool, updated_count: int, skipped_count: int, error_count: int)
+        success = True если все файлы обновлены успешно или пропущены (same size)
     """
     if not files_to_update:
-        return True
+        return (True, 0, 0, 0)
     
     success = True
     skipped_count = 0
@@ -398,6 +416,7 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
         
         # Пропускаем директории
         if file_info.get("is_directory"):
+            print(f"Skipping directory: {filepath}", flush=True)
             continue
         
         local_path = filepath
@@ -414,17 +433,23 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
         # Если размеры совпадают и оба не None, пропускаем файл
         if local_size is not None and remote_size is not None and local_size == remote_size:
             skipped_count += 1
+            print(f"Skipping {filepath}: sizes match ({local_size} bytes)", flush=True)
             continue
         
         # Загружаем файл
+        print(f"Downloading {filepath} (local: {local_size}, remote: {remote_size})...", flush=True)
         try:
             if download_file_from_robot(source_ip, filepath, local_path):
                 updated_count += 1
+                print(f"Successfully downloaded {filepath}", flush=True)
             else:
+                print(f"Failed to download {filepath}", flush=True)
                 error_count += 1
                 success = False
         except Exception as e:
             print(f"Error downloading {filepath}: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
             error_count += 1
             success = False
     
@@ -432,7 +457,7 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
     if updated_count > 0 or skipped_count > 0 or error_count > 0:
         print(f"Update complete: {updated_count} files updated, {skipped_count} files skipped (same size), {error_count} errors", flush=True)
     
-    return success
+    return (success, updated_count, skipped_count, error_count)
 
 
 def get_version_priority_from_settings() -> str:
@@ -509,27 +534,42 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     best_version_info = None
     best_source_ip = None
     
+    print(f"Checking versions from {len(robot_ips)} robot(s) on port {api_port}...", flush=True)
+    
     for ip in robot_ips:
         try:
             base_url = f"http://{ip}:{api_port}"
-            robot_info = network_api.client.get_robot_info(base_url)
+            print(f"Checking version from {ip}:{api_port}...", flush=True)
             
-            if robot_info and robot_info.get("success"):
-                version_data = robot_info.get("version", {})
+            # Используем /api/version для получения полного version.json со списком файлов
+            version_response = network_api.client.get_from_robot(base_url, "version")
+            
+            if version_response and version_response.get("success"):
+                version_data = version_response.get("version", {})
                 version_str = version_data.get("version", "0.00.00")
                 version_type = version_data.get("version_type", "STABLE")
                 
+                print(f"Found version {version_str} ({version_type}) from {ip} with {len(version_data.get('files', []))} files", flush=True)
+                
                 if not version_matches_priority(version_type, priority):
+                    print(f"Version {version_str} ({version_type}) does not match priority {priority}, skipping", flush=True)
                     continue
                 
                 if best_version is None or network_api._compare_versions(version_str, best_version) > 0:
+                    print(f"New best version: {version_str} from {ip}", flush=True)
                     best_version = version_str
                     best_version_info = version_data
                     best_source_ip = ip
-        except Exception:
+            else:
+                print(f"No version info from {ip}: {version_response}", flush=True)
+        except Exception as e:
+            print(f"Error checking version from {ip}: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
             continue
     
     if best_version_info and best_source_ip:
+        print(f"Best version found: {best_version} from {best_source_ip}", flush=True)
         return {
             "success": True,
             "version": best_version_info,
@@ -537,6 +577,7 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
             "source_url": f"http://{best_source_ip}:{api_port}"
         }
     else:
+        print(f"No suitable version found (checked {len(robot_ips)} robots)", flush=True)
         return None
 
 
@@ -624,6 +665,7 @@ def update_system():
     version_info = find_best_version_by_priority(robot_ips, priority)
     
     if not version_info or not version_info.get("success"):
+        print("No version info found or update not needed", flush=True)
         return True
     
     source_ip = version_info.get("source_ip")
@@ -638,12 +680,20 @@ def update_system():
             current_data = json.load(f)
             current_version = current_data.get("version", "0.00.00")
     
+    print(f"Current version: {current_version}, Remote version: {remote_version}", flush=True)
+    
     network_api = network_api_module.NetworkAPI()
-    if network_api._compare_versions(remote_version, current_version) <= 0:
+    version_comparison = network_api._compare_versions(remote_version, current_version)
+    print(f"Version comparison result: {version_comparison} (1 = remote newer, 0 = same, -1 = remote older)", flush=True)
+    
+    if version_comparison <= 0:
+        print(f"Remote version {remote_version} is not newer than current {current_version}, skipping update", flush=True)
         return True
     
     files_to_update = version_data.get("files", [])
+    print(f"Files to update: {len(files_to_update)}", flush=True)
     if not files_to_update:
+        print("No files to update in version data", flush=True)
         return True
     
     changed_services = get_changed_services(files_to_update)
@@ -668,8 +718,40 @@ def update_system():
     if check_venv_exists_on_robot(source_ip):
         venv_updated = download_venv_from_robot(source_ip)
     
-    success = update_files_from_robot(source_ip, files_to_update)
+    success, updated_count, skipped_count, error_count = update_files_from_robot(source_ip, files_to_update)
     
+    # Обновляем версию только если:
+    # 1. Все файлы успешно загружены (success = True), ИЛИ
+    # 2. Были только пропуски (same size) и нет ошибок (error_count = 0)
+    # НЕ обновляем версию если были ошибки загрузки файлов
+    should_update_version = success or (error_count == 0 and (updated_count > 0 or skipped_count > 0))
+    
+    version_file = "data/version.json"
+    if should_update_version and os.path.exists(version_file):
+        try:
+            with open(version_file, 'r', encoding='utf-8') as f:
+                version_data_local = json.load(f)
+            
+            # Обновляем версию только если удаленная версия новее
+            current_version_str = version_data_local.get("version", "0.00.00")
+            if network_api._compare_versions(remote_version, current_version_str) > 0:
+                print(f"Updating version from {current_version_str} to {remote_version}", flush=True)
+                version_data_local["version"] = remote_version
+                version_data_local["version_type"] = remote_version_type
+                
+                with open(version_file, 'w', encoding='utf-8') as f:
+                    json.dump(version_data_local, f, indent=4, ensure_ascii=False)
+                print(f"Version updated to {remote_version}", flush=True)
+            else:
+                print(f"Version already up to date: {current_version_str}", flush=True)
+        except Exception as e:
+            print(f"Error updating version file: {str(e)}", flush=True)
+            import traceback
+            traceback.print_exc()
+    elif not should_update_version:
+        print(f"Skipping version update due to download errors ({error_count} errors)", flush=True)
+    
+    # Перезапускаем сервисы/проект только если обновление было успешным
     if success:
         if not venv_updated and (requirements_changed or main_py_changed):
             try:
@@ -679,21 +761,15 @@ def update_system():
             except Exception:
                 pass
         
-        version_file = "data/version.json"
-        if os.path.exists(version_file):
-            with open(version_file, 'r', encoding='utf-8') as f:
-                version_data_local = json.load(f)
-                version_data_local["version"] = remote_version
-                version_data_local["version_type"] = remote_version_type
-                
-                with open(version_file, 'w', encoding='utf-8') as f:
-                    json.dump(version_data_local, f, indent=4, ensure_ascii=False)
-        
         if has_non_service_changes:
+            print("Restarting project due to non-service changes", flush=True)
             restart_project()
         elif has_service_changes:
+            print(f"Restarting services: {changed_services}", flush=True)
             for service_name in changed_services:
                 restart_service(service_name)
+    else:
+        print(f"Update completed with errors. Version synced to {remote_version}, but some files failed to download.", flush=True)
     
     return success
 

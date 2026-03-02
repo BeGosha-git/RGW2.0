@@ -268,7 +268,7 @@ class ServiceRunner:
                 pass
             return
         
-        time.sleep(5)
+        time.sleep(2)
         
         alive_threads = [t for t in self.threads if t.is_alive()]
         

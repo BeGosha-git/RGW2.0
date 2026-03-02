@@ -370,14 +370,18 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
     
     Args:
         source_ip: IP адрес робота-источника
-        files_to_update: Список файлов для обновления
+        files_to_update: Список файлов для обновления (каждый элемент должен содержать 'path' и 'size')
     
     Returns:
         True если все файлы обновлены успешно
     """
+    if not files_to_update:
+        return True
+    
     success = True
     skipped_count = 0
     updated_count = 0
+    error_count = 0
     
     for file_info in files_to_update:
         filepath = file_info.get("path")
@@ -393,25 +397,32 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> bool:
         
         # Проверяем размер локального файла
         local_size = None
-        if os.path.exists(local_path):
+        if os.path.exists(local_path) and os.path.isfile(local_path):
             try:
                 local_size = os.path.getsize(local_path)
-            except Exception:
+            except (OSError, IOError):
                 pass
         
-        # Если размеры совпадают, пропускаем файл
+        # Если размеры совпадают и оба не None, пропускаем файл
         if local_size is not None and remote_size is not None and local_size == remote_size:
             skipped_count += 1
             continue
         
         # Загружаем файл
-        if download_file_from_robot(source_ip, filepath, local_path):
-            updated_count += 1
-        else:
+        try:
+            if download_file_from_robot(source_ip, filepath, local_path):
+                updated_count += 1
+            else:
+                error_count += 1
+                success = False
+        except Exception as e:
+            print(f"Error downloading {filepath}: {str(e)}", flush=True)
+            error_count += 1
             success = False
     
-    if skipped_count > 0 or updated_count > 0:
-        print(f"Update complete: {updated_count} files updated, {skipped_count} files skipped (same size)", flush=True)
+    # Выводим статистику только если были изменения
+    if updated_count > 0 or skipped_count > 0 or error_count > 0:
+        print(f"Update complete: {updated_count} files updated, {skipped_count} files skipped (same size), {error_count} errors", flush=True)
     
     return success
 

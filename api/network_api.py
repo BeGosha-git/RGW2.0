@@ -2,6 +2,7 @@
 API модуль для передачи и приёма данных с других роботов.
 """
 import network
+import requests
 from typing import Dict, Any, Optional, List
 
 
@@ -103,43 +104,74 @@ class NetworkAPI:
         
         Args:
             target_ip: IP адрес целевого робота
-            endpoint: Конечная точка API (например, '/status' или '/health')
+            endpoint: Конечная точка API (например, '/api/robot/execute', '/status', '/health')
             data: Данные для отправки
             port: Порт для подключения (по умолчанию 8080)
         
         Returns:
-            Результат отправки
+            Результат отправки с полной структурой ответа
         """
         try:
             base_url = f"http://{target_ip}:{port}"
+            
+            # Нормализуем endpoint: убираем начальный слэш и проверяем формат
+            endpoint = endpoint.lstrip('/')
+            
             # Для GET endpoints используем get_from_robot
-            if endpoint in ['/status', 'status', '/health', 'health']:
+            if endpoint in ['status', 'health'] or endpoint == 'api/status':
+                if endpoint == 'api/status':
+                    endpoint = 'status'
                 response = self.client.get_from_robot(base_url, endpoint)
             else:
                 # Для POST endpoints используем send_data_to_robot
-                # Если endpoint начинается с /api/, убираем его, так как send_data_to_robot добавляет /api/
-                if endpoint.startswith('/api/'):
-                    clean_endpoint = endpoint[5:]  # Убираем '/api/'
-                elif endpoint.startswith('api/'):
+                # Убираем 'api/' префикс если есть, так как send_data_to_robot добавляет /api/
+                if endpoint.startswith('api/'):
                     clean_endpoint = endpoint[4:]  # Убираем 'api/'
                 else:
                     clean_endpoint = endpoint
                 response = self.client.send_data_to_robot(base_url, clean_endpoint, data)
             
-            if response:
+            # Проверяем ответ более надежно
+            if response is None:
+                return {
+                    "success": False,
+                    "message": f"No response from {target_ip}",
+                    "target_ip": target_ip,
+                    "endpoint": endpoint
+                }
+            
+            # Если ответ уже содержит success, возвращаем его как есть
+            if isinstance(response, dict) and "success" in response:
                 return {
                     "success": True,
                     "response": response
                 }
-            else:
-                return {
-                    "success": False,
-                    "message": f"Failed to get data from {target_ip}"
-                }
+            
+            # Иначе оборачиваем в стандартный формат
+            return {
+                "success": True,
+                "response": response
+            }
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "message": f"Timeout connecting to {target_ip}:{port}",
+                "target_ip": target_ip,
+                "endpoint": endpoint
+            }
+        except requests.exceptions.ConnectionError:
+            return {
+                "success": False,
+                "message": f"Connection error to {target_ip}:{port}",
+                "target_ip": target_ip,
+                "endpoint": endpoint
+            }
         except Exception as e:
             return {
                 "success": False,
-                "message": f"Error getting data: {str(e)}"
+                "message": f"Error sending data: {str(e)}",
+                "target_ip": target_ip,
+                "endpoint": endpoint
             }
     
     def receive_data(self, source_ip: str, endpoint: str, port: int = 8080) -> Dict[str, Any]:

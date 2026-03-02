@@ -163,16 +163,21 @@ class RobotAPI:
             
             executor = execute.CommandExecutor(log_callback=log_callback)
             
-            # Если команда начинается с sudo или других команд, требующих shell,
-            # объединяем команду и аргументы в одну строку и используем shell=True
-            if command in ['sudo', 'bash', 'sh', 'zsh', 'fish'] or (args and len(args) > 0):
+            # Определяем, нужен ли shell режим
+            # Shell нужен для команд, которые требуют интерпретации (sudo, bash, sh и т.д.)
+            # или когда есть аргументы и команда не является исполняемым файлом
+            use_shell = command in ['sudo', 'bash', 'sh', 'zsh', 'fish', 'python3', 'python']
+            
+            if use_shell and args:
                 # Объединяем команду и аргументы в одну строку для shell
-                full_command = command
-                if args:
-                    full_command = f"{command} {' '.join(args)}"
+                full_command = f"{command} {' '.join(str(arg) for arg in args)}"
                 return_code = executor.execute(full_command, shell=True)
+            elif args:
+                # Если есть аргументы, но shell не нужен, передаем как список
+                return_code = executor.execute(command, args)
             else:
-                return_code = executor.execute(command, args or [])
+                # Команда без аргументов
+                return_code = executor.execute(command, [])
             
             result = {
                 "success": return_code == 0,
@@ -202,39 +207,55 @@ class RobotAPI:
     def ensure_default_commands() -> None:
         """
         Создает дефолтный commands.json если файл не существует.
+        Проверяет наличие команды обновления и добавляет её если отсутствует.
         """
         commands_path = PROJECT_ROOT / "data" / "commands.json"
-        if commands_path.exists():
-            return
-        
         data_dir = commands_path.parent
         data_dir.mkdir(parents=True, exist_ok=True)
         
-        default_commands = {
-            "version": "1.0.0",
-            "lastUpdated": None,
-            "commands": [
-                {
-                    "id": "update_system",
-                    "name": "Обновление системы",
-                    "description": "Ищет более новую версию и загружает только измененные файлы",
-                    "command": "python3",
-                    "args": ["update.py"],
-                    "showButton": True,
-                    "buttonConfig": {
-                        "position": 1,
-                        "color": "primary",
-                        "icon": "update"
-                    }
-                }
-            ]
+        default_update_command = {
+            "id": "update_system",
+            "name": "Обновление системы",
+            "description": "Ищет более новую версию и загружает только измененные файлы",
+            "command": "python3",
+            "args": ["update.py"],
+            "showButton": True,
+            "buttonConfig": {
+                "position": 1,
+                "color": "primary",
+                "icon": "update"
+            }
         }
         
-        try:
-            with open(commands_path, 'w', encoding='utf-8') as f:
-                json.dump(default_commands, f, indent=4, ensure_ascii=False)
-        except Exception:
-            pass
+        if commands_path.exists():
+            # Проверяем, есть ли команда обновления
+            try:
+                with open(commands_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    commands = data.get("commands", [])
+                    # Проверяем наличие команды обновления по id
+                    has_update_command = any(cmd.get("id") == "update_system" for cmd in commands)
+                    if not has_update_command:
+                        # Добавляем команду обновления если её нет
+                        commands.append(default_update_command)
+                        data["commands"] = commands
+                        with open(commands_path, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=4, ensure_ascii=False)
+            except Exception:
+                # Если файл поврежден, создаем новый
+                pass
+        else:
+            # Создаем новый файл с дефолтной командой
+            default_commands = {
+                "version": "1.0.0",
+                "lastUpdated": None,
+                "commands": [default_update_command]
+            }
+            try:
+                with open(commands_path, 'w', encoding='utf-8') as f:
+                    json.dump(default_commands, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
     
     @staticmethod
     def get_commands() -> Dict[str, Any]:

@@ -782,12 +782,27 @@ function RobotsPage() {
       const result = await response.json()
       console.log(`Command result for robot ${robotId}:`, result)
 
-      if (result.success) {
+      // Проверяем структуру ответа
+      if (result.success === true) {
+        // Если ответ содержит вложенный response с результатом выполнения команды
+        const commandResult = result.response || result
+        const isCommandSuccessful = commandResult.success !== false && commandResult.return_code === 0
+        
         setRobotStatuses(prev => ({
           ...prev,
-          [robotId]: { isProcessing: false, currentCommand: button.name }
+          [robotId]: { 
+            isProcessing: false, 
+            currentCommand: button.name,
+            lastResult: isCommandSuccessful ? 'success' : 'error'
+          }
         }))
-        setError(null) // Очищаем ошибки при успехе
+        
+        if (isCommandSuccessful) {
+          setError(null) // Очищаем ошибки при успехе
+        } else {
+          const errorMsg = commandResult.message || commandResult.stderr || 'Команда завершилась с ошибкой'
+          throw new Error(errorMsg)
+        }
       } else {
         throw new Error(result.message || 'Ошибка выполнения команды')
       }
@@ -857,10 +872,23 @@ function RobotsPage() {
           const result = await response.json()
           console.log(`Command result for robot ${robotId} (${robot.ip}):`, result)
           
-          return {
-            robotId,
-            success: result.success === true,
-            error: result.success ? null : (result.message || 'Ошибка выполнения команды')
+          // Проверяем структуру ответа более надежно
+          if (result.success === true) {
+            // Если ответ содержит вложенный response с результатом выполнения команды
+            const commandResult = result.response || result
+            const isCommandSuccessful = commandResult.success !== false && commandResult.return_code === 0
+            
+            return {
+              robotId,
+              success: isCommandSuccessful,
+              error: isCommandSuccessful ? null : (commandResult.message || commandResult.stderr || 'Команда завершилась с ошибкой')
+            }
+          } else {
+            return {
+              robotId,
+              success: false,
+              error: result.message || 'Ошибка выполнения команды'
+            }
           }
         } catch (error) {
           console.error(`Error executing command for robot ${robotId} (${robot.ip}):`, error)

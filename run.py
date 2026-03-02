@@ -243,9 +243,11 @@ class ServiceRunner:
     def run_all_services(self):
         """Запускает все найденные сервисы."""
         self.running = True
+        print("Discovering services...", flush=True)
         service_files = self.find_services()
         
         if not service_files:
+            print("No service files found. Waiting...", flush=True)
             try:
                 while True:
                     time.sleep(60)
@@ -256,11 +258,13 @@ class ServiceRunner:
         self.service_files = service_files
         self.running = True
         
+        print(f"Found {len(service_files)} service file(s), starting...", flush=True)
         for service_file in service_files:
             self.load_service(service_file)
             time.sleep(0.5)
         
         if len(self.services) == 0:
+            print("No services started (all disabled?). Waiting...", flush=True)
             try:
                 while True:
                     time.sleep(60)
@@ -268,7 +272,7 @@ class ServiceRunner:
                 pass
             return
         
-        time.sleep(2)
+        time.sleep(5)
         
         alive_threads = [t for t in self.threads if t.is_alive()]
         
@@ -460,6 +464,7 @@ class ServiceRunner:
 
 def run_services():
     """Запускает все сервисы из папки services."""
+        print("TESTTESTTESTTESTTESTTESTTESTTEST")
     try:
         runner = ServiceRunner()
         runner.run_all_services()

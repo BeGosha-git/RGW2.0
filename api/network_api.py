@@ -117,8 +117,13 @@ class NetworkAPI:
                 response = self.client.get_from_robot(base_url, endpoint)
             else:
                 # Для POST endpoints используем send_data_to_robot
-                # Убираем /api/ из endpoint если есть, так как send_data_to_robot добавляет его
-                clean_endpoint = endpoint.replace('/api/', '') if endpoint.startswith('/api/') else endpoint
+                # Если endpoint начинается с /api/, убираем его, так как send_data_to_robot добавляет /api/
+                if endpoint.startswith('/api/'):
+                    clean_endpoint = endpoint[5:]  # Убираем '/api/'
+                elif endpoint.startswith('api/'):
+                    clean_endpoint = endpoint[4:]  # Убираем 'api/'
+                else:
+                    clean_endpoint = endpoint
                 response = self.client.send_data_to_robot(base_url, clean_endpoint, data)
             
             if response:

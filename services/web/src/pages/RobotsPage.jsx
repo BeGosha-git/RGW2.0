@@ -765,8 +765,11 @@ function RobotsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target_ip: robot.ip,
-          endpoint: '/execute',
-          data: { command: button.command }
+          endpoint: '/api/robot/execute',
+          data: { 
+            command: button.command,
+            args: button.args || []
+          }
         })
       })
 
@@ -834,7 +837,10 @@ function RobotsPage() {
             body: JSON.stringify({
               target_ip: robot.ip,
               endpoint: '/api/robot/execute',
-              data: { command: button.command }
+              data: { 
+                command: button.command,
+                args: button.args || []
+              }
             })
           })
 

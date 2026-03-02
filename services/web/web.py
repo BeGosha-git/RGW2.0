@@ -1178,11 +1178,19 @@ def run():
     current_dir = Path(__file__).parent.absolute()
     build_dir = current_dir / "build"
     
+    try:
+        manager = services_manager.get_services_manager()
+        params = manager.get_service_parameters("web")
+        port = params.get("port", 8080)
+    except Exception:
+        port = 8080
+    
     print(f"Web service starting from: {current_dir}", flush=True)
     print(f"Build directory: {build_dir}", flush=True)
+    print(f"Port: {port}", flush=True)
     sys.stdout.flush()
     
-    run_web_server(port=80, build_dir=str(build_dir))
+    run_web_server(port=port, build_dir=str(build_dir))
 
 
 if __name__ == '__main__':

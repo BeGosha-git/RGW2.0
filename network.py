@@ -256,19 +256,32 @@ def find_robots_in_network(network_base: Optional[str] = None,
         network_base = get_local_network_base()
     
     found_robots = []
-    # Используем отдельный клиент с увеличенным timeout для проверки соединений
-    check_client = NetworkClient(timeout=max(1, int(timeout * 2)))
+    check_client = NetworkClient(timeout=max(2, int(timeout * 3)))
     
-    # Проверяем адреса от 0 до 255 (вся подсеть)
-    print(f"Scanning network {network_base}.0/24 (0-255) on port {port} with timeout {timeout}s per address...", flush=True)
+    print(f"Scanning network {network_base}.0/24 (0-255) on port {port}...", flush=True)
     
-    # Параллельное сканирование для ускорения (максимум 50 одновременных проверок)
     def check_ip(ip_address):
         try:
-            if check_client.check_connection(ip_address, port):
-                print(f"Found robot at {ip_address}:{port}", flush=True)
-                return ip_address
-        except Exception as e:
+            if not check_client.check_connection(ip_address, port):
+                return None
+            
+            base_url = f"http://{ip_address}"
+            try:
+                robot_info = check_client.get_robot_info(base_url)
+                if robot_info and isinstance(robot_info, dict) and robot_info.get("success") is not False:
+                    print(f"Found robot at {ip_address}:{port}", flush=True)
+                    return ip_address
+            except Exception:
+                pass
+            
+            try:
+                health_info = check_client.get_from_robot(base_url, "health")
+                if health_info and isinstance(health_info, dict):
+                    print(f"Found robot at {ip_address}:{port} (via /health)", flush=True)
+                    return ip_address
+            except Exception:
+                pass
+        except Exception:
             pass
         return None
     

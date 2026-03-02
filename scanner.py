@@ -80,19 +80,22 @@ def save_ips(ips: List[str], scan_timestamp: float):
         print(f"Error saving ips.json: {str(e)}", flush=True)
 
 
-def scan_network():
+def scan_network(port: int = 8080):
     """
     Выполняет сканирование сети и сохраняет результаты.
+    
+    Args:
+        port: Порт для сканирования (по умолчанию 8080)
     
     Returns:
         True если успешно
     """
     try:
-        print(f"Starting network scan...", flush=True)
+        print(f"Starting network scan on port {port}...", flush=True)
         scan_start = time.time()
         
         # Сканируем сеть
-        found_ips = network.find_robots_in_network(port=80, timeout=0.5)
+        found_ips = network.find_robots_in_network(port=port, timeout=0.5)
         
         scan_end = time.time()
         scan_duration = scan_end - scan_start

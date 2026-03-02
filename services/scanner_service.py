@@ -26,13 +26,14 @@ def get_service_name() -> str:
     return Path(__file__).stem
 
 
-def run_service_loop(scan_interval: int = 20):
+def run_service_loop(scan_interval: int = 20, scan_port: int = 8080):
     """
     Основной цикл работы сервиса сканирования сети.
     КРИТИЧНО: Сервис не должен падать, все ошибки обрабатываются.
     
     Args:
         scan_interval: Интервал между сканированиями в секундах
+        scan_port: Порт для сканирования
     """
     service_name = get_service_name()
     
@@ -48,7 +49,7 @@ def run_service_loop(scan_interval: int = 20):
             return
     
     print(f"Scanner service started", flush=True)
-    print(f"Scan interval: {scan_interval} seconds", flush=True)
+    print(f"Scan interval: {scan_interval} seconds, port: {scan_port}", flush=True)
     
     # Регистрируем начальные данные в status.py
     try:
@@ -66,8 +67,8 @@ def run_service_loop(scan_interval: int = 20):
     
     # Выполняем первое сканирование сразу
     try:
-        print(f"Performing initial network scan...", flush=True)
-        scanner.scan_network()
+        print(f"Performing initial network scan on port {scan_port}...", flush=True)
+        scanner.scan_network(port=scan_port)
         scans_count += 1
         try:
             status.register_service_data(service_name, {
@@ -122,8 +123,8 @@ def run_service_loop(scan_interval: int = 20):
             
             # Выполняем сканирование
             try:
-                print(f"Performing network scan...", flush=True)
-                scanner.scan_network()
+                print(f"Performing network scan on port {scan_port}...", flush=True)
+                scanner.scan_network(port=scan_port)
                 scans_count += 1
                 
                 # Обновляем данные в status.py
@@ -220,11 +221,12 @@ def run():
     service_info = manager.get_service(service_name)
     params = manager.get_service_parameters(service_name)
     
-    # Получаем интервал из параметров или используем значение по умолчанию
+    # Получаем параметры из конфигурации
     scan_interval = params.get("scan_interval", 20)
+    scan_port = params.get("port", 8080)
     
     # Запускаем основной цикл
-    run_service_loop(scan_interval=scan_interval)
+    run_service_loop(scan_interval=scan_interval, scan_port=scan_port)
 
 
 def main():

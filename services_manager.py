@@ -132,13 +132,13 @@ class ServicesManager:
                 "enabled": True,
                 "scan_interval": 20,
                 "network_range": "0-255",
-                "port": 80,
+                "port": 8080,
                 "dependencies": []
             },
             "web": {
                 "status": "ON",
                 "enabled": True,
-                "port": 80,
+                "port": 8080,
                 "api_port": 5000,
                 "build_path": "services/web/build",
                 "dependencies": ["unitree_motor_control"]

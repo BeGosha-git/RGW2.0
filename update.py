@@ -179,40 +179,64 @@ def check_and_update_version():
         return False
 
 
-def create_venv_archive() -> bool:
+def create_venv_archive(root: Optional[Path] = None) -> bool:
     """
     Создает архив venv для распространения на другие роботы.
-    
+    root: корень проекта; если None — текущая директория.
     Returns:
         True если успешно
     """
     try:
         import tarfile
-        
-        venv_path = Path("venv")
-        venv_archive = "venv.tar.gz"
-        
+
+        base = Path(root) if root else Path(".")
+        venv_path = base / "venv"
+        venv_archive = base / "venv.tar.gz"
+
         if not venv_path.exists():
             return False
-        
+
         venv_ready_flag = venv_path / ".ready"
         if not venv_ready_flag.exists():
             return False
-        
+
         with tarfile.open(venv_archive, 'w:gz') as tar:
             tar.add(venv_path, arcname='venv', filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
-        
+
         return True
-        
+
     except Exception:
         return False
 
 
-def update_version_file():
+def ensure_venv_archive(project_root: Path) -> bool:
+    """
+    Создаёт venv.tar.gz в project_root, если файла нет или venv обновился.
+    Returns:
+        True если архив есть (был или только что создан)
+    """
+    archive = project_root / "venv.tar.gz"
+    venv_path = project_root / "venv"
+    if not venv_path.exists() or not (venv_path / ".ready").exists():
+        return archive.exists()
+    need_build = not archive.exists()
+    if not need_build:
+        try:
+            ready_mtime = os.path.getmtime(venv_path / ".ready")
+            if ready_mtime > os.path.getmtime(archive):
+                need_build = True
+        except OSError:
+            need_build = True
+    if need_build:
+        create_venv_archive(project_root)
+    return archive.exists()
+
+
+def update_version_file(skip_venv_archive: bool = False):
     """
     Обновляет version.json с актуальным списком файлов и их размерами.
     Всегда обновляет список файлов, но не меняет версию.
-    Также создает архив venv если он готов.
+    Если skip_venv_archive=False, также создает архив venv если он готов.
     """
     try:
         version_data = {
@@ -233,8 +257,8 @@ def update_version_file():
                 version_data["version"] = existing_data.get("version", "1.00.01")
                 version_data["version_type"] = existing_data.get("version_type", "STABLE")
         
-        # Создаем архив venv если он готов
-        create_venv_archive()
+        if not skip_venv_archive:
+            create_venv_archive()
         
         files_list = scan_project_files()
         # Размер venv.tar.gz берём из version.json (уже посчитан), не с диска
@@ -404,6 +428,50 @@ def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
     return None
 
 
+def actualize_file_list_from_source_and_local(
+    source_ip: str, files_list: List[Dict[str, Any]]
+) -> tuple:
+    """
+    Проверяет файлы на источнике и локально, актуализирует размеры (вес).
+    Для каждого файла запрашивает размер на source и с диска, обновляет поля size и local_size.
+
+    Returns:
+        (files_list, need_update_count, up_to_date_count)
+    """
+    need_update = 0
+    up_to_date = 0
+    for file_info in files_list:
+        path = file_info.get("path")
+        if not path:
+            continue
+        if file_info.get("is_directory"):
+            # для директорий локальный размер для отчёта
+            file_info["local_size"] = calculate_file_size(path) if os.path.exists(path) else None
+            file_info["size"] = file_info.get("size")
+            continue
+        # Актуализируем размер на источнике
+        remote_size = get_remote_file_size(source_ip, path)
+        if remote_size is not None:
+            file_info["size"] = remote_size
+        else:
+            remote_size = file_info.get("size")
+        # Размер у себя
+        if os.path.exists(path) and os.path.isfile(path):
+            try:
+                local_size = os.path.getsize(path)
+            except (OSError, IOError):
+                local_size = None
+        else:
+            local_size = None
+        file_info["local_size"] = local_size
+        # что нужно обновлять
+        if local_size is not None and remote_size is not None and local_size == remote_size:
+            up_to_date += 1
+        else:
+            need_update += 1
+    return files_list, need_update, up_to_date
+
+
 def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
     """
     Обновляет файлы с другого робота, загружая только файлы с отличающимся размером.
@@ -555,8 +623,15 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
         try:
             base_url = f"http://{ip}:{api_port}"
             print(f"Checking version from {ip}:{api_port}...", flush=True)
-            # Явный таймаут 5 сек на адрес, чтобы не зависнуть на одном роботе
             import network as net_mod
+            # Сначала просим робота актуализировать свой version.json (список файлов и размеры, без пересборки venv)
+            refresh_url = f"{base_url.rstrip('/')}/api/version/refresh"
+            try:
+                refresh_client = net_mod.NetworkClient(timeout=30)
+                refresh_client.post(refresh_url, {"skip_venv_archive": True})
+            except Exception:
+                pass
+            # Явный таймаут 5 сек на запрос версии
             check_client = net_mod.NetworkClient(timeout=5)
             version_response = check_client.get_from_robot(base_url, "version")
             
@@ -679,6 +754,13 @@ def update_system():
     if not robot_ips:
         print("No robots in network, skipping update check.", flush=True)
         return True
+
+    # Актуализируем свой version.json перед сравнением (список файлов и размеры, без пересборки venv)
+    print("Updating local version.json (file list and sizes)...", flush=True)
+    try:
+        update_version_file(skip_venv_archive=True)
+    except Exception as e:
+        print(f"Warning: could not update local version.json: {e}", flush=True)
     
     priority = get_version_priority_from_settings()
     version_info = find_best_version_by_priority(robot_ips, priority)
@@ -705,15 +787,25 @@ def update_system():
     version_comparison = network_api._compare_versions(remote_version, current_version)
     print(f"Version comparison result: {version_comparison} (1 = remote newer, 0 = same, -1 = remote older)", flush=True)
     
-    if version_comparison <= 0:
-        print(f"Remote version {remote_version} (from {source_ip}) is not newer than current {current_version}, skipping update", flush=True)
-        print(f"Checked all {len(robot_ips)} robot(s); no update needed.", flush=True)
+    if version_comparison < 0:
+        print(f"Remote version {remote_version} (from {source_ip}) is older than current {current_version}, skipping update", flush=True)
         return True
-    
+
+    files_to_update = version_data.get("files", [])
+    # Проверяем файлы на источнике и у себя, актуализируем вес и список того, что нужно обновлять
+    print("Actualizing file list from source and local...", flush=True)
+    files_to_update, need_update_count, up_to_date_count = actualize_file_list_from_source_and_local(
+        source_ip, files_to_update
+    )
+    print(f"Actualized: {need_update_count} file(s) need update, {up_to_date_count} file(s) up to date (same size)", flush=True)
+
+    # При одинаковой версии — обновляем только если есть файлы с отличиями по размеру
+    if version_comparison == 0 and need_update_count == 0:
+        print(f"Same version {remote_version}, all files match (sizes equal). No update needed.", flush=True)
+        return True
+
     # Только при реальном обновлении обновляем version.json и venv-архив (иначе create_venv_archive тормозит на минуты)
     update_version_file()
-    
-    files_to_update = version_data.get("files", [])
     print(f"Files to update: {len(files_to_update)}", flush=True)
     if not files_to_update:
         print("No files to update in version data", flush=True)

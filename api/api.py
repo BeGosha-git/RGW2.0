@@ -50,6 +50,19 @@ def get_version():
     return jsonify(robot.get_version())
 
 
+@app.route('/api/version/refresh', methods=['POST'])
+def refresh_version_file():
+    """Обновляет version.json по текущим файлам (актуализирует список и размеры). Вызывается перед сравнением версий. Body: {"skip_venv_archive": true} — без пересборки venv (быстро)."""
+    try:
+        import update
+        data = request.get_json(silent=True) or {}
+        skip_venv = data.get("skip_venv_archive", False)
+        ok = update.update_version_file(skip_venv_archive=bool(skip_venv))
+        return jsonify({"success": bool(ok), "message": "version.json updated" if ok else "update_version_file failed"})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @app.route('/api/get_actual_version', methods=['GET'])
 def get_actual_version():
     """Получает самую актуальную версию от других роботов."""
@@ -121,6 +134,14 @@ def download_file():
         # Запрет path traversal: файл должен быть внутри PROJECT_ROOT
         if not str(abs_path).startswith(str(PROJECT_ROOT.resolve())):
             return jsonify({"success": False, "message": "Access denied"}), 403
+        # venv.tar.gz: создаём архив если нет, обновляем если venv обновился
+        if filepath.strip() == "venv.tar.gz":
+            try:
+                import update
+                update.ensure_venv_archive(PROJECT_ROOT)
+            except Exception:
+                pass
+            abs_path = (PROJECT_ROOT / filepath).resolve()
         if abs_path.exists() and abs_path.is_file():
             return send_file(str(abs_path), as_attachment=True, download_name=abs_path.name)
         return jsonify({"success": False, "message": f"File not found: {filepath}"}), 404

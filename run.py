@@ -464,7 +464,7 @@ class ServiceRunner:
 
 def run_services():
     """Запускает все сервисы из папки services."""
-        print("TESTTESTTESTTESTTESTTESTTESTTEST")
+    print("12333456778696955463525497724552455765547325176154512155252355579878856462354")
     try:
         runner = ServiceRunner()
         runner.run_all_services()

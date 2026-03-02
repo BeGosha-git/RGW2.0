@@ -327,7 +327,13 @@ def download_venv_from_robot(source_ip: str) -> bool:
                 shutil.rmtree(venv_path)
             
             with tarfile.open(tmp_path, 'r:gz') as tar:
-                tar.extractall(path='.')
+                # Используем filter='data' для Python 3.14+ совместимости
+                # 'data' фильтрует только опасные метаданные, но сохраняет файлы
+                try:
+                    tar.extractall(path='.', filter='data')
+                except TypeError:
+                    # Для старых версий Python filter не поддерживается
+                    tar.extractall(path='.')
             
             venv_ready_flag = venv_path / ".ready"
             if not venv_ready_flag.exists():
@@ -639,7 +645,8 @@ def restart_service(service_name: str) -> bool:
 def restart_project() -> None:
     """Перезапускает весь проект."""
     import sys
-    sys.exit(1)
+    print("Update completed successfully. Restarting project...", flush=True)
+    sys.exit(0)  # Код 0 = успешное завершение, перезапуск обрабатывается main.py
 
 
 def update_system():

@@ -778,7 +778,61 @@ def setup_virtual_environment():
                     print("Warning: Failed to create venv.tar.gz archive", flush=True)
             except Exception as e:
                 print(f"Warning: Could not create venv.tar.gz archive: {e}", flush=True)
-    elif requirements_file.exists():
+        
+        # Проверяем наличие основных зависимостей даже если venv готов
+        # Это нужно для случаев, когда venv был создан без установки пакетов
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", "import flask; print('Flask OK')"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print("Warning: venv ready but Flask missing, installing packages...", flush=True)
+                # Определяем site-packages путь
+                venv_lib = venv_path / "lib"
+                site_packages = None
+                if venv_lib.exists():
+                    python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
+                    if python_dirs:
+                        site_packages = python_dirs[0] / "site-packages"
+                
+                if site_packages and site_packages.exists():
+                    offline_dir = Path("offline_packages")
+                    if offline_dir.exists():
+                        pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
+                        if pip_files:
+                            print(f"Installing {len(pip_files)} packages directly to {site_packages}...", flush=True)
+                            import zipfile
+                            installed_count = 0
+                            for pip_file in pip_files:
+                                if pip_file.suffix == '.whl':
+                                    try:
+                                        with zipfile.ZipFile(pip_file, 'r') as zip_ref:
+                                            zip_ref.extractall(site_packages)
+                                        installed_count += 1
+                                    except Exception as e:
+                                        print(f"Warning: Failed to extract {pip_file.name}: {e}", flush=True)
+                                elif pip_file.suffix == '.tar.gz':
+                                    try:
+                                        result = subprocess.run(
+                                            [sys.executable, "-m", "pip", "install", str(pip_file.resolve()), "--target", str(site_packages), "--no-deps", "--quiet"],
+                                            check=False,
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=60
+                                        )
+                                        if result.returncode == 0:
+                                            installed_count += 1
+                                    except Exception:
+                                        pass
+                            
+                            print(f"Installed {installed_count}/{len(pip_files)} packages to site-packages", flush=True)
+        except Exception as e:
+            print(f"Warning: Could not check/install dependencies: {e}", flush=True)
+    
+    if requirements_file.exists():
         if not pip_path.exists():
             # Если venv создан без pip, но pip не установлен, пробуем установить из офлайн-пакетов
             if venv_path.exists():
@@ -1068,8 +1122,61 @@ def setup_virtual_environment():
             timeout=10
         )
         if result.returncode != 0:
-            if "numpy" in result.stderr or "flask" in result.stderr:
-                # Если pip доступен в venv, пробуем установить
+            print("Core dependencies missing, installing from offline packages...", flush=True)
+            # Определяем site-packages путь
+            venv_lib = venv_path / "lib"
+            site_packages = None
+            if venv_lib.exists():
+                python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
+                if python_dirs:
+                    site_packages = python_dirs[0] / "site-packages"
+            
+            if site_packages and site_packages.exists():
+                offline_dir = Path("offline_packages")
+                if offline_dir.exists():
+                    pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
+                    if pip_files:
+                        print(f"Installing {len(pip_files)} packages directly to {site_packages}...", flush=True)
+                        import zipfile
+                        installed_count = 0
+                        for pip_file in pip_files:
+                            if pip_file.suffix == '.whl':
+                                try:
+                                    with zipfile.ZipFile(pip_file, 'r') as zip_ref:
+                                        zip_ref.extractall(site_packages)
+                                    installed_count += 1
+                                except Exception as e:
+                                    print(f"Warning: Failed to extract {pip_file.name}: {e}", flush=True)
+                            elif pip_file.suffix == '.tar.gz':
+                                # Для tar.gz файлов пробуем использовать системный pip
+                                try:
+                                    result = subprocess.run(
+                                        [sys.executable, "-m", "pip", "install", str(pip_file.resolve()), "--target", str(site_packages), "--no-deps", "--quiet"],
+                                        check=False,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=60
+                                    )
+                                    if result.returncode == 0:
+                                        installed_count += 1
+                                except Exception:
+                                    pass
+                        
+                        print(f"Installed {installed_count}/{len(pip_files)} packages directly to site-packages", flush=True)
+                        
+                        # Проверяем еще раз после установки
+                        verify_result = subprocess.run(
+                            [str(python_path), "-c", "import flask; print('Flask OK')"],
+                            capture_output=True,
+                            text=True,
+                            timeout=10
+                        )
+                        if verify_result.returncode == 0:
+                            print("Core dependencies installed successfully", flush=True)
+                        else:
+                            print(f"Warning: Some dependencies still missing: {verify_result.stderr}", flush=True)
+            else:
+                # Если pip доступен в venv, пробуем установить через pip
                 if pip_path.exists():
                     try:
                         install_result = subprocess.run(
@@ -1080,49 +1187,11 @@ def setup_virtual_environment():
                             timeout=600
                         )
                         if install_result.returncode != 0:
-                            # Если не получилось через pip, пробуем установить напрямую из wheel файлов
-                            offline_dir = Path("offline_packages")
-                            if offline_dir.exists():
-                                pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                                venv_lib = venv_path / "lib"
-                                site_packages = None
-                                if venv_lib.exists():
-                                    python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
-                                    if python_dirs:
-                                        site_packages = python_dirs[0] / "site-packages"
-                                
-                                if site_packages and site_packages.exists():
-                                    import zipfile
-                                    for pip_file in pip_files:
-                                        if pip_file.suffix == '.whl':
-                                            try:
-                                                with zipfile.ZipFile(pip_file, 'r') as zip_ref:
-                                                    zip_ref.extractall(site_packages)
-                                            except Exception:
-                                                pass
-                    except Exception:
-                        # Если pip недоступен, устанавливаем напрямую из wheel файлов
-                        offline_dir = Path("offline_packages")
-                        if offline_dir.exists():
-                            pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                            venv_lib = venv_path / "lib"
-                            site_packages = None
-                            if venv_lib.exists():
-                                python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
-                                if python_dirs:
-                                    site_packages = python_dirs[0] / "site-packages"
-                            
-                            if site_packages and site_packages.exists():
-                                import zipfile
-                                for pip_file in pip_files:
-                                    if pip_file.suffix == '.whl':
-                                        try:
-                                            with zipfile.ZipFile(pip_file, 'r') as zip_ref:
-                                                zip_ref.extractall(site_packages)
-                                        except Exception:
-                                            pass
-    except Exception:
-        pass
+                            print(f"Warning: pip install failed: {install_result.stderr[:200]}", flush=True)
+                    except Exception as e:
+                        print(f"Warning: Failed to install via pip: {e}", flush=True)
+    except Exception as e:
+        print(f"Warning: Could not verify/install core dependencies: {e}", flush=True)
         
         try:
             lib_paths = []

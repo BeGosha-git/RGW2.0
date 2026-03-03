@@ -90,38 +90,101 @@ def setup_dependencies():
     try:
         import numpy
         numpy_ok = True
+        print("[Dependencies] numpy already installed", flush=True)
     except ImportError:
+        print("[Dependencies] Installing numpy...", flush=True)
         try:
-            subprocess.run(
+            install_result = subprocess.run(
                 [sys.executable, '-m', 'pip', 'install', '--quiet', 'numpy>=1.20.0'],
                 check=True,
                 timeout=300,
-                capture_output=True
+                capture_output=True,
+                text=True
             )
             import numpy
             numpy_ok = True
-        except Exception:
-            pass
+            print("[Dependencies] numpy installed successfully", flush=True)
+        except subprocess.TimeoutExpired:
+            print("[Dependencies] Timeout installing numpy", flush=True)
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            print(f"[Dependencies] Failed to install numpy: {error_msg[:200]}", flush=True)
+        except Exception as e:
+            print(f"[Dependencies] Error installing numpy: {e}", flush=True)
     
-    # Устанавливаем cyclonedds в venv (пробуем nightly, затем стабильную версию)
+    if not numpy_ok:
+        print("[Dependencies] WARNING: numpy installation failed. Some features may not work.", flush=True)
+    
+    # Устанавливаем cyclonedds в venv
+    # Сначала проверяем, есть ли он уже установлен
     cyclonedds_ok = False
     try:
         import cyclonedds
         cyclonedds_ok = True
+        print("[Dependencies] cyclonedds already installed", flush=True)
     except ImportError:
-        # Пробуем сначала nightly версию
-        for package_name in ['cyclonedds-nightly', 'cyclonedds==0.10.2']:
-            try:
-                subprocess.run(
-                    [sys.executable, '-m', 'pip', 'install', '--quiet', package_name],
-                    check=True,
-                    timeout=600,
-                    capture_output=True
-                )
-                import cyclonedds
-                cyclonedds_ok = True
-                break
-            except Exception:
-                continue
+        # Пробуем установить из офлайн-пакетов
+        project_root = Path(__file__).parent.parent.parent
+        offline_dir = project_root / "offline_packages"
+        
+        if offline_dir.exists():
+            # Ищем cyclonedds в офлайн-пакетах
+            cyclonedds_files = list(offline_dir.glob("*cyclonedds*.whl")) + list(offline_dir.glob("*cyclonedds*.tar.gz"))
+            
+            if cyclonedds_files:
+                print(f"[Dependencies] Found cyclonedds in offline packages: {cyclonedds_files[0].name}", flush=True)
+                try:
+                    # Устанавливаем из локального файла
+                    # Используем абсолютные пути для надежности
+                    offline_dir_abs = str(offline_dir.resolve())
+                    cyclonedds_file_abs = str(cyclonedds_files[0].resolve())
+                    install_result = subprocess.run(
+                        [sys.executable, '-m', 'pip', 'install', '--quiet', '--no-index', '--find-links', offline_dir_abs, cyclonedds_file_abs],
+                        check=True,
+                        timeout=600,
+                        capture_output=True,
+                        text=True
+                    )
+                    import cyclonedds
+                    cyclonedds_ok = True
+                    print("[Dependencies] cyclonedds installed from offline packages", flush=True)
+                except subprocess.TimeoutExpired:
+                    print("[Dependencies] Timeout installing cyclonedds from offline packages", flush=True)
+                except subprocess.CalledProcessError as e:
+                    error_msg = e.stderr.decode() if e.stderr else str(e)
+                    print(f"[Dependencies] Failed to install cyclonedds from offline packages: {error_msg[:200]}", flush=True)
+                except Exception as e:
+                    print(f"[Dependencies] Error installing cyclonedds from offline packages: {e}", flush=True)
+        
+        # Если офлайн не сработал, пробуем через интернет
+        if not cyclonedds_ok:
+            print("[Dependencies] Attempting to install cyclonedds from internet...", flush=True)
+            # Пробуем сначала nightly версию, затем стабильную
+            for package_name in ['cyclonedds-nightly', 'cyclonedds==0.10.2']:
+                try:
+                    install_result = subprocess.run(
+                        [sys.executable, '-m', 'pip', 'install', '--quiet', package_name],
+                        check=True,
+                        timeout=600,
+                        capture_output=True,
+                        text=True
+                    )
+                    import cyclonedds
+                    cyclonedds_ok = True
+                    print(f"[Dependencies] cyclonedds installed from internet: {package_name}", flush=True)
+                    break
+                except subprocess.TimeoutExpired:
+                    print(f"[Dependencies] Timeout installing {package_name}", flush=True)
+                    continue
+                except subprocess.CalledProcessError as e:
+                    error_msg = e.stderr.decode() if e.stderr else str(e)
+                    print(f"[Dependencies] Failed to install {package_name}: {error_msg[:200]}", flush=True)
+                    continue
+                except Exception as e:
+                    print(f"[Dependencies] Error installing {package_name}: {e}", flush=True)
+                    continue
+    
+    if not cyclonedds_ok:
+        print("[Dependencies] WARNING: cyclonedds installation failed. Some features may not work.", flush=True)
     
     return numpy_ok, cyclonedds_ok

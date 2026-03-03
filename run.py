@@ -178,23 +178,28 @@ class ServiceRunner:
             else:
                 service_name = os.path.splitext(os.path.basename(filepath))[0]
             
+            # Проверяем, включен ли сервис
             if not self.manager.is_service_enabled(service_name):
+                print(f"Service {service_name} is disabled, skipping...", flush=True)
                 service_info = self.manager.get_service(service_name)
-                current_status = service_info.get("status", "OFF")
-                if current_status != "OFF":
-                    self.manager.update_service_status(service_name, "OFF")
+                if service_info:
+                    current_status = service_info.get("status", "OFF")
+                    if current_status != "OFF":
+                        self.manager.update_service_status(service_name, "OFF")
                 return False
             
             params = self.manager.get_service_parameters(service_name)
             self.manager.update_service_dependencies_from_file(service_name, filepath)
             
             service_info = self.manager.get_service(service_name)
-            enabled = service_info.get("parameters", {}).get("enabled", True)
-            current_status = service_info.get("status", "OFF")
+            enabled = service_info.get("parameters", {}).get("enabled", True) if service_info else True
+            current_status = service_info.get("status", "OFF") if service_info else "OFF"
             expected_status = "ON" if enabled else "OFF"
             
             if current_status != expected_status:
                 self.manager.update_service_status(service_name, expected_status)
+            
+            print(f"Loading service: {service_name} (enabled={enabled}, status={expected_status})", flush=True)
             
             module_name = service_name
             
@@ -217,9 +222,12 @@ class ServiceRunner:
             if run_func:
                 def service_wrapper():
                     try:
+                        print(f"Starting service thread: {service_name}", flush=True)
                         run_func()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"Error in service {service_name}: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
                 
                 thread = threading.Thread(target=service_wrapper, daemon=False)
                 thread.start()
@@ -233,11 +241,16 @@ class ServiceRunner:
                     "service_name": service_name
                 })
                 
+                print(f"Service {service_name} started successfully", flush=True)
                 return True
             else:
+                print(f"Warning: Service {service_name} has no run() or main() function", flush=True)
                 return False
                 
-        except Exception:
+        except Exception as e:
+            print(f"Error loading service {filepath}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             return False
     
     def run_all_services(self):
@@ -260,11 +273,41 @@ class ServiceRunner:
         
         print(f"Found {len(service_files)} service file(s), starting...", flush=True)
         for service_file in service_files:
-            self.load_service(service_file)
-            time.sleep(0.5)
+            try:
+                loaded = self.load_service(service_file)
+                if not loaded:
+                    print(f"Failed to load service from {service_file}", flush=True)
+            except Exception as e:
+                print(f"Error loading service {service_file}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+            time.sleep(0.1)
         
+        print(f"Loaded {len(self.services)} service(s) successfully", flush=True)
         if len(self.services) == 0:
-            print("No services started (all disabled?). Waiting...", flush=True)
+            print("No services started. Checking why...", flush=True)
+            # Показываем какие сервисы найдены и почему не запущены
+            for service_file in service_files:
+                try:
+                    filepath_obj = Path(service_file)
+                    if filepath_obj.parent.name == "services" or filepath_obj.parent.parent.name == "services":
+                        if filepath_obj.name == "docker_service.py" and filepath_obj.parent.name == "windows_docker":
+                            service_name = "docker_service"
+                        elif filepath_obj.parent.name != "services":
+                            service_name = filepath_obj.parent.name
+                        else:
+                            service_name = filepath_obj.stem
+                    elif filepath_obj.parent.name == "api":
+                        service_name = "api"
+                    else:
+                        service_name = os.path.splitext(os.path.basename(service_file))[0]
+                    
+                    enabled = self.manager.is_service_enabled(service_name)
+                    print(f"  {service_name}: enabled={enabled}", flush=True)
+                except Exception:
+                    pass
+            
+            print("Waiting for services to be enabled...", flush=True)
             try:
                 while True:
                     time.sleep(60)
@@ -377,12 +420,12 @@ class ServiceRunner:
                     if not self.threads:
                         break
                 elif len(self.services) == 0:
-                    try:
-                        while True:
-                            time.sleep(60)
-                    except KeyboardInterrupt:
+                        try:
+                            while True:
+                                time.sleep(60)
+                        except KeyboardInterrupt:
+                            break
                         break
-                    break
                 time.sleep(60)
         except KeyboardInterrupt:
             self.stop_all_services()
@@ -464,7 +507,7 @@ class ServiceRunner:
 
 def run_services():
     """Запускает все сервисы из папки services."""
-    print("12333456778696955463525497724552455765547325176154512155252355579878856462354")
+    print("test_version")
     try:
         runner = ServiceRunner()
         runner.run_all_services()

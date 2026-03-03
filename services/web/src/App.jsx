@@ -60,16 +60,16 @@ function App() {
         <Navigation />
         <main className="main-content">
           <Suspense fallback={<Loading />}>
-            <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/editor" element={<FileEditorPage />} />
-              <Route path="/robots" element={<RobotsPage />} />
-              <Route path="/robots-old" element={<RobotControlPage />} />
-              <Route path="/services" element={<ServicesPage />} />
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/editor" element={<FileEditorPage />} />
+            <Route path="/robots" element={<RobotsPage />} />
+            <Route path="/robots-old" element={<RobotControlPage />} />
+            <Route path="/services" element={<ServicesPage />} />
               <Route path="/motors" element={<MotorControlPage />} />
-              <Route path="/terminal" element={<TerminalPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
+            <Route path="/terminal" element={<TerminalPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
           </Suspense>
         </main>
       </div>

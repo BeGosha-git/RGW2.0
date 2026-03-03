@@ -581,6 +581,46 @@ def version_matches_priority(version_type: str, priority: str) -> bool:
     return False
 
 
+def get_local_ips() -> set:
+    """Возвращает множество IP этого ПК, чтобы не считать себя источником версии при обновлении."""
+    local = {"127.0.0.1"}
+    try:
+        import socket
+        try:
+            _, _, ipaddrlist = socket.gethostbyname_ex(socket.gethostname())
+            for ip in (ipaddrlist or []):
+                local.add(ip)
+        except Exception:
+            pass
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.5)
+            s.connect(("8.8.8.8", 80))
+            local.add(s.getsockname()[0])
+            s.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return local
+
+
+def is_this_host(ip: str, port: int) -> bool:
+    """True, если ip — этот ПК (при подключении к ip:port локальный адрес сокета совпадает с ip)."""
+    if ip in ("127.0.0.1", "localhost"):
+        return True
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.0)
+        s.connect((ip, port))
+        local_addr = s.getsockname()[0]
+        s.close()
+        return local_addr == ip
+    except Exception:
+        return False
+
+
 def get_ips_from_file() -> List[str]:
     """
     Загружает IP адреса из ips.json.
@@ -751,9 +791,21 @@ def update_system():
         pass
     
     robot_ips = get_ips_from_file()
+    # Не считать этот ПК источником версии — исключаем свои IP (по списку и по проверке сокетом)
+    local_ips = get_local_ips()
+    try:
+        import services_manager as sm
+        api_port = sm.get_api_port()
+    except Exception:
+        api_port = 5000
+    excluded = [ip for ip in robot_ips if ip in local_ips or is_this_host(ip, api_port)]
+    robot_ips = [ip for ip in robot_ips if ip not in local_ips and not is_this_host(ip, api_port)]
+    if excluded:
+        print(f"This host IP(s) excluded from version sources: {excluded}", flush=True)
     if not robot_ips:
-        print("No robots in network, skipping update check.", flush=True)
+        print("No other robots in network (or only this host in ips), skipping update check.", flush=True)
         return True
+    print(f"Checking version from other robot(s): {robot_ips}", flush=True)
 
     # Актуализируем свой version.json перед сравнением (список файлов и размеры, без пересборки venv)
     print("Updating local version.json (file list and sizes)...", flush=True)

@@ -81,12 +81,12 @@ function ServicesPage() {
         fetchServices()
       } else {
         setError(result.message || 'Ошибка обновления enabled')
-        if (errorTimeoutRef.current) {
-          clearTimeout(errorTimeoutRef.current)
-        }
-        errorTimeoutRef.current = setTimeout(() => {
-          setError(null)
-        }, 10000)
+          if (errorTimeoutRef.current) {
+            clearTimeout(errorTimeoutRef.current)
+          }
+          errorTimeoutRef.current = setTimeout(() => {
+            setError(null)
+          }, 10000)
       }
     } catch (err) {
       setError(`Ошибка: ${err.message}`)
@@ -120,7 +120,7 @@ function ServicesPage() {
           // Сервис выключен, но счетчик не сбрасываем - кнопка остается видимой
           fetchServices()
         }
-      } else {
+    } else {
         setError(result.message || 'Ошибка отправки запроса на выключение')
         if (errorTimeoutRef.current) {
           clearTimeout(errorTimeoutRef.current)
@@ -288,13 +288,13 @@ function ServicesPage() {
                     </div>
                     <div className="service-enabled-control">
                       <span className="enabled-label">Запуск:</span>
-                      <SelectBox
+                    <SelectBox
                         value={parameters.enabled !== false ? 'enabled' : 'disabled'}
                         onChange={(value) => updateServiceEnabled(serviceName, value === 'enabled')}
-                        options={[
+                      options={[
                           { value: 'enabled', label: 'Включен', color: '#4caf50' },
                           { value: 'disabled', label: 'Выключен', color: '#f44336' }
-                        ]}
+                      ]}
                         className="enabled-select-box"
                       />
                     </div>

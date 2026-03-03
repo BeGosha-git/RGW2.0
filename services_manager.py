@@ -7,7 +7,7 @@ import json
 import platform
 import ast
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 
@@ -92,9 +92,20 @@ class ServicesManager:
                 self.save_services(data)
                 print(f"[ServicesManager] Updated services.json to new format", flush=True)
             
+            # Убеждаемся, что data не None и имеет правильную структуру
+            if data is None or not isinstance(data, dict):
+                data = {
+                    "last_update": datetime.now().isoformat(),
+                    "services": {}
+                }
+            
+            # Убеждаемся, что есть ключ "services"
+            if "services" not in data:
+                data["services"] = {}
+            
             return data
         except Exception as e:
-            print(f"Error loading services.json: {str(e)}")
+            print(f"[ServicesManager] Error loading services.json: {e}", flush=True)
             return {
                 "last_update": datetime.now().isoformat(),
                 "services": {}
@@ -193,7 +204,14 @@ class ServicesManager:
             Информация о сервисе
         """
         data = self.load_services()
+        if data is None or not isinstance(data, dict):
+            data = {
+                "last_update": datetime.now().isoformat(),
+                "services": {}
+            }
         services = data.get("services", {})
+        if not isinstance(services, dict):
+            services = {}
         
         if service_name not in services:
             # Создаем дефолтные настройки
@@ -610,7 +628,7 @@ class ServicesManager:
         
         return depending_services
     
-    def can_disable_service(self, service_name: str) -> tuple[bool, List[str]]:
+    def can_disable_service(self, service_name: str) -> Tuple[bool, List[str]]:
         """
         Проверяет, можно ли выключить сервис.
         

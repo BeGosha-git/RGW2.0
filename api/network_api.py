@@ -122,7 +122,7 @@ class NetworkAPI:
             data: Данные для отправки
             port: Порт для подключения (None = из конфигурации, по умолчанию 5000)
             timeout: Таймаут в секундах (None = использовать дефолтный, для команд обновления рекомендуется 300)
-        
+            
         Returns:
             Результат отправки с полной структурой ответа
         """
@@ -188,12 +188,12 @@ class NetworkAPI:
                 "endpoint": endpoint
             }
         except requests.exceptions.ConnectionError:
-            return {
-                "success": False,
+                return {
+                    "success": False,
                 "message": f"Connection error to {target_ip}:{port}",
                 "target_ip": target_ip,
                 "endpoint": endpoint
-            }
+                }
         except Exception as e:
             return {
                 "success": False,

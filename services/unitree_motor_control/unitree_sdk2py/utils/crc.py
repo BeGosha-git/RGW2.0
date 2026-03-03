@@ -8,8 +8,8 @@ from ..idl.unitree_go.msg.dds_ import LowState_
 
 # Опциональный импорт unitree_hg (может отсутствовать)
 try:
-    from ..idl.unitree_hg.msg.dds_ import LowCmd_ as HGLowCmd_
-    from ..idl.unitree_hg.msg.dds_ import LowState_ as HGLowState_
+from ..idl.unitree_hg.msg.dds_ import LowCmd_ as HGLowCmd_
+from ..idl.unitree_hg.msg.dds_ import LowState_ as HGLowState_
     UNITREE_HG_AVAILABLE = True
 except ImportError:
     UNITREE_HG_AVAILABLE = False
@@ -46,8 +46,8 @@ class CRC(Singleton):
             if lib_path and os.path.exists(lib_path):
                 try:
                     self.crc_lib = ctypes.CDLL(lib_path)
-                    self.crc_lib.crc32_core.argtypes = (ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32)
-                    self.crc_lib.crc32_core.restype = ctypes.c_uint32
+            self.crc_lib.crc32_core.argtypes = (ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32)
+            self.crc_lib.crc32_core.restype = ctypes.c_uint32
                 except Exception:
                     self.crc_lib = None
     
@@ -57,11 +57,11 @@ class CRC(Singleton):
         elif msg.__idl_typename__ == 'unitree_go.msg.dds_.LowState_':
             return self.__Crc32(self.__PackLowState(msg))
         elif UNITREE_HG_AVAILABLE:
-            if msg.__idl_typename__ == 'unitree_hg.msg.dds_.LowCmd_':
-                return self.__Crc32(self.__PackHGLowCmd(msg))
-            elif msg.__idl_typename__ == 'unitree_hg.msg.dds_.LowState_':
-                return self.__Crc32(self.__PackHGLowState(msg))
-        raise TypeError('unknown IDL message type to crc')
+        if msg.__idl_typename__ == 'unitree_hg.msg.dds_.LowCmd_':
+            return self.__Crc32(self.__PackHGLowCmd(msg))
+        elif msg.__idl_typename__ == 'unitree_hg.msg.dds_.LowState_':
+            return self.__Crc32(self.__PackHGLowState(msg))
+            raise TypeError('unknown IDL message type to crc')
 
     def __PackLowCmd(self, cmd: LowCmd_):
         origData = []
@@ -239,7 +239,7 @@ class CRC(Singleton):
     def __Crc32(self, data):
         if self.platform == "Linux" and self.crc_lib is not None:
             try:
-                return self._crc_ctypes(data)
+            return self._crc_ctypes(data)
             except Exception:
                 return self._crc_py(data)
         else:

@@ -10,9 +10,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 venv_path = Path(__file__).parent.parent.parent / "venv"
 if venv_path.exists():
-    venv_site_packages = venv_path / "lib" / "python3.11" / "site-packages"
-    if venv_site_packages.exists() and str(venv_site_packages) not in sys.path:
-        sys.path.insert(0, str(venv_site_packages))
+    # Динамически определяем версию Python в venv
+    venv_lib = venv_path / "lib"
+    if venv_lib.exists():
+        # Ищем директорию pythonX.Y в lib/
+        python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
+        if python_dirs:
+            # Берем первую найденную директорию (обычно одна)
+            python_version_dir = python_dirs[0]
+            venv_site_packages = python_version_dir / "site-packages"
+            if venv_site_packages.exists() and str(venv_site_packages) not in sys.path:
+                sys.path.insert(0, str(venv_site_packages))
 
 try:
     import flask

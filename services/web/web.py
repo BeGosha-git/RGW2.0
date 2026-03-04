@@ -1083,9 +1083,10 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     index_path = self.translate_path(self.path)
                     # Отладочный вывод (можно убрать после исправления)
                     if not index_path or not os.path.exists(index_path):
-                        print(f"[WEB DEBUG] index.html not found at: {index_path}", flush=True)
-                        print(f"[WEB DEBUG] directory: {self.directory}", flush=True)
-                        print(f"[WEB DEBUG] path: {self.path}", flush=True)
+                        if os.environ.get('RGW2_DEBUG'):
+                            print(f"[WEB DEBUG] index.html not found at: {index_path}", flush=True)
+                            print(f"[WEB DEBUG] directory: {self.directory}", flush=True)
+                            print(f"[WEB DEBUG] path: {self.path}", flush=True)
                     
                     if index_path and os.path.exists(index_path) and os.path.isfile(index_path):
                         # index.html существует, обрабатываем через send_head и send файл
@@ -1170,7 +1171,8 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
     build_path = Path(__file__).parent / build_dir
     
     if not build_path.exists():
-        print(f"Build directory '{build_path}' not found. Creating placeholder...")
+        if os.environ.get('RGW2_DEBUG'):
+            print(f"Build directory '{build_path}' not found. Creating placeholder...")
         build_path.mkdir(parents=True, exist_ok=True)
         index_html = build_path / "index.html"
         with open(index_html, 'w', encoding='utf-8') as f:
@@ -1208,9 +1210,10 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
         with socketserver.ThreadingTCPServer(("", port), handler_factory) as httpd:
             # Разрешаем переиспользование адреса для быстрого перезапуска
             httpd.allow_reuse_address = True
-            print(f"Web server started on port {port}", flush=True)
-            print(f"Serving files from: {build_path}", flush=True)
-            print(f"API endpoints registered: {len(flask_app.url_map._rules)} routes", flush=True)
+            if os.environ.get('RGW2_DEBUG'):
+                print(f"Web server started on port {port}", flush=True)
+                print(f"Serving files from: {build_path}", flush=True)
+                print(f"API endpoints registered: {len(flask_app.url_map._rules)} routes", flush=True)
             sys.stdout.flush()
             
             shutdown_requested = threading.Event()
@@ -1365,7 +1368,8 @@ def run():
     except Exception:
         port = 8080
     
-    print(f"Web service starting from: {current_dir}", flush=True)
+    if os.environ.get('RGW2_DEBUG'):
+        print(f"Web service starting from: {current_dir}", flush=True)
     print(f"Build directory: {build_dir}", flush=True)
     print(f"Port: {port}", flush=True)
     sys.stdout.flush()

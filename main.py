@@ -197,8 +197,8 @@ def install_packages_to_venv(venv_path: Path, python_path: Path, pip_path: Path,
             print(f"Trying get-pip.py from offline_packages for Python {python_version}...", flush=True)
             result = subprocess.run(
                 [str(python_path), str(get_pip_file), "--no-warn-script-location"],
-                check=False,
-                capture_output=True,
+            check=False,
+            capture_output=True,
                 text=True,
                 timeout=120,
             )
@@ -467,6 +467,7 @@ def install_packages_to_venv(venv_path: Path, python_path: Path, pip_path: Path,
                     os.unlink(tmp_req_path)
                 except Exception:
                     pass
+            
             if result.returncode == 0:
                 print(f"Successfully installed packages from {requirements_file.name}", flush=True)
                 return True
@@ -1450,14 +1451,20 @@ def run_services():
         return False
 
 
-def main(python_version: str = None):
+def main(python_version: str = None, debug: bool = False):
     """
     Главная функция приложения.
     
     Args:
         python_version: Версия Python для использования (например, "3.8", "3.11", "3.13").
                        Если None, используется логика выбора версии по умолчанию.
+        debug: Включить режим отладки (вывод дополнительной информации).
     """
+    # Устанавливаем переменную окружения для debug режима
+    if debug:
+        os.environ['RGW2_DEBUG'] = '1'
+    else:
+        os.environ.pop('RGW2_DEBUG', None)
     try:
         try:
             import api.robot as robot_api
@@ -1529,11 +1536,11 @@ def main(python_version: str = None):
                 except Exception:
                     pass
             
-            # Автоматически настраиваем venv для ВСЕХ доступных версий Python (3.8, 3.11, 3.13)
-            # Если указана конкретная версия через --version, используем её, иначе создаем для всех
+            # Автоматически настраиваем venv для ВСЕХ доступных версий Python (3.8, 3.11, 3.13) если есть интернет
             # Пропускаем создание venv, если уже запущены из venv (после os.execv)
             if venv_already_active:
-                print("Already running from venv, skipping venv setup", flush=True)
+                if debug:
+                    print("Already running from venv, skipping venv setup", flush=True)
                 venv_path = Path("venv").resolve()
                 if not venv_path.exists():
                     # Если venv не существует, пытаемся найти venv-{version}
@@ -1541,11 +1548,24 @@ def main(python_version: str = None):
                     if python_version_from_env:
                         venv_path = Path(f"venv-{python_version_from_env}").resolve()
             else:
+                # Если есть интернет - создаем venv для ВСЕХ доступных версий Python
+                available_versions = get_available_python_versions()
+                if check_internet():
+                    target_versions = ["3.13", "3.11", "3.8"]
+                    for version in target_versions:
+                        if version in available_versions:
+                            venv_check = Path(f"venv-{version}")
+                            venv_ready_check = venv_check / ".ready"
+                            # Создаем venv только если его нет или он не готов
+                            if not (venv_check.exists() and venv_ready_check.exists()):
+                                if debug:
+                                    print(f"Setting up virtual environment for Python {version}...", flush=True)
+                                setup_virtual_environment_for_version(version)
+                
                 # Определяем версию Python для использования
                 selected_version = python_version
                 if not selected_version:
                     # Ищем первую доступную готовую версию Python
-                    available_versions = get_available_python_versions()
                     for version in ["3.13", "3.11", "3.8"]:
                         if version in available_versions:
                             venv_check = Path(f"venv-{version}")
@@ -1559,18 +1579,21 @@ def main(python_version: str = None):
                         selected_version = available_versions[0]
                 
                 if selected_version:
-                    # Создаем venv для выбранной версии если нужно
+                    # Создаем venv для выбранной версии если нужно (на случай если не создался выше)
                     if not setup_virtual_environment(selected_version):
-                        print(f"Warning: Failed to setup virtual environment for Python {selected_version}", flush=True)
+                        if debug:
+                            print(f"Warning: Failed to setup virtual environment for Python {selected_version}", flush=True)
                     # Используем venv для указанной версии
                     venv_path = Path(f"venv-{selected_version}").resolve()
                     # Сохраняем версию в переменную окружения для использования в run.py
                     os.environ['PYTHON_VERSION'] = selected_version
                 else:
                     # Если версия не указана и нет доступных, создаем venv для всех доступных версий
-                    print("Setting up virtual environments for all available Python versions...", flush=True)
+                    if debug:
+                        print("Setting up virtual environments for all available Python versions...", flush=True)
                     if not setup_virtual_environment(None):
-                        print("Warning: Failed to setup some virtual environments", flush=True)
+                        if debug:
+                            print("Warning: Failed to setup some virtual environments", flush=True)
                     # Используем основной venv (созданный из первой доступной версии)
                     venv_path = Path("venv").resolve()
                     # Очищаем переменную окружения если версия не указана
@@ -1806,7 +1829,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        main(python_version)
+        main(python_version, debug=args.debug)
         import time
         while True:
             time.sleep(60)

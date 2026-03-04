@@ -46,6 +46,8 @@ def scan_project_files():
     files_list = []
     
     exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist', 'data'}
+    # Исключаем все папки venv-* (но не архивы venv-*.tar.gz)
+    exclude_dirs.update({d for d in os.listdir('.') if os.path.isdir(d) and d.startswith('venv-')})
     exclude_files = {'data/version.json', 'data/settings.json', 'data/commands.json', 'data/services.json', 'data/ips.json', '.gitignore'}
     
     services_path = "services"
@@ -59,6 +61,10 @@ def scan_project_files():
         if '__pycache__' in root:
             continue
         
+        # Пропускаем все папки venv-* (но не архивы venv-*.tar.gz в корне)
+        if any(root.replace('\\', '/').startswith(f'./{d}') or root.replace('\\', '/') == f'./{d}' for d in exclude_dirs if d.startswith('venv-')):
+            continue
+        
         if services_path in root and root != f'./{services_path}':
             continue
         
@@ -70,10 +76,13 @@ def scan_project_files():
             if filepath.startswith('./.'):
                 continue
             
-            if services_path in filepath and root != f'./{services_path}':
+            # Пропускаем файлы внутри папок venv-*
+            normalized_path = filepath.replace('\\', '/').lstrip('./')
+            if any(normalized_path.startswith(f'{d}/') for d in exclude_dirs if d.startswith('venv-')):
                 continue
             
-            normalized_path = filepath.replace('\\', '/').lstrip('./')
+            if services_path in filepath and root != f'./{services_path}':
+                continue
             
             file_size = calculate_file_size(filepath)
             files_list.append({
@@ -179,25 +188,24 @@ def check_and_update_version():
         return False
 
 
-def create_venv_archive(root: Optional[Path] = None, python_version: Optional[str] = None) -> bool:
+def create_venv_archive(root: Optional[Path] = None, python_version: str = None) -> bool:
     """
     Создает архив venv для распространения на другие роботы.
     root: корень проекта; если None — текущая директория.
-    python_version: версия Python (например, "3.8" или "3.11"); если None, создает для основного venv.
+    python_version: версия Python (например, "3.8", "3.11", "3.13"). Обязательный параметр.
     Returns:
         True если успешно
     """
+    if not python_version:
+        return False
+    
     try:
         import tarfile
 
         base = Path(root) if root else Path(".")
         
-        if python_version:
-            venv_name = f"venv-{python_version}"
-            venv_archive_name = f"venv-{python_version}.tar.gz"
-        else:
-            venv_name = "venv"
-            venv_archive_name = "venv.tar.gz"
+        venv_name = f"venv-{python_version}"
+        venv_archive_name = f"venv-{python_version}.tar.gz"
         
         venv_path = base / venv_name
         venv_archive = base / venv_archive_name
@@ -218,19 +226,18 @@ def create_venv_archive(root: Optional[Path] = None, python_version: Optional[st
         return False
 
 
-def ensure_venv_archive(project_root: Path, python_version: Optional[str] = None) -> bool:
+def ensure_venv_archive(project_root: Path, python_version: str = None) -> bool:
     """
-    Создаёт venv.tar.gz (или venv-{version}.tar.gz) в project_root, если файла нет или venv обновился.
-    python_version: версия Python (например, "3.8" или "3.11"); если None, создает для основного venv.
+    Создаёт venv-{version}.tar.gz в project_root, если файла нет или venv обновился.
+    python_version: версия Python (например, "3.8", "3.11", "3.13"). Обязательный параметр.
     Returns:
         True если архив есть (был или только что создан)
     """
-    if python_version:
-        venv_name = f"venv-{python_version}"
-        archive_name = f"venv-{python_version}.tar.gz"
-    else:
-        venv_name = "venv"
-        archive_name = "venv.tar.gz"
+    if not python_version:
+        return False
+    
+    venv_name = f"venv-{python_version}"
+    archive_name = f"venv-{python_version}.tar.gz"
     
     archive = project_root / archive_name
     venv_path = project_root / venv_name
@@ -275,17 +282,11 @@ def update_version_file(skip_venv_archive: bool = False):
                 version_data["version_type"] = existing_data.get("version_type", "STABLE")
         
         if not skip_venv_archive:
-            create_venv_archive()
+            # Создаем архивы для всех версий Python (3.8, 3.11, 3.13)
+            for version in ["3.8", "3.11", "3.13"]:
+                ensure_venv_archive(Path("."), version)
         
         files_list = scan_project_files()
-        # Размер venv.tar.gz берём из version.json (уже посчитан), не с диска
-        existing_files = existing_data.get("files", [])
-        venv_size = next((f.get("size") for f in existing_files if f.get("path") == "venv.tar.gz"), None)
-        if venv_size is not None:
-            for f in files_list:
-                if f.get("path") == "venv.tar.gz":
-                    f["size"] = venv_size
-                    break
         version_data["files"] = files_list
         
         # Сохраняем обновленный version.json
@@ -341,12 +342,13 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         return False
 
 
-def download_venv_from_robot(source_ip: str) -> bool:
+def download_venv_from_robot(source_ip: str, python_version: str = None) -> bool:
     """
-    Скачивает venv с другого робота как архив.
+    Скачивает venv с другого робота как архив для конкретной версии Python.
     
     Args:
         source_ip: IP адрес робота-источника
+        python_version: Версия Python (например, "3.8", "3.11", "3.13"). Если None, используется версия из окружения.
         
     Returns:
         True если успешно
@@ -356,8 +358,22 @@ def download_venv_from_robot(source_ip: str) -> bool:
         import tempfile
         import services_manager
         
-        venv_path = Path("venv")
-        venv_archive = "venv.tar.gz"
+        # Определяем версию Python
+        if not python_version:
+            python_version = os.environ.get('PYTHON_VERSION')
+            if not python_version:
+                # Пробуем найти первую доступную версию
+                for version in ["3.13", "3.11", "3.8"]:
+                    venv_check = Path(f"venv-{version}")
+                    if venv_check.exists():
+                        python_version = version
+                        break
+                if not python_version:
+                    return False
+        
+        venv_name = f"venv-{python_version}"
+        venv_path = Path(venv_name)
+        venv_archive = f"venv-{python_version}.tar.gz"
         api_port = services_manager.get_api_port()
         
         client = network.NetworkClient()
@@ -385,6 +401,11 @@ def download_venv_from_robot(source_ip: str) -> bool:
                     # Для старых версий Python filter не поддерживается
                     tar.extractall(path='.')
             
+            # Переименовываем извлеченный venv в venv-{version}
+            extracted_venv = Path("venv")
+            if extracted_venv.exists() and not venv_path.exists():
+                extracted_venv.rename(venv_path)
+            
             venv_ready_flag = venv_path / ".ready"
             if not venv_ready_flag.exists():
                 venv_ready_flag.touch()
@@ -398,12 +419,13 @@ def download_venv_from_robot(source_ip: str) -> bool:
         return False
 
 
-def check_venv_exists_on_robot(source_ip: str) -> bool:
+def check_venv_exists_on_robot(source_ip: str, python_version: str = None) -> bool:
     """
-    Проверяет наличие venv на другом роботе.
+    Проверяет наличие venv на другом роботе для конкретной версии Python.
     
     Args:
         source_ip: IP адрес робота-источника
+        python_version: Версия Python (например, "3.8", "3.11", "3.13"). Если None, проверяет все версии.
         
     Returns:
         True если venv существует
@@ -412,7 +434,25 @@ def check_venv_exists_on_robot(source_ip: str) -> bool:
         import requests
         import services_manager
         api_port = services_manager.get_api_port()
-        url = f"http://{source_ip}:{api_port}/api/files/download?path=venv.tar.gz"
+        
+        # Определяем версию Python
+        if not python_version:
+            python_version = os.environ.get('PYTHON_VERSION')
+            if not python_version:
+                # Проверяем все версии
+                for version in ["3.13", "3.11", "3.8"]:
+                    venv_archive = f"venv-{version}.tar.gz"
+                    url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
+                    try:
+                        response = requests.head(url, timeout=5)
+                        if response.status_code == 200:
+                            return True
+                    except Exception:
+                        continue
+                return False
+        
+        venv_archive = f"venv-{python_version}.tar.gz"
+        url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
         response = requests.head(url, timeout=5)
         return response.status_code == 200
     except Exception:
@@ -517,6 +557,12 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
         # Пропускаем директории
         if file_info.get("is_directory"):
             print(f"Skipping directory: {filepath}", flush=True)
+            continue
+        
+        # Пропускаем файлы внутри папок venv-* (синхронизируем только архивы venv-*.tar.gz)
+        if any(filepath.startswith(f'venv-{v}/') for v in ['3.8', '3.11', '3.13']):
+            print(f"Skipping venv file: {filepath} (only archives are synced)", flush=True)
+            skipped_count += 1
             continue
         
         local_path = filepath

@@ -134,11 +134,14 @@ def download_file():
         # Запрет path traversal: файл должен быть внутри PROJECT_ROOT
         if not str(abs_path).startswith(str(PROJECT_ROOT.resolve())):
             return jsonify({"success": False, "message": "Access denied"}), 403
-        # venv.tar.gz: создаём архив если нет, обновляем если venv обновился
-        if filepath.strip() == "venv.tar.gz":
+        # venv-{version}.tar.gz: создаём архив если нет, обновляем если venv обновился
+        if filepath.strip().startswith("venv-") and filepath.strip().endswith(".tar.gz"):
             try:
                 import update
-                update.ensure_venv_archive(PROJECT_ROOT)
+                # Извлекаем версию из имени файла (venv-3.11.tar.gz -> 3.11)
+                version = filepath.strip().replace("venv-", "").replace(".tar.gz", "")
+                if version in ["3.8", "3.11", "3.13"]:
+                    update.ensure_venv_archive(PROJECT_ROOT, version)
             except Exception:
                 pass
             abs_path = (PROJECT_ROOT / filepath).resolve()

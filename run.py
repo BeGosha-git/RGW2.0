@@ -515,7 +515,6 @@ class ServiceRunner:
 
 def run_services():
     """Запускает все сервисы из папки services."""
-    print("test_version1")
     try:
         runner = ServiceRunner()
         runner.run_all_services()

@@ -179,10 +179,11 @@ def check_and_update_version():
         return False
 
 
-def create_venv_archive(root: Optional[Path] = None) -> bool:
+def create_venv_archive(root: Optional[Path] = None, python_version: Optional[str] = None) -> bool:
     """
     Создает архив venv для распространения на другие роботы.
     root: корень проекта; если None — текущая директория.
+    python_version: версия Python (например, "3.8" или "3.11"); если None, создает для основного venv.
     Returns:
         True если успешно
     """
@@ -190,8 +191,16 @@ def create_venv_archive(root: Optional[Path] = None) -> bool:
         import tarfile
 
         base = Path(root) if root else Path(".")
-        venv_path = base / "venv"
-        venv_archive = base / "venv.tar.gz"
+        
+        if python_version:
+            venv_name = f"venv-{python_version}"
+            venv_archive_name = f"venv-{python_version}.tar.gz"
+        else:
+            venv_name = "venv"
+            venv_archive_name = "venv.tar.gz"
+        
+        venv_path = base / venv_name
+        venv_archive = base / venv_archive_name
 
         if not venv_path.exists():
             return False
@@ -201,7 +210,7 @@ def create_venv_archive(root: Optional[Path] = None) -> bool:
             return False
 
         with tarfile.open(venv_archive, 'w:gz') as tar:
-            tar.add(venv_path, arcname='venv', filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+            tar.add(venv_path, arcname=venv_name, filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
 
         return True
 
@@ -209,14 +218,22 @@ def create_venv_archive(root: Optional[Path] = None) -> bool:
         return False
 
 
-def ensure_venv_archive(project_root: Path) -> bool:
+def ensure_venv_archive(project_root: Path, python_version: Optional[str] = None) -> bool:
     """
-    Создаёт venv.tar.gz в project_root, если файла нет или venv обновился.
+    Создаёт venv.tar.gz (или venv-{version}.tar.gz) в project_root, если файла нет или venv обновился.
+    python_version: версия Python (например, "3.8" или "3.11"); если None, создает для основного venv.
     Returns:
         True если архив есть (был или только что создан)
     """
-    archive = project_root / "venv.tar.gz"
-    venv_path = project_root / "venv"
+    if python_version:
+        venv_name = f"venv-{python_version}"
+        archive_name = f"venv-{python_version}.tar.gz"
+    else:
+        venv_name = "venv"
+        archive_name = "venv.tar.gz"
+    
+    archive = project_root / archive_name
+    venv_path = project_root / venv_name
     if not venv_path.exists() or not (venv_path / ".ready").exists():
         return archive.exists()
     need_build = not archive.exists()
@@ -228,7 +245,7 @@ def ensure_venv_archive(project_root: Path) -> bool:
         except OSError:
             need_build = True
     if need_build:
-        create_venv_archive(project_root)
+        create_venv_archive(project_root, python_version)
     return archive.exists()
 
 
@@ -289,7 +306,7 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         source_ip: IP адрес робота-источника
         filepath: Путь к файлу на роботе
         local_path: Локальный путь для сохранения
-    
+        
     Returns:
         True если успешно
     """
@@ -806,7 +823,7 @@ def update_system():
         print("No other robots in network (or only this host in ips), skipping update check.", flush=True)
         return True
     print(f"Checking version from other robot(s): {robot_ips}", flush=True)
-
+    
     # Актуализируем свой version.json перед сравнением (список файлов и размеры, без пересборки venv)
     print("Updating local version.json (file list and sizes)...", flush=True)
     try:
@@ -842,7 +859,7 @@ def update_system():
     if version_comparison < 0:
         print(f"Remote version {remote_version} (from {source_ip}) is older than current {current_version}, skipping update", flush=True)
         return True
-
+    
     files_to_update = version_data.get("files", [])
     # Проверяем файлы на источнике и у себя, актуализируем вес и список того, что нужно обновлять
     print("Actualizing file list from source and local...", flush=True)
@@ -917,7 +934,7 @@ def update_system():
             traceback.print_exc()
     elif not should_update_version:
         print(f"Skipping version update due to download errors ({error_count} errors)", flush=True)
-    
+        
     # Перезапускаем сервисы/проект только если обновление было успешным
     if success:
         if not venv_updated and (requirements_changed or main_py_changed):

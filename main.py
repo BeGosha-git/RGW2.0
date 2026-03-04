@@ -23,34 +23,562 @@ def is_windows():
     return platform.system() == 'Windows'
 
 
-def setup_virtual_environment():
+def setup_virtual_environment_for_version(python_version: str) -> bool:
     """
-    Проверяет наличие виртуального окружения, создает если нет,
-    и устанавливает зависимости из requirements.txt ОДИН РАЗ.
-    Использует Python 3.11 для совместимости с симулятором.
+    Создает виртуальное окружение для конкретной версии Python.
+    Проверяет наличие venv, если нет - распаковывает из архива, если архива нет - создает и упаковывает.
     
-    КРИТИЧНО: Автоматически пересоздает venv при:
-    - Изменении версии Python (мажорной или минорной)
-    - Наличии флага data/.recreate_venv (создается при обновлении requirements.txt или main.py)
-    - Отсутствии venv
-    - Несоответствии версии Python в существующем venv
-    - Отсутствии флага готовности venv/.ready
+    Args:
+        python_version: Версия Python (например, "3.8" или "3.11")
     
     Returns:
         True если окружение готово, False при ошибке
     """
-    venv_name = "venv"
+    venv_name = f"venv-{python_version}"
     venv_path = Path(venv_name)
-    requirements_file = Path("requirements.txt")
     venv_ready_flag = venv_path / ".ready"
-    system_deps_flag = Path("data/.system_deps_installed")
+    
+    # Проверяем наличие Python этой версии
+    python_exe = find_python_executable(python_version)
+    if not python_exe:
+        print(f"Python {python_version} not found", flush=True)
+        return False
     
     if is_windows():
         python_path = venv_path / "Scripts" / "python.exe"
+        pip_path = venv_path / "Scripts" / "pip.exe"
     else:
         python_path = venv_path / "bin" / "python"
+        pip_path = venv_path / "bin" / "pip"
     
+    # Если venv уже готов - готово
     if venv_path.exists() and venv_ready_flag.exists() and python_path.exists():
+        print(f"Virtual environment for Python {python_version} is ready", flush=True)
+        # Создаем архив если его нет
+        venv_archive = Path(f"venv-{python_version}.tar.gz")
+        if not venv_archive.exists():
+            try:
+                create_venv_archive_for_version(python_version)
+            except Exception:
+                pass
+        return True
+    
+    # Проверяем наличие архива venv для этой версии
+    venv_archive = Path(f"venv-{python_version}.tar.gz")
+    if venv_archive.exists():
+        print(f"Found venv-{python_version}.tar.gz, extracting...", flush=True)
+        try:
+            import tarfile
+            import shutil
+            
+            if venv_path.exists():
+                shutil.rmtree(venv_path)
+            
+            with tarfile.open(venv_archive, 'r:gz') as tar:
+                try:
+                    tar.extractall(path='.', filter='data')
+                except TypeError:
+                    tar.extractall(path='.')
+            
+            # Переименовываем извлеченный venv в venv-{version}
+            extracted_venv = Path("venv")
+            if extracted_venv.exists() and not venv_path.exists():
+                extracted_venv.rename(venv_path)
+            
+            venv_ready_flag.touch()
+            print(f"Successfully extracted venv-{python_version}.tar.gz", flush=True)
+            return True
+        except Exception as e:
+            print(f"Warning: Failed to extract venv-{python_version}.tar.gz: {e}", flush=True)
+    
+    # Создаем новый venv
+    print(f"Creating virtual environment for Python {python_version}...", flush=True)
+    try:
+        # Для Python 3.8 и 3.11 может не работать ensurepip, используем --without-pip
+        venv_args = [python_exe, "-m", "venv", str(venv_path)]
+        if python_version in ["3.8", "3.11"]:
+            # Пробуем сначала с --without-pip для Python 3.8 и 3.11
+            venv_args.append("--without-pip")
+        
+        result = subprocess.run(
+            venv_args,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        print(f"Successfully created venv using Python {python_version}", flush=True)
+    except subprocess.CalledProcessError as e:
+        # Если не получилось с --without-pip, пробуем без него
+        if python_version in ["3.8", "3.11"] and "--without-pip" in str(e):
+            try:
+                result = subprocess.run(
+                    [python_exe, "-m", "venv", str(venv_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                print(f"Successfully created venv using Python {python_version} (retry without --without-pip)", flush=True)
+            except subprocess.CalledProcessError as e2:
+                print(f"Error creating venv for Python {python_version}: {e2}", flush=True)
+                if e2.stderr:
+                    print(f"Error details: {e2.stderr[:300]}", flush=True)
+                return False
+        else:
+            print(f"Error creating venv for Python {python_version}: {e}", flush=True)
+            if e.stderr:
+                print(f"Error details: {e.stderr[:300]}", flush=True)
+            return False
+    
+    # Устанавливаем пакеты через pip онлайн
+    if not install_packages_to_venv(venv_path, python_path, pip_path, python_version):
+        print(f"Warning: Failed to install packages for Python {python_version}", flush=True)
+        return False
+    
+    venv_ready_flag.touch()
+    
+    # Создаем архив
+    try:
+        create_venv_archive_for_version(python_version)
+        print(f"Created archive venv-{python_version}.tar.gz", flush=True)
+    except Exception as e:
+        print(f"Warning: Could not create venv-{python_version}.tar.gz archive: {e}", flush=True)
+    
+    print(f"Virtual environment for Python {python_version} created successfully", flush=True)
+    return True
+
+
+def install_packages_to_venv(venv_path: Path, python_path: Path, pip_path: Path, python_version: str) -> bool:
+    """
+    Устанавливает пакеты в venv через pip онлайн.
+    
+    Args:
+        venv_path: Путь к venv
+        python_path: Путь к Python в venv
+        pip_path: Путь к pip в venv
+        python_version: Версия Python
+        
+    Returns:
+        True если успешно
+    """
+    # Используем версионный requirements файл если существует, иначе базовый
+    requirements_file = Path(f"requirements-{python_version}.txt")
+    if not requirements_file.exists():
+        requirements_file = Path("requirements.txt")
+    
+    if not requirements_file.exists():
+        print(f"Warning: requirements file not found", flush=True)
+        return False
+    
+    # Устанавливаем pip если нужно (особенно важно для Python 3.8 с --without-pip)
+    if not pip_path.exists():
+        print(f"Installing pip for Python {python_version}...", flush=True)
+        import shutil
+        import urllib.request
+        import tempfile
+        
+        site_packages = venv_path / "lib" / f"python{python_version}" / "site-packages"
+        
+        # Удаляем сломанный pip из site-packages если есть (несовместимый от другой версии Python)
+        broken_pip = site_packages / "pip"
+        if broken_pip.exists():
+            shutil.rmtree(broken_pip)
+        
+        pip_installed = False
+        
+        # Метод 1: get-pip.py из offline_packages
+        offline_dir = Path("offline_packages")
+        get_pip_file = offline_dir / f"get-pip-{python_version}.py"
+        if not get_pip_file.exists():
+            get_pip_file = offline_dir / "get-pip.py"
+        
+        if get_pip_file.exists():
+            print(f"Trying get-pip.py from offline_packages for Python {python_version}...", flush=True)
+            result = subprocess.run(
+                [str(python_path), str(get_pip_file), "--no-warn-script-location"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0 and pip_path.exists():
+                print(f"Successfully installed pip using offline get-pip.py for Python {python_version}", flush=True)
+                pip_installed = True
+        
+        # Метод 2: Скачиваем get-pip.py онлайн
+        if not pip_installed:
+            print(f"Downloading get-pip.py for Python {python_version} from internet...", flush=True)
+            get_pip_url = f"https://bootstrap.pypa.io/pip/{python_version}/get-pip.py"
+            if python_version not in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]:
+                get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
+            
+            tmp_file_path = None
+            try:
+                tmp_file_path = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False).name
+                urllib.request.urlretrieve(get_pip_url, tmp_file_path)
+                result = subprocess.run(
+                    [str(python_path), tmp_file_path, "--no-warn-script-location"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode == 0 and pip_path.exists():
+                    print(f"Successfully installed pip for Python {python_version}", flush=True)
+                    pip_installed = True
+                else:
+                    err_text = result.stderr
+                    print(f"Warning: get-pip.py failed: {err_text[:300]}", flush=True)
+                    # Если ошибка связана с distutils - устанавливаем пакет и пробуем снова
+                    if "distutils" in err_text and not is_windows():
+                        print(f"Missing distutils for Python {python_version}, trying to install...", flush=True)
+                        distutils_pkg = f"python{python_version}-distutils"
+                        subprocess.run(
+                            ["sudo", "apt-get", "install", "-y", distutils_pkg],
+                            check=False, capture_output=True, text=True, timeout=120
+                        )
+                        result2 = subprocess.run(
+                            [str(python_path), tmp_file_path, "--no-warn-script-location"],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                        if result2.returncode == 0 and pip_path.exists():
+                            print(f"Successfully installed pip for Python {python_version} after distutils fix", flush=True)
+                            pip_installed = True
+                        else:
+                            print(f"Warning: Still failed after distutils: {result2.stderr[:200]}", flush=True)
+            except Exception as e:
+                print(f"Warning: get-pip.py download failed: {e}", flush=True)
+            finally:
+                if tmp_file_path and os.path.exists(tmp_file_path):
+                    os.unlink(tmp_file_path)
+        
+        if not pip_installed:
+            print(f"Error: All methods failed to install pip for Python {python_version}", flush=True)
+            return False
+        
+        print(f"Pip ready for Python {python_version}", flush=True)
+    
+    # Устанавливаем пакеты через pip онлайн
+    # Для Python 3.8 используем системный pip напрямую для установки пакетов в venv
+    pip_available = pip_path.exists()
+    use_system_pip = False
+    site_packages_for_pip = None
+    
+    # use_system_pip больше не используется - pip устанавливается в venv через get-pip.py
+    
+    if pip_available or use_system_pip:
+        try:
+            print(f"Installing packages from {requirements_file.name} for Python {python_version}...", flush=True)
+            # Сначала обновляем pip, setuptools, wheel
+            # Для Python 3.13 нужен setuptools >= 70.1 для правильной работы с wheel
+            print(f"Updating pip, setuptools, wheel for Python {python_version}...", flush=True)
+            # Для Python 3.8 используем системный pip для установки в venv
+            if use_system_pip and site_packages_for_pip:
+                upgrade_cmd = [
+                    f"python{python_version}", "-m", "pip", "install", "--target", str(site_packages_for_pip),
+                    "--upgrade", "--no-warn-script-location", "--no-cache-dir", "--break-system-packages",
+                    "pip", "setuptools", "wheel"
+                ]
+                upgrade_env = os.environ.copy()
+            else:
+                upgrade_cmd = [
+                    str(pip_path), "install", "--upgrade",
+                    "pip", "setuptools>=70.1", "wheel"
+                ]
+                upgrade_env = os.environ.copy()
+            upgrade_result = subprocess.run(
+                upgrade_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=upgrade_env
+            )
+            if upgrade_result.returncode != 0:
+                print(f"Warning: Failed to upgrade pip/setuptools/wheel: {upgrade_result.stderr[:200]}", flush=True)
+            
+            # Для Python 3.13 дополнительно обновляем setuptools в build environment
+            if python_version == "3.13":
+                print(f"Ensuring setuptools>=70.1 for Python {python_version} build environment...", flush=True)
+                # Устанавливаем setuptools>=70.1 перед установкой пакетов
+                subprocess.run(
+                    [str(pip_path), "install", "--upgrade", "--force-reinstall", "setuptools>=70.1"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            
+            # Для Python 3.13 устанавливаем markupsafe отдельно с обновленным setuptools
+            if python_version == "3.13":
+                print(f"Installing markupsafe separately for Python {python_version}...", flush=True)
+                markupsafe_result = subprocess.run(
+                    [str(pip_path), "install", "--upgrade", "markupsafe"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if markupsafe_result.returncode == 0:
+                    print(f"Successfully installed markupsafe for Python {python_version}", flush=True)
+                else:
+                    print(f"Warning: Failed to install markupsafe separately: {markupsafe_result.stderr[:200]}", flush=True)
+            
+            # Устанавливаем пакеты из requirements
+            # Для Python 3.13 пропускаем markupsafe, так как он уже установлен
+            install_cmd = [str(pip_path), "install", "-r", str(requirements_file)]
+            tmp_req_path = None
+            if python_version == "3.13":
+                # Устанавливаем пакеты по одному, пропуская markupsafe если он уже установлен
+                try:
+                    # Проверяем, установлен ли markupsafe
+                    check_markupsafe = subprocess.run(
+                        [str(python_path), "-c", "import markupsafe; print('OK')"],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if check_markupsafe.returncode == 0:
+                        # Создаем временный requirements без markupsafe
+                        import tempfile
+                        with open(requirements_file, 'r') as f:
+                            req_lines = f.readlines()
+                        filtered_reqs = [line for line in req_lines if not line.strip().startswith('markupsafe')]
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_req:
+                            tmp_req.write(''.join(filtered_reqs))
+                            tmp_req_path = tmp_req.name
+                        if use_system_pip and site_packages_for_pip:
+                            install_cmd = [f"python{python_version}", "-m", "pip", "install", "--target", str(site_packages_for_pip), "--no-warn-script-location", "--no-cache-dir", "--break-system-packages", "-r", tmp_req_path]
+                        else:
+                            install_cmd = [str(pip_path), "install", "-r", tmp_req_path]
+                except Exception:
+                    pass
+            
+            # Для Python 3.13 и 3.8 устанавливаем пакеты по одному, чтобы избежать конфликтов зависимостей
+            env = os.environ.copy()
+            if python_version in ["3.13", "3.8"]:
+                if python_version == "3.13":
+                    env["PIP_BUILD_ISOLATION"] = "0"
+                # Устанавливаем пакеты по одному
+                try:
+                    import tempfile
+                    with open(requirements_file, 'r') as f:
+                        req_lines = f.readlines()
+                    
+                    # Устанавливаем пакеты по одному
+                    failed_packages = []
+                    optional_packages = {"evdev", "cyclonedds"}  # Пакеты, которые не критичны
+                    for line in req_lines:
+                        line_stripped = line.strip()
+                        if line_stripped and not line_stripped.startswith('#'):
+                            # Пропускаем markupsafe для Python 3.13, так как он уже установлен
+                            if python_version == "3.13" and 'markupsafe' in line_stripped.lower():
+                                continue
+                            
+                            # Извлекаем имя пакета для проверки
+                            pkg_name = line_stripped.split('>=')[0].split('==')[0].split('<=')[0].split('>')[0].split('<')[0].strip().lower()
+                            
+                            print(f"Installing {line_stripped} for Python {python_version}...", flush=True)
+                            pkg_cmd = [str(pip_path), "install", line_stripped]
+                            pkg_env = env.copy()
+                            
+                            pkg_result = subprocess.run(
+                                pkg_cmd,
+                                check=False,
+                                capture_output=True,
+                                text=True,
+                                timeout=300,
+                                env=pkg_env
+                            )
+                            if pkg_result.returncode != 0:
+                                print(f"Warning: Failed to install {line_stripped}: {pkg_result.stderr[:200]}", flush=True)
+                                # Для cyclonedds пробуем установить без build isolation
+                                if 'cyclonedds' in line_stripped.lower():
+                                    print(f"Retrying cyclonedds without build isolation...", flush=True)
+                                    cyclonedds_env = env.copy()
+                                    cyclonedds_env["PIP_BUILD_ISOLATION"] = "0"
+                                    cyclonedds_env["PIP_NO_BUILD_ISOLATION"] = "1"
+                                    cyclonedds_cmd = [str(pip_path), "install", "--no-build-isolation", line_stripped]
+                                    cyclonedds_retry = subprocess.run(
+                                        cyclonedds_cmd,
+                                        check=False,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=300,
+                                        env=cyclonedds_env
+                                    )
+                                    if cyclonedds_retry.returncode == 0:
+                                        print(f"Successfully installed cyclonedds without build isolation", flush=True)
+                                    else:
+                                        print(f"Warning: cyclonedds installation failed, but continuing...", flush=True)
+                                        if pkg_name not in optional_packages:
+                                            failed_packages.append(line_stripped)
+                                elif pkg_name in optional_packages:
+                                    # evdev и другие опциональные пакеты - просто пропускаем
+                                    print(f"Warning: Optional package {pkg_name} failed to install, continuing...", flush=True)
+                                else:
+                                    failed_packages.append(line_stripped)
+                    
+                    # Проверяем успешность установки критичных пакетов
+                    check_result = subprocess.run(
+                        [str(python_path), "-c", "import flask; print('Flask OK')"],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if check_result.returncode == 0:
+                        if failed_packages:
+                            print(f"Warning: Some packages failed to install: {', '.join(failed_packages)}", flush=True)
+                        return True
+                    else:
+                        print(f"Warning: Critical packages not installed", flush=True)
+                        return False
+                except Exception as e:
+                    print(f"Warning: Failed to install packages separately: {e}", flush=True)
+                    # Fallback к обычной установке
+                    pass
+            else:
+                env = os.environ.copy()
+            
+            # Обычная установка для других версий Python или fallback для 3.13
+            # Для Python 3.8 используем системный pip если он доступен
+            if use_system_pip and site_packages_for_pip:
+                install_env = os.environ.copy()
+            else:
+                install_env = env
+            result = subprocess.run(
+                install_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=install_env
+            )
+            
+            # Очищаем временный файл если был создан
+            if tmp_req_path and os.path.exists(tmp_req_path):
+                try:
+                    os.unlink(tmp_req_path)
+                except Exception:
+                    pass
+            if result.returncode == 0:
+                print(f"Successfully installed packages from {requirements_file.name}", flush=True)
+                return True
+            else:
+                # Выводим полный вывод ошибки для диагностики
+                if result.stdout:
+                    print(f"pip stdout: {result.stdout[:500]}", flush=True)
+                if result.stderr:
+                    print(f"pip stderr: {result.stderr[:500]}", flush=True)
+                print(f"Warning: Some packages failed to install (exit code: {result.returncode})", flush=True)
+                # Не возвращаем False сразу - возможно часть пакетов установилась
+                # Проверяем наличие критичных пакетов
+                try:
+                    check_result = subprocess.run(
+                        [str(python_path), "-c", "import flask; print('Flask OK')"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if check_result.returncode == 0:
+                        print(f"Critical packages installed successfully, continuing...", flush=True)
+                        return True
+                except Exception:
+                    pass
+                return False
+        except Exception as e:
+            print(f"Warning: Failed to install packages: {e}", flush=True)
+            return False
+    
+    return False
+
+
+def create_venv_archive_for_version(python_version: str) -> bool:
+    """
+    Создает архив venv для конкретной версии Python.
+    
+    Args:
+        python_version: Версия Python (например, "3.8" или "3.11")
+        
+    Returns:
+        True если успешно
+    """
+    try:
+        import tarfile
+        
+        venv_name = f"venv-{python_version}"
+        venv_path = Path(venv_name)
+        venv_archive = Path(f"{venv_name}.tar.gz")
+        
+        if not venv_path.exists():
+            return False
+        
+        venv_ready_flag = venv_path / ".ready"
+        if not venv_ready_flag.exists():
+            return False
+        
+        with tarfile.open(venv_archive, 'w:gz') as tar:
+            tar.add(venv_path, arcname=venv_name, filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+        
+        return True
+    except Exception:
+        return False
+
+
+def setup_virtual_environment(python_version: str = None):
+    """
+    Проверяет наличие виртуального окружения для указанной версии Python, создает если нет.
+    Для обратной совместимости создает основной venv из выбранной версии.
+    
+    Args:
+        python_version: Версия Python для использования (например, "3.8", "3.11", "3.13").
+                      Если None, используется логика выбора версии по умолчанию.
+    
+    Returns:
+        True если окружение готово, False при ошибке
+    """
+    # Определяем доступные версии Python
+    available_versions = get_available_python_versions()
+    
+    # Если указана конкретная версия, используем её
+    if python_version:
+        if python_version not in available_versions:
+            print(f"Python {python_version} not found", flush=True)
+            return False
+        
+        print(f"Setting up virtual environment for Python {python_version}...", flush=True)
+        if not setup_virtual_environment_for_version(python_version):
+            print(f"Warning: Failed to setup venv for Python {python_version}", flush=True)
+            return False
+        
+        # Создаем основной venv из выбранной версии только если venv готов
+        venv_primary = Path(f"venv-{python_version}")
+        venv_ready_flag = venv_primary / ".ready"
+        venv_main = Path("venv")
+        
+        # Проверяем, что venv существует и готов (есть .ready файл)
+        if venv_primary.exists() and venv_ready_flag.exists():
+            try:
+                import shutil
+                if venv_main.exists():
+                    shutil.rmtree(venv_main)
+                shutil.copytree(venv_primary, venv_main)
+                (venv_main / ".ready").touch()
+                print(f"Created main venv from Python {python_version}", flush=True)
+            except Exception as e:
+                print(f"Warning: Could not create main venv: {e}", flush=True)
+                return False
+        else:
+            print(f"Warning: venv-{python_version} is not ready, cannot create main venv", flush=True)
+            return False
+
+        # Настраиваем LD_LIBRARY_PATH для cyclonedds
         if not is_windows():
             lib_paths = []
             for path in ["/usr/lib/x86_64-linux-gnu", "/usr/local/lib", "/lib/x86_64-linux-gnu"]:
@@ -84,1132 +612,69 @@ def setup_virtual_environment():
             except Exception:
                 pass
         
-        print("Virtual environment is ready, using existing setup", flush=True)
         return True
     
-    python311_paths = [
-        "/usr/bin/python3.11",
-        "/usr/local/bin/python3.11",
-        "/home/g100/miniconda3/envs/env-isaaclab/bin/python",
-        "/home/g100/miniconda3/bin/python3.11",
-    ]
+    # Если версия не указана, создаем venv для нескольких версий (3.13, 3.11, 3.8)
+    target_versions = ["3.13", "3.11", "3.8"]
     
-    python311 = None
-    for path in python311_paths:
-        if Path(path).exists():
-            try:
-                result = subprocess.run(
-                    [path, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if "3.11" in result.stdout or "3.11" in result.stderr:
-                    python311 = path
-                    break
-            except:
-                continue
+    # Создаем venv для каждой доступной версии из target_versions
+    venv_created = False
+    for version in target_versions:
+        if version in available_versions:
+            print(f"Setting up virtual environment for Python {version}...", flush=True)
+            if setup_virtual_environment_for_version(version):
+                venv_created = True
+                print(f"Virtual environment for Python {version} ready", flush=True)
+            else:
+                print(f"Warning: Failed to setup venv for Python {version}", flush=True)
     
-    if not python311:
-        python311 = sys.executable
+    # Создаем основной venv для совместимости (используем первую успешно созданную версию)
+    # Проверяем версии в порядке приоритета: 3.13, 3.11, 3.8
+    primary_version = None
+    for version in ["3.13", "3.11", "3.8"]:
+        if version in available_versions:
+            venv_check = Path(f"venv-{version}")
+            venv_ready_check = venv_check / ".ready"
+            # Используем только готовые venv (с установленными пакетами)
+            if venv_check.exists() and venv_ready_check.exists():
+                primary_version = version
+                break
     
-    # Определяем фактическую версию Python, которая будет использоваться
-    try:
-        version_result = subprocess.run(
-            [python311, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        actual_python_version = "3.8"  # по умолчанию
-        if version_result.returncode == 0:
-            import re
-            version_match = re.search(r'(\d+)\.(\d+)', version_result.stdout)
-            if version_match:
-                actual_python_version = f"{version_match.group(1)}.{version_match.group(2)}"
-    except Exception:
-        actual_python_version = "3.8"
-    
-    if is_windows():
-        pip_path = venv_path / "Scripts" / "pip.exe"
-    else:
-        pip_path = venv_path / "bin" / "pip"
-    
-    venv_recreate_flag = Path("data/.recreate_venv")
-    if venv_recreate_flag.exists():
-        if venv_path.exists():
+    if primary_version:
+        venv_primary = Path(f"venv-{primary_version}")
+        venv_main = Path("venv")
+        if venv_primary.exists() and not venv_main.exists():
             try:
                 import shutil
-                shutil.rmtree(venv_path)
-            except Exception:
-                pass
-        try:
-            venv_recreate_flag.unlink()
-        except Exception:
-            pass
-    
-    need_recreate = False
-    
-    if not venv_path.exists():
-        need_recreate = True
-    else:
-        try:
-            result_target = subprocess.run(
-                [python311, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            target_version = result_target.stdout.strip() if result_target.returncode == 0 else None
-            
-            if python_path.exists():
-                result_venv = subprocess.run(
-                    [str(python_path), "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                venv_version = result_venv.stdout.strip() if result_venv.returncode == 0 else None
-                
-                if target_version and venv_version:
-                    import re
-                    target_match = re.search(r'(\d+)\.(\d+)', target_version)
-                    venv_match = re.search(r'(\d+)\.(\d+)', venv_version)
-                    
-                    if target_match and venv_match:
-                        target_major_minor = f"{target_match.group(1)}.{target_match.group(2)}"
-                        venv_major_minor = f"{venv_match.group(1)}.{venv_match.group(2)}"
-                        
-                        if target_major_minor != venv_major_minor:
-                            need_recreate = True
-                else:
-                    need_recreate = True
-            else:
-                need_recreate = True
-        except Exception:
-            pass
-    
-    if need_recreate or (venv_path.exists() and not pip_path.exists()):
-        if venv_path.exists():
-            try:
-                import shutil
-                if venv_ready_flag.exists():
-                    venv_ready_flag.unlink()
-                shutil.rmtree(venv_path)
-            except Exception:
-                pass
-        
-        # Проверяем и устанавливаем python3-venv если нужно
-        if not is_windows():
-            try:
-                # Используем фактическую версию Python для установки правильного пакета
-                python_major_minor = actual_python_version
-                python_version = f"python{actual_python_version}-venv"
-                
-                # Проверяем наличие ensurepip (который нужен для создания venv)
-                ensurepip_check = subprocess.run(
-                    [python311, "-c", "import ensurepip"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                
-                # Если ensurepip недоступен, устанавливаем python3-venv
-                if ensurepip_check.returncode != 0:
-                    print(f"ensurepip not available. Installing {python_version} package...", flush=True)
-                    
-                    # Пробуем офлайн установку сначала
-                    offline_dir = Path("offline_packages")
-                    installed_offline = False
-                    
-                    if offline_dir.exists():
-                        # Ищем пакет для конкретной версии Python
-                        deb_files = []
-                        # Пробуем точное совпадение версии
-                        version_patterns = [
-                            f"*python{python_major_minor.replace('.', '_')}*venv*.deb",
-                            f"*python{python_major_minor.replace('.', '.')}*venv*.deb",
-                            f"*python{python_major_minor}*venv*.deb",
-                        ]
-                        for pattern in version_patterns:
-                            deb_files = list(offline_dir.glob(pattern))
-                            if deb_files:
-                                break
-                        
-                        # Если не нашли точное совпадение, пробуем найти совместимый пакет
-                        if not deb_files:
-                            # Ищем пакет для той же мажорной версии
-                            major_version = python_major_minor.split('.')[0]
-                            deb_files = list(offline_dir.glob(f"*python{major_version}.*venv*.deb"))
-                        
-                        # Если все еще не нашли, пробуем любой python*-venv пакет
-                        if not deb_files:
-                            all_venv_debs = list(offline_dir.glob("*python*venv*.deb"))
-                            # Предпочитаем пакеты с меньшей версией (более совместимые)
-                            if all_venv_debs:
-                                # Сортируем по имени и берем первый (обычно это более старая версия)
-                                all_venv_debs.sort(key=lambda x: x.name)
-                                deb_files = [all_venv_debs[0]]
-                        
-                        if deb_files:
-                            found_pkg = deb_files[0]
-                            print(f"Found offline package: {found_pkg.name}, installing...", flush=True)
-                            print(f"Note: Installing {found_pkg.name} for Python {python_major_minor} (package may be for different version)", flush=True)
-                            try:
-                                install_result = subprocess.run(
-                                    ["sudo", "dpkg", "-i", str(found_pkg)],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=120
-                                )
-                                if install_result.returncode == 0:
-                                    # Проверяем, что ensurepip теперь доступен
-                                    check_result = subprocess.run(
-                                        [python311, "-c", "import ensurepip"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5
-                                    )
-                                    if check_result.returncode == 0:
-                                        installed_offline = True
-                                        print(f"Successfully installed {found_pkg.name} from offline package, ensurepip now available", flush=True)
-                                    else:
-                                        print(f"Warning: Package {found_pkg.name} installed but ensurepip still not available for Python {python_major_minor}", flush=True)
-                                        # Пробуем исправить зависимости
-                                        print("Fixing package dependencies...", flush=True)
-                                        fix_result = subprocess.run(
-                                            ["sudo", "apt-get", "install", "-f", "-y"],
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=120
-                                        )
-                                        # Проверяем снова после исправления зависимостей
-                                        check_result2 = subprocess.run(
-                                            [python311, "-c", "import ensurepip"],
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=5
-                                        )
-                                        if check_result2.returncode == 0:
-                                            installed_offline = True
-                                            print(f"Package dependencies fixed, ensurepip now available", flush=True)
-                                        else:
-                                            print(f"Warning: ensurepip still not available after fixing dependencies", flush=True)
-                                else:
-                                    # Пробуем исправить зависимости
-                                    print("Fixing package dependencies...", flush=True)
-                                    fix_result = subprocess.run(
-                                        ["sudo", "apt-get", "install", "-f", "-y"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=120
-                                    )
-                                    # Проверяем, установился ли нужный пакет после исправления зависимостей
-                                    check_result = subprocess.run(
-                                        [python311, "-c", "import ensurepip"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5
-                                    )
-                                    if check_result.returncode == 0:
-                                        installed_offline = True
-                                        print(f"Package dependencies fixed, ensurepip now available", flush=True)
-                                    else:
-                                        print(f"Warning: Package installed but ensurepip still not available", flush=True)
-                            except Exception as e:
-                                print(f"Warning: Offline installation failed: {e}", flush=True)
-                    
-                    # Если офлайн не сработал или ensurepip все еще недоступен, пробуем онлайн
-                    if not installed_offline:
-                        # Проверяем еще раз, может быть пакет уже установлен системно
-                        final_check = subprocess.run(
-                            [python311, "-c", "import ensurepip"],
-                            capture_output=True,
-                            text=True,
-                            timeout=5
-                        )
-                        if final_check.returncode == 0:
-                            installed_offline = True
-                            print(f"ensurepip is now available (may have been installed by dependencies)", flush=True)
-                        else:
-                            print(f"Trying online installation of {python_version}...", flush=True)
-                            install_result = subprocess.run(
-                                ["sudo", "apt-get", "install", "-y", python_version],
-                                capture_output=True,
-                                text=True,
-                                timeout=120
-                            )
-                            if install_result.returncode != 0:
-                                print(f"Warning: Failed to install {python_version}. Trying to create venv without pip...", flush=True)
-                                if install_result.stdout:
-                                    stdout_preview = install_result.stdout[:500] if len(install_result.stdout) > 500 else install_result.stdout
-                                    print(f"Install stdout preview: {stdout_preview}", flush=True)
-                                if install_result.stderr:
-                                    stderr_preview = install_result.stderr[:500] if len(install_result.stderr) > 500 else install_result.stderr
-                                    print(f"Install stderr preview: {stderr_preview}", flush=True)
-                                # Пробуем создать venv без ensurepip
-                                print(f"Attempting to create venv without pip (will install pip manually)...", flush=True)
-                                try:
-                                    result_no_pip = subprocess.run(
-                                        [python311, "-m", "venv", str(venv_path), "--without-pip"],
-                                        check=True,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=60
-                                    )
-                                    print(f"Successfully created venv without pip", flush=True)
-                                    # Устанавливаем pip вручную после создания venv
-                                    pip_path_venv = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                                    if not pip_path_venv.exists():
-                                        print("Installing pip manually...", flush=True)
-                                        # Сначала пробуем из офлайн-пакетов
-                                        offline_dir = Path("offline_packages")
-                                        pip_installed = False
-                                        
-                                        if offline_dir.exists():
-                                            # Ищем get-pip.py в офлайн-пакетах
-                                            get_pip_offline = offline_dir / "get-pip.py"
-                                            if get_pip_offline.exists():
-                                                print(f"Found get-pip.py in offline packages: {get_pip_offline}", flush=True)
-                                                try:
-                                                    python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                    # Определяем версию Python в venv для правильного get-pip.py
-                                                    venv_version_result = subprocess.run(
-                                                        [str(python_venv), "--version"],
-                                                        capture_output=True,
-                                                        text=True,
-                                                        timeout=5
-                                                    )
-                                                    venv_python_version = None
-                                                    if venv_version_result.returncode == 0:
-                                                        version_match = re.search(r'(\d+)\.(\d+)', venv_version_result.stdout)
-                                                        if version_match:
-                                                            venv_python_version = f"{version_match.group(1)}.{version_match.group(2)}"
-                                                    
-                                                    # Если Python 3.8, проверяем наличие правильной версии get-pip.py
-                                                    if venv_python_version and venv_python_version.startswith("3.8"):
-                                                        get_pip_38 = offline_dir / "get-pip-3.8.py"
-                                                        if get_pip_38.exists():
-                                                            get_pip_abs = get_pip_38.resolve()
-                                                            print(f"Using Python 3.8 compatible get-pip.py: {get_pip_abs}", flush=True)
-                                                        else:
-                                                            print(f"Warning: Python 3.8 detected but get-pip-3.8.py not found. Trying standard get-pip.py...", flush=True)
-                                                            get_pip_abs = get_pip_offline.resolve()
-                                                    else:
-                                                        get_pip_abs = get_pip_offline.resolve()
-                                                    
-                                                    print(f"Running: {python_venv} {get_pip_abs}", flush=True)
-                                                    install_result = subprocess.run(
-                                                        [str(python_venv), str(get_pip_abs)],
-                                                        check=True,
-                                                        capture_output=True,
-                                                        text=True,
-                                                        timeout=120
-                                                    )
-                                                    # Проверяем, что pip действительно установлен
-                                                    pip_path_venv_check = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                                                    if pip_path_venv_check.exists():
-                                                        print("pip installed successfully from offline package", flush=True)
-                                                        pip_installed = True
-                                                    else:
-                                                        print("Warning: get-pip.py completed but pip not found in venv", flush=True)
-                                                        if install_result.stdout:
-                                                            print(f"get-pip stdout: {install_result.stdout[:500]}", flush=True)
-                                                        if install_result.stderr:
-                                                            print(f"get-pip stderr: {install_result.stderr[:500]}", flush=True)
-                                                except subprocess.CalledProcessError as pip_err:
-                                                    print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                                                    if hasattr(pip_err, 'stdout') and pip_err.stdout:
-                                                        print(f"get-pip stdout: {pip_err.stdout[:500]}", flush=True)
-                                                    if hasattr(pip_err, 'stderr') and pip_err.stderr:
-                                                        print(f"get-pip stderr: {pip_err.stderr[:500]}", flush=True)
-                                                    # Если это Python 3.8 и стандартный get-pip.py не работает, пробуем скачать правильную версию
-                                                    if venv_python_version and venv_python_version.startswith("3.8") and check_internet():
-                                                        try:
-                                                            import urllib.request
-                                                            get_pip_38_path = offline_dir / "get-pip-3.8.py"
-                                                            print("Downloading Python 3.8 compatible get-pip.py...", flush=True)
-                                                            urllib.request.urlretrieve("https://bootstrap.pypa.io/pip/3.8/get-pip.py", str(get_pip_38_path))
-                                                            os.chmod(get_pip_38_path, 0o644)
-                                                            print(f"Retrying with Python 3.8 compatible get-pip.py...", flush=True)
-                                                            subprocess.run(
-                                                                [str(python_venv), str(get_pip_38_path)],
-                                                                check=True,
-                                                                capture_output=True,
-                                                                text=True,
-                                                                timeout=120
-                                                            )
-                                                            pip_path_venv_check = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                                                            if pip_path_venv_check.exists():
-                                                                print("pip installed successfully using Python 3.8 compatible get-pip.py", flush=True)
-                                                                pip_installed = True
-                                                        except Exception as pip38_err:
-                                                            print(f"Warning: Could not install pip using Python 3.8 compatible version: {pip38_err}", flush=True)
-                                                except Exception as pip_err:
-                                                    print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                                            else:
-                                                print(f"get-pip.py not found in offline packages: {get_pip_offline}", flush=True)
-                                        else:
-                                            print(f"Offline packages directory not found: {offline_dir}", flush=True)
-                                        
-                                        # Если не удалось из офлайн, пробуем через интернет (только если есть интернет)
-                                        if not pip_installed:
-                                            if check_internet():
-                                                try:
-                                                    import urllib.request
-                                                    # Определяем версию Python в venv для правильного get-pip.py
-                                                    python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                    venv_version_result = subprocess.run(
-                                                        [str(python_venv), "--version"],
-                                                        capture_output=True,
-                                                        text=True,
-                                                        timeout=5
-                                                    )
-                                                    venv_python_version = None
-                                                    if venv_version_result.returncode == 0:
-                                                        version_match = re.search(r'(\d+)\.(\d+)', venv_version_result.stdout)
-                                                        if version_match:
-                                                            venv_python_version = f"{version_match.group(1)}.{version_match.group(2)}"
-                                                    
-                                                    get_pip_script = venv_path / "get-pip.py"
-                                                    # Для Python 3.8 используем специальный URL
-                                                    if venv_python_version and venv_python_version.startswith("3.8"):
-                                                        get_pip_url = "https://bootstrap.pypa.io/pip/3.8/get-pip.py"
-                                                        print("Downloading Python 3.8 compatible get-pip.py from internet...", flush=True)
-                                                    else:
-                                                        get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
-                                                        print("Downloading get-pip.py from internet...", flush=True)
-                                                    
-                                                    urllib.request.urlretrieve(get_pip_url, str(get_pip_script))
-                                                    subprocess.run(
-                                                        [str(python_venv), str(get_pip_script)],
-                                                        check=True,
-                                                        capture_output=True,
-                                                        text=True,
-                                                        timeout=120
-                                                    )
-                                                    get_pip_script.unlink(missing_ok=True)
-                                                    print("pip installed successfully from internet", flush=True)
-                                                    pip_installed = True
-                                                except Exception as pip_err:
-                                                    print(f"Warning: Could not install pip manually: {pip_err}", flush=True)
-                                                    print("Note: venv created without pip. You may need to install pip later or use offline packages.", flush=True)
-                                            else:
-                                                if offline_dir.exists() and (offline_dir / "get-pip.py").exists():
-                                                    print("No internet connection and get-pip.py installation failed. Skipping pip installation.", flush=True)
-                                                    print("Note: venv created without pip. You may need to install pip manually later.", flush=True)
-                                                else:
-                                                    print("No internet connection and get-pip.py not found in offline packages. Skipping pip installation.", flush=True)
-                                                    print("Note: venv created without pip. You may need to install pip later or add get-pip.py to offline_packages/.", flush=True)
-                                    # Помечаем, что venv уже создан
-                                    venv_created_without_pip = True
-                                except Exception as venv_err:
-                                    print(f"Error: Failed to create venv even without pip: {venv_err}", flush=True)
-                                    print(f"Please install manually: sudo apt-get install -y {python_version}", flush=True)
-                                    print(f"Or run: python3 main.py --download-deps to download offline packages", flush=True)
-                                    return False
-                            
-                            # Проверяем, что ensurepip теперь доступен
-                            verify_check = subprocess.run(
-                                [python311, "-c", "import ensurepip"],
-                                capture_output=True,
-                                text=True,
-                                timeout=5
-                            )
-                            if verify_check.returncode == 0:
-                                print(f"Successfully installed {python_version} from internet, ensurepip now available", flush=True)
-                            else:
-                                print(f"Warning: {python_version} installed but ensurepip still not available", flush=True)
-                                print(f"Trying to install python3-venv (generic package)...", flush=True)
-                                # Пробуем установить общий пакет python3-venv
-                                generic_result = subprocess.run(
-                                    ["sudo", "apt-get", "install", "-y", "python3-venv"],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=120
-                                )
-                                if generic_result.returncode == 0:
-                                    final_verify = subprocess.run(
-                                        [python311, "-c", "import ensurepip"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5
-                                    )
-                                    if final_verify.returncode == 0:
-                                        print(f"Successfully installed python3-venv, ensurepip now available", flush=True)
-                                    else:
-                                        print(f"Error: ensurepip still not available after installing python3-venv", flush=True)
-                                        # Пробуем создать venv без ensurepip (используя --without-pip)
-                                        print(f"Attempting to create venv without pip (will install pip manually)...", flush=True)
-                                        try:
-                                            result_no_pip = subprocess.run(
-                                                [python311, "-m", "venv", str(venv_path), "--without-pip"],
-                                                check=True,
-                                                capture_output=True,
-                                                text=True,
-                                                timeout=60
-                                            )
-                                            print(f"Successfully created venv without pip", flush=True)
-                                            # Устанавливаем pip вручную после создания venv
-                                            pip_path_venv = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                                            if not pip_path_venv.exists():
-                                                print("Installing pip manually...", flush=True)
-                                                # Сначала пробуем из офлайн-пакетов
-                                                offline_dir_pip = Path("offline_packages")
-                                                pip_installed = False
-                                                
-                                                if offline_dir_pip.exists():
-                                                    get_pip_offline = offline_dir_pip / "get-pip.py"
-                                                    if get_pip_offline.exists():
-                                                        try:
-                                                            python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                            subprocess.run(
-                                                                [str(python_venv), str(get_pip_offline)],
-                                                                check=True,
-                                                                capture_output=True,
-                                                                text=True,
-                                                                timeout=120
-                                                            )
-                                                            print("pip installed successfully from offline package", flush=True)
-                                                            pip_installed = True
-                                                        except Exception as pip_err:
-                                                            print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                                                
-                                                # Если не удалось из офлайн, пробуем через интернет (только если есть интернет)
-                                                if not pip_installed:
-                                                    if check_internet():
-                                                        try:
-                                                            import urllib.request
-                                                            get_pip_script = venv_path / "get-pip.py"
-                                                            print("Downloading get-pip.py from internet...", flush=True)
-                                                            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", str(get_pip_script))
-                                                            python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                            subprocess.run(
-                                                                [str(python_venv), str(get_pip_script)],
-                                                                check=True,
-                                                                capture_output=True,
-                                                                text=True,
-                                                                timeout=120
-                                                            )
-                                                            get_pip_script.unlink(missing_ok=True)
-                                                            print("pip installed successfully from internet", flush=True)
-                                                            pip_installed = True
-                                                        except Exception as pip_err:
-                                                            print(f"Warning: Could not install pip manually: {pip_err}", flush=True)
-                                                            print("Note: venv created without pip. You may need to install pip later or use offline packages.", flush=True)
-                                                    else:
-                                                        if offline_dir_pip.exists() and (offline_dir_pip / "get-pip.py").exists():
-                                                            print("No internet connection and get-pip.py installation failed. Skipping pip installation.", flush=True)
-                                                            print("Note: venv created without pip. You may need to install pip manually later.", flush=True)
-                                                        else:
-                                                            print("No internet connection and get-pip.py not found in offline packages. Skipping pip installation.", flush=True)
-                                                            print("Note: venv created without pip. You may need to install pip later or add get-pip.py to offline_packages/.", flush=True)
-                                            # Помечаем, что venv уже создан
-                                            venv_created_without_pip = True
-                                        except Exception as venv_err:
-                                            print(f"Error: Failed to create venv even without pip: {venv_err}", flush=True)
-                                            return False
-                                else:
-                                    print(f"Error: Failed to install python3-venv", flush=True)
-                                    # Пробуем создать venv без ensurepip
-                                    print(f"Attempting to create venv without pip (will install pip manually)...", flush=True)
-                                    try:
-                                        result_no_pip = subprocess.run(
-                                            [python311, "-m", "venv", str(venv_path), "--without-pip"],
-                                            check=True,
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=60
-                                        )
-                                        print(f"Successfully created venv without pip", flush=True)
-                                        # Устанавливаем pip вручную после создания venv
-                                        pip_path_venv = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                                        if not pip_path_venv.exists():
-                                            print("Installing pip manually...", flush=True)
-                                            # Сначала пробуем из офлайн-пакетов
-                                            offline_dir_pip = Path("offline_packages")
-                                            pip_installed = False
-                                            
-                                            if offline_dir_pip.exists():
-                                                get_pip_offline = offline_dir_pip / "get-pip.py"
-                                                if get_pip_offline.exists():
-                                                    try:
-                                                        python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                        subprocess.run(
-                                                            [str(python_venv), str(get_pip_offline)],
-                                                            check=True,
-                                                            capture_output=True,
-                                                            text=True,
-                                                            timeout=120
-                                                        )
-                                                        print("pip installed successfully from offline package", flush=True)
-                                                        pip_installed = True
-                                                    except Exception as pip_err:
-                                                        print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                                            
-                                            # Если не удалось из офлайн, пробуем через интернет (только если есть интернет)
-                                            if not pip_installed:
-                                                if check_internet():
-                                                    try:
-                                                        import urllib.request
-                                                        get_pip_script = venv_path / "get-pip.py"
-                                                        print("Downloading get-pip.py from internet...", flush=True)
-                                                        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", str(get_pip_script))
-                                                        python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                                        subprocess.run(
-                                                            [str(python_venv), str(get_pip_script)],
-                                                            check=True,
-                                                            capture_output=True,
-                                                            text=True,
-                                                            timeout=120
-                                                        )
-                                                        get_pip_script.unlink(missing_ok=True)
-                                                        print("pip installed successfully from internet", flush=True)
-                                                        pip_installed = True
-                                                    except Exception as pip_err:
-                                                        print(f"Warning: Could not install pip manually: {pip_err}", flush=True)
-                                                        print("Note: venv created without pip. You may need to install pip later or use offline packages.", flush=True)
-                                                else:
-                                                    print("No internet connection and get-pip.py not found in offline packages. Skipping pip installation.", flush=True)
-                                                    print("Note: venv created without pip. You may need to install pip later or add get-pip.py to offline_packages/.", flush=True)
-                                        # Помечаем, что venv уже создан
-                                        venv_created_without_pip = True
-                                    except Exception as venv_err:
-                                        print(f"Error: Failed to create venv even without pip: {venv_err}", flush=True)
-                                        return False
+                shutil.copytree(venv_primary, venv_main)
+                (venv_main / ".ready").touch()
+                print(f"Created main venv from Python {primary_version}", flush=True)
+                venv_created = True
             except Exception as e:
-                print(f"Warning: Could not check/install python3-venv: {e}. Trying to continue...", flush=True)
-        
-        # Проверяем, был ли venv уже создан в fallback-блоке
-        venv_created_without_pip = False
-        if venv_path.exists() and (venv_path / "bin" / "python").exists() if not is_windows() else (venv_path / "Scripts" / "python.exe").exists():
-            venv_created_without_pip = True
-            print("venv already created (without pip), skipping creation", flush=True)
-        
-        if not venv_created_without_pip:
-            try:
-                result = subprocess.run(
-                    [python311, "-m", "venv", str(venv_path)],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"Error creating virtual environment: {e}", flush=True)
-                if e.stdout:
-                    print(f"Error details: {e.stdout}", flush=True)
-                if e.stderr:
-                    print(f"Error stderr: {e.stderr}", flush=True)
-                # Пробуем создать venv без pip как последнюю попытку
-                print(f"Attempting to create venv without pip as last resort...", flush=True)
-                try:
-                    result_no_pip = subprocess.run(
-                        [python311, "-m", "venv", str(venv_path), "--without-pip"],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
-                    print(f"Successfully created venv without pip", flush=True)
-                    # Устанавливаем pip вручную после создания venv
-                    pip_path_venv = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                    if not pip_path_venv.exists():
-                        print("Installing pip manually...", flush=True)
-                        # Сначала пробуем из офлайн-пакетов
-                        offline_dir_pip = Path("offline_packages")
-                        pip_installed = False
-                        
-                        if offline_dir_pip.exists():
-                            get_pip_offline = offline_dir_pip / "get-pip.py"
-                            if get_pip_offline.exists():
-                                try:
-                                    python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                    subprocess.run(
-                                        [str(python_venv), str(get_pip_offline)],
-                                        check=True,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=120
-                                    )
-                                    print("pip installed successfully from offline package", flush=True)
-                                    pip_installed = True
-                                except Exception as pip_err:
-                                    print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                        
-                        # Если не удалось из офлайн, пробуем через интернет (только если есть интернет)
-                        if not pip_installed:
-                            if check_internet():
-                                try:
-                                    import urllib.request
-                                    get_pip_script = venv_path / "get-pip.py"
-                                    print("Downloading get-pip.py from internet...", flush=True)
-                                    urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", str(get_pip_script))
-                                    python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                                    subprocess.run(
-                                        [str(python_venv), str(get_pip_script)],
-                                        check=True,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=120
-                                    )
-                                    get_pip_script.unlink(missing_ok=True)
-                                    print("pip installed successfully from internet", flush=True)
-                                    pip_installed = True
-                                except Exception as pip_err:
-                                    print(f"Warning: Could not install pip manually: {pip_err}", flush=True)
-                                    print("Note: venv created without pip. You may need to install pip later or use offline packages.", flush=True)
-                            else:
-                                print("No internet connection and get-pip.py not found in offline packages. Skipping pip installation.", flush=True)
-                                print("Note: venv created without pip. You may need to install pip later or add get-pip.py to offline_packages/.", flush=True)
-                except Exception as venv_err:
-                    print(f"Error: Failed to create venv even without pip: {venv_err}", flush=True)
-                    return False
+                print(f"Warning: Could not create main venv: {e}", flush=True)
     
-    if venv_ready_flag.exists() and not need_recreate:
-        # Проверяем наличие venv.tar.gz и создаем если нет
-        venv_archive = Path("venv.tar.gz")
-        if not venv_archive.exists():
-            try:
-                import update
-                print("venv.tar.gz not found, creating archive...", flush=True)
-                if update.ensure_venv_archive(Path(".")):
-                    print("venv.tar.gz archive created successfully", flush=True)
-                else:
-                    print("Warning: Failed to create venv.tar.gz archive", flush=True)
-            except Exception as e:
-                print(f"Warning: Could not create venv.tar.gz archive: {e}", flush=True)
-        
-        # Проверяем наличие основных зависимостей даже если venv готов
-        # Это нужно для случаев, когда venv был создан без установки пакетов
-        try:
-            result = subprocess.run(
-                [str(python_path), "-c", "import flask; print('Flask OK')"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                print("Warning: venv ready but Flask missing, installing packages...", flush=True)
-                # Определяем site-packages путь
-                venv_lib = venv_path / "lib"
-                site_packages = None
-                if venv_lib.exists():
-                    python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
-                    if python_dirs:
-                        site_packages = python_dirs[0] / "site-packages"
-                
-                if site_packages and site_packages.exists():
-                    offline_dir = Path("offline_packages")
-                    if offline_dir.exists():
-                        pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                        if pip_files:
-                            print(f"Installing {len(pip_files)} packages directly to {site_packages}...", flush=True)
-                            import zipfile
-                            installed_count = 0
-                            for pip_file in pip_files:
-                                if pip_file.suffix == '.whl':
-                                    try:
-                                        with zipfile.ZipFile(pip_file, 'r') as zip_ref:
-                                            zip_ref.extractall(site_packages)
-                                        installed_count += 1
-                                    except Exception as e:
-                                        print(f"Warning: Failed to extract {pip_file.name}: {e}", flush=True)
-                                elif pip_file.suffix == '.tar.gz':
-                                    try:
-                                        result = subprocess.run(
-                                            [sys.executable, "-m", "pip", "install", str(pip_file.resolve()), "--target", str(site_packages), "--no-deps", "--quiet"],
-                                            check=False,
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=60
-                                        )
-                                        if result.returncode == 0:
-                                            installed_count += 1
-                                    except Exception:
-                                        pass
-                            
-                            print(f"Installed {installed_count}/{len(pip_files)} packages to site-packages", flush=True)
-        except Exception as e:
-            print(f"Warning: Could not check/install dependencies: {e}", flush=True)
+    if not venv_created:
+        print("Warning: Failed to setup any virtual environment", flush=True)
+        return False
     
-    if requirements_file.exists():
-        if not pip_path.exists():
-            # Если venv создан без pip, но pip не установлен, пробуем установить из офлайн-пакетов
-            if venv_path.exists():
-                offline_dir = Path("offline_packages")
-                pip_installed = False
-                
-                if offline_dir.exists():
-                    # Определяем версию Python в venv для правильного get-pip.py
-                    python_venv = venv_path / "bin" / "python" if not is_windows() else venv_path / "Scripts" / "python.exe"
-                    venv_version_result = subprocess.run(
-                        [str(python_venv), "--version"],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
-                    )
-                    venv_python_version = None
-                    if venv_version_result.returncode == 0:
-                        version_match = re.search(r'(\d+)\.(\d+)', venv_version_result.stdout)
-                        if version_match:
-                            venv_python_version = f"{version_match.group(1)}.{version_match.group(2)}"
-                    
-                    # Пробуем сначала версию для Python 3.8, если это Python 3.8
-                    get_pip_offline = None
-                    if venv_python_version and venv_python_version.startswith("3.8"):
-                        get_pip_38 = offline_dir / "get-pip-3.8.py"
-                        if get_pip_38.exists():
-                            get_pip_offline = get_pip_38
-                            print(f"Found Python 3.8 compatible get-pip.py: {get_pip_offline}", flush=True)
-                    
-                    # Если не нашли версию для 3.8, пробуем стандартную
-                    if not get_pip_offline:
-                        get_pip_standard = offline_dir / "get-pip.py"
-                        if get_pip_standard.exists():
-                            get_pip_offline = get_pip_standard
-                    
-                    if get_pip_offline and get_pip_offline.exists():
-                        print("pip not found, trying to install from offline package...", flush=True)
-                        try:
-                            subprocess.run(
-                                [str(python_venv), str(get_pip_offline)],
-                                check=True,
-                                capture_output=True,
-                                text=True,
-                                timeout=120
-                            )
-                            pip_path_venv_check = venv_path / "bin" / "pip" if not is_windows() else venv_path / "Scripts" / "pip.exe"
-                            if pip_path_venv_check.exists():
-                                print("pip installed successfully from offline package", flush=True)
-                                pip_installed = True
-                            else:
-                                print("Warning: get-pip.py completed but pip not found in venv", flush=True)
-                        except Exception as pip_err:
-                            print(f"Warning: Could not install pip from offline package: {pip_err}", flush=True)
-                
-                # Если pip все еще не установлен, устанавливаем пакеты напрямую из офлайн-пакетов
-                if not pip_installed and not pip_path.exists():
-                    print("pip not available, installing packages directly from offline packages...", flush=True)
-                    offline_dir = Path("offline_packages")
-                    if offline_dir.exists():
-                        pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                        if pip_files:
-                            # Определяем site-packages путь
-                            venv_lib = venv_path / "lib"
-                            site_packages = None
-                            if venv_lib.exists():
-                                python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
-                                if python_dirs:
-                                    site_packages = python_dirs[0] / "site-packages"
-                            
-                            if site_packages and site_packages.exists():
-                                print(f"Installing {len(pip_files)} packages directly to {site_packages}...", flush=True)
-                                # Используем распаковку wheel файлов напрямую для офлайн установки без pip
-                                import zipfile
-                                installed_count = 0
-                                for pip_file in pip_files:
-                                    if pip_file.suffix == '.whl':
-                                        try:
-                                            with zipfile.ZipFile(pip_file, 'r') as zip_ref:
-                                                zip_ref.extractall(site_packages)
-                                            installed_count += 1
-                                        except Exception as e:
-                                            print(f"Warning: Failed to extract {pip_file.name}: {e}", flush=True)
-                                    elif pip_file.suffix == '.tar.gz':
-                                        # Для tar.gz файлов пробуем использовать системный pip
-                                        try:
-                                            result = subprocess.run(
-                                                [sys.executable, "-m", "pip", "install", str(pip_file.resolve()), "--target", str(site_packages), "--no-deps", "--quiet"],
-                                                check=False,
-                                                capture_output=True,
-                                                text=True,
-                                                timeout=60
-                                            )
-                                            if result.returncode == 0:
-                                                installed_count += 1
-                                        except Exception:
-                                            pass
-                                
-                                print(f"Packages installed directly from offline packages ({installed_count}/{len(pip_files)})", flush=True)
-                                venv_ready_flag.touch()
-                                return True
-    
-                    print("Warning: pip not available and could not install packages directly.", flush=True)
-                    print("Note: venv created without pip. Dependencies may already be installed.", flush=True)
-                    # Продолжаем без pip - может быть зависимости уже установлены
-                    venv_ready_flag.touch()
-                    return True  # Не возвращаем False, чтобы система могла продолжить работу
-            else:
-                return False
-        try:
-            # Обновляем pip, setuptools, wheel
-            subprocess.run(
-                [str(pip_path), "install", "--upgrade", "pip", "setuptools", "wheel"],
-                check=False,
-                capture_output=True,
-                timeout=300
-            )
-            
-            # Пробуем офлайн установку сначала
-            offline_dir = Path("offline_packages")
-            installed_offline = False
-            
-            if offline_dir.exists():
-                pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                if pip_files:
-                    print(f"Found {len(pip_files)} offline packages, installing from local files...", flush=True)
-                    try:
-                        # Устанавливаем из локальной директории
-                        result = subprocess.run(
-                            [
-                                str(pip_path), "install",
-                                "--no-index",  # Не использовать PyPI
-                                "--find-links", str(offline_dir.resolve()),
-                                "-r", str(requirements_file)
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=600
-                        )
-                        
-                        if result.returncode == 0:
-                            installed_offline = True
-                            print("Successfully installed packages from offline directory", flush=True)
-                        else:
-                            # Пробуем установить напрямую из файлов
-                            print("Trying direct installation from files...", flush=True)
-                            for pip_file in pip_files:
-                                try:
-                                    subprocess.run(
-                                        [str(pip_path), "install", str(pip_file), "--no-deps"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=60
-                                    )
-                                except Exception:
-                                    pass
-                            installed_offline = True  # Частичный успех
-                    except Exception as e:
-                        print(f"Warning: Offline installation failed: {e}, trying online...", flush=True)
-            
-            # Если офлайн не сработал или не было файлов, пробуем онлайн
-            if not installed_offline:
-                print("Installing packages from internet...", flush=True)
-                result = subprocess.run(
-                    [str(pip_path), "install", "-r", str(requirements_file)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=600
-                )
-            
-            venv_ready_flag.touch()
-            
-            # Создаем venv.tar.gz архив после успешной установки зависимостей
-            try:
-                import update
-                print("Creating venv.tar.gz archive...", flush=True)
-                if update.ensure_venv_archive(Path(".")):
-                    print("venv.tar.gz archive created successfully", flush=True)
-                else:
-                    print("Warning: Failed to create venv.tar.gz archive", flush=True)
-            except Exception as e:
-                print(f"Warning: Could not create venv.tar.gz archive: {e}", flush=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Error installing requirements: {e}", flush=True)
-            if hasattr(e, 'stderr') and e.stderr:
-                print(f"Error details: {e.stderr}", flush=True)
-            return False
-        except subprocess.TimeoutExpired:
-            print("Timeout while installing requirements", flush=True)
-            return False
-        except FileNotFoundError:
-            return False
-    
+    # Настраиваем LD_LIBRARY_PATH для cyclonedds
     if not is_windows():
-        if not system_deps_flag.exists():
-            try:
-                # Список системных пакетов для установки
-                system_packages = ["libddsc0t64", "cyclonedds-dev", "build-essential", "cmake", "libssl-dev"]
-                installed_offline = False
-                
-                # Пробуем офлайн установку сначала
-                offline_dir = Path("offline_packages")
-                if offline_dir.exists():
-                    deb_files = list(offline_dir.glob("*.deb"))
-                    if deb_files:
-                        # Ищем нужные пакеты
-                        needed_debs = []
-                        for pkg in system_packages:
-                            matching_debs = [d for d in deb_files if pkg.replace("-", "_") in d.name.lower() or pkg in d.name.lower()]
-                            needed_debs.extend(matching_debs)
-                        
-                        if needed_debs:
-                            print(f"Found {len(needed_debs)} offline packages for system dependencies, installing...", flush=True)
-                            try:
-                                install_result = subprocess.run(
-                                    ["sudo", "dpkg", "-i"] + [str(d) for d in needed_debs],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=300
-                                )
-                                
-                                if install_result.returncode != 0:
-                                    # Пробуем исправить зависимости
-                                    subprocess.run(
-                                        ["sudo", "apt-get", "install", "-f", "-y"],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=300
-                                    )
-                                
-                                installed_offline = True
-                            except Exception as e:
-                                print(f"Warning: Offline installation failed: {e}", flush=True)
-                
-                # Если офлайн не сработал, пробуем онлайн
-                if not installed_offline:
-                    if not check_sudo_permissions():
-                        print("Warning: No sudo permissions. System dependencies will not be installed.", flush=True)
-                        print("Please run with sudo or install packages manually.", flush=True)
-                    else:
-                        print("Installing system dependencies from internet...", flush=True)
-                        subprocess.run(
-                            ["sudo", "apt-get", "update"],
-            check=False,
-            capture_output=True,
-                            timeout=60
-                        )
-                        install_result = subprocess.run(
-                            ["sudo", "apt-get", "install", "-y"] + system_packages,
-                            check=False,
-                            capture_output=True,
-                            timeout=300
-                        )
-                        stdout_output = install_result.stdout.decode() if install_result.stdout else ''
-                
-                # Проверяем установку библиотек
-                libddsc_so0 = Path("/usr/lib/x86_64-linux-gnu/libddsc.so.0")
-                libddsc_so0debian = Path("/usr/lib/x86_64-linux-gnu/libddsc.so.0debian")
-                
-                if libddsc_so0debian.exists() and not libddsc_so0.exists():
-                    try:
-                        subprocess.run(
-                            ["sudo", "ln", "-sf", str(libddsc_so0debian), str(libddsc_so0)],
-                            check=False,
-                            capture_output=True,
-                            timeout=10
-        )
-                    except Exception:
-                        pass
-                
-                subprocess.run(
-                    ["sudo", "ldconfig"],
-                    check=False,
-                    capture_output=True,
-                    timeout=30
-                )
-                system_deps_flag.parent.mkdir(parents=True, exist_ok=True)
-                system_deps_flag.touch()
-            except Exception as e:
-                print(f"Warning: Could not install system dependencies: {e}", flush=True)
-    
-    try:
-        result = subprocess.run(
-            [str(python_path), "-c", "import requests, numpy, flask; print('Core dependencies OK')"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode != 0:
-            print("Core dependencies missing, installing from offline packages...", flush=True)
-            # Определяем site-packages путь
-            venv_lib = venv_path / "lib"
-            site_packages = None
-            if venv_lib.exists():
-                python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith('python')]
-                if python_dirs:
-                    site_packages = python_dirs[0] / "site-packages"
-            
-            if site_packages and site_packages.exists():
-                offline_dir = Path("offline_packages")
-                if offline_dir.exists():
-                    pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
-                    if pip_files:
-                        print(f"Installing {len(pip_files)} packages directly to {site_packages}...", flush=True)
-                        import zipfile
-                        installed_count = 0
-                        for pip_file in pip_files:
-                            if pip_file.suffix == '.whl':
-                                try:
-                                    with zipfile.ZipFile(pip_file, 'r') as zip_ref:
-                                        zip_ref.extractall(site_packages)
-                                    installed_count += 1
-                                except Exception as e:
-                                    print(f"Warning: Failed to extract {pip_file.name}: {e}", flush=True)
-                            elif pip_file.suffix == '.tar.gz':
-                                # Для tar.gz файлов пробуем использовать системный pip
-                                try:
-                                    result = subprocess.run(
-                                        [sys.executable, "-m", "pip", "install", str(pip_file.resolve()), "--target", str(site_packages), "--no-deps", "--quiet"],
-                                        check=False,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=60
-                                    )
-                                    if result.returncode == 0:
-                                        installed_count += 1
-                                except Exception:
-                                    pass
-                        
-                        print(f"Installed {installed_count}/{len(pip_files)} packages directly to site-packages", flush=True)
-                        
-                        # Проверяем еще раз после установки
-                        verify_result = subprocess.run(
-                            [str(python_path), "-c", "import flask; print('Flask OK')"],
-                            capture_output=True,
-                            text=True,
-                            timeout=10
-                        )
-                        if verify_result.returncode == 0:
-                            print("Core dependencies installed successfully", flush=True)
-                        else:
-                            print(f"Warning: Some dependencies still missing: {verify_result.stderr}", flush=True)
-            else:
-                # Если pip доступен в venv, пробуем установить через pip
-                if pip_path.exists():
-                    try:
-                        install_result = subprocess.run(
-                            [str(pip_path), "install", "-r", str(requirements_file)],
-                            check=False,
-                            capture_output=True,
-                            text=True,
-                            timeout=600
-                        )
-                        if install_result.returncode != 0:
-                            print(f"Warning: pip install failed: {install_result.stderr[:200]}", flush=True)
-                    except Exception as e:
-                        print(f"Warning: Failed to install via pip: {e}", flush=True)
-    except Exception as e:
-        print(f"Warning: Could not verify/install core dependencies: {e}", flush=True)
+        lib_paths = []
+        for path in ["/usr/lib/x86_64-linux-gnu", "/usr/local/lib", "/lib/x86_64-linux-gnu"]:
+            if Path(path).exists():
+                lib_paths.append(path)
         
         try:
-            lib_paths = []
-            for path in ["/usr/lib/x86_64-linux-gnu", "/usr/local/lib", "/lib/x86_64-linux-gnu"]:
-                if Path(path).exists():
-                    lib_paths.append(path)
-            
             find_cmd = ["find", "/usr", "-name", "libddsc.so*", "-type", "f", "2>/dev/null"]
             result = subprocess.run(
                 " ".join(find_cmd),
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=5
             )
             
-            env = os.environ.copy()
-            ld_library_path = env.get("LD_LIBRARY_PATH", "")
+            ld_library_path = os.environ.get("LD_LIBRARY_PATH", "")
             
             if result.returncode == 0 and result.stdout.strip():
                 found_libs = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
@@ -1222,35 +687,12 @@ def setup_virtual_environment():
                 if lib_path not in ld_library_path:
                     ld_library_path = f"{ld_library_path}:{lib_path}" if ld_library_path else lib_path
             
-            env["LD_LIBRARY_PATH"] = ld_library_path
-            
-            result = subprocess.run(
-                [str(python_path), "-c", "import cyclonedds; print('cyclonedds OK')"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env
-            )
             os.environ["LD_LIBRARY_PATH"] = ld_library_path
         except Exception:
             pass
     
-    try:
-        result = subprocess.run(
-            [str(python_path), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            venv_info_file = venv_path / ".python_version"
-            with open(venv_info_file, 'w') as f:
-                f.write(result.stdout.strip())
-    except Exception:
-        pass
-    
     return True
-
+            
 
 def check_sudo_permissions():
     """
@@ -1260,8 +702,8 @@ def check_sudo_permissions():
         True если есть права, False иначе
     """
     if is_windows():
-            return True
-            
+        return True
+
     try:
         # Проверяем, можем ли выполнить sudo без пароля
         result = subprocess.run(
@@ -1312,6 +754,108 @@ def get_python_version():
     except Exception:
         pass
     return "3.8"  # по умолчанию
+
+
+def find_python_executable(version: str) -> str:
+    """
+    Находит исполняемый файл Python для указанной версии.
+    
+    Args:
+        version: Версия Python (например, "3.8" или "3.11")
+        
+    Returns:
+        Путь к исполняемому файлу Python или None если не найден
+    """
+    if is_windows():
+        paths = [
+            f"C:\\Python{version.replace('.', '')}\\python.exe",
+            f"C:\\Program Files\\Python{version.replace('.', '')}\\python.exe",
+        ]
+    else:
+        # Расширенный список путей, включая miniconda и conda environments
+        paths = [
+            f"/usr/bin/python{version}",
+            f"/usr/local/bin/python{version}",
+            f"/opt/python{version}/bin/python{version}",
+            f"/home/g100/miniconda3/envs/env-isaaclab/bin/python{version}",
+            f"/home/g100/miniconda3/bin/python{version}",
+            f"{os.path.expanduser('~')}/miniconda3/envs/env-isaaclab/bin/python{version}",
+            f"{os.path.expanduser('~')}/miniconda3/bin/python{version}",
+            f"{os.path.expanduser('~')}/anaconda3/envs/env-isaaclab/bin/python{version}",
+            f"{os.path.expanduser('~')}/anaconda3/bin/python{version}",
+        ]
+        
+        # Также проверяем общий python3 если версия совпадает с текущей
+        try:
+            current_version_result = subprocess.run(
+                [sys.executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if current_version_result.returncode == 0:
+                current_version_match = re.search(r'(\d+)\.(\d+)', current_version_result.stdout)
+                if current_version_match:
+                    current_version = f"{current_version_match.group(1)}.{current_version_match.group(2)}"
+                    if current_version == version:
+                        # Если текущий Python совпадает с запрошенной версией, используем его
+                        if Path(sys.executable).exists():
+                            return sys.executable
+        except Exception:
+            pass
+    
+    for path in paths:
+        if Path(path).exists():
+            try:
+                result = subprocess.run(
+                    [path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0 and version in result.stdout:
+                    return path
+            except Exception:
+                continue
+    
+    return None
+
+
+def install_python_version(version: str) -> bool:
+    """
+    Проверяет наличие указанной версии Python.
+    
+    Args:
+        version: Версия Python (например, "3.8" или "3.11")
+        
+    Returns:
+        True если Python доступен, False при ошибке
+    """
+    python_exe = find_python_executable(version)
+    if python_exe:
+        print(f"Python {version} available at {python_exe}", flush=True)
+        return True
+    
+    print(f"Python {version} not found", flush=True)
+    return False
+
+
+def get_available_python_versions() -> list:
+    """
+    Возвращает список доступных версий Python на системе.
+    
+    Returns:
+        Список версий Python (например, ["3.8", "3.11"])
+    """
+    available_versions = []
+    
+    # Проверяем стандартные версии
+    for version in ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]:
+        python_exe = find_python_executable(version)
+        if python_exe:
+            available_versions.append(version)
+    
+    return available_versions
 
 
 def check_offline_packages_completeness():
@@ -1386,7 +930,7 @@ def check_offline_packages_completeness():
                 if not found:
                     missing.append(f"pip:{pkg_name}")
         except Exception as e:
-                print(f"Warning: Could not check requirements completeness: {e}", flush=True)
+            print(f"Warning: Could not check requirements completeness: {e}", flush=True)
 
     is_complete = len(missing) == 0
     return (is_complete, missing)
@@ -1415,7 +959,7 @@ def download_dependencies():
     if not check_internet():
         print("No internet connection. Cannot download dependencies.", flush=True)
         return False
-    
+
     python_version = get_python_version()
     print(f"Python version: {python_version}", flush=True)
     print(f"Output directory: {offline_dir}", flush=True)
@@ -1424,117 +968,145 @@ def download_dependencies():
     offline_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(offline_dir, 0o755)  # rwxr-xr-x - права на чтение/запись для владельца, чтение для остальных
     
-    # Скачиваем системные пакеты
-    # Пробуем разные варианты имени пакета python3-venv
-    python_package_variants = [
-        f"python{python_version}-venv",
-        "python3-venv",
-    ]
-    
-    system_packages = [
-        ("python3-venv", python_package_variants),  # Пробуем разные варианты
-        ("python3-pip", ["python3-pip"]),
-        ("build-essential", ["build-essential"]),
-        ("python3-dev", ["python3-dev"]),
-        ("libssl-dev", ["libssl-dev"]),
-        ("libffi-dev", ["libffi-dev"]),
-    ]
-    
-    print(f"Downloading system packages to {offline_dir}...", flush=True)
-    for pkg_name, variants in system_packages:
-        downloaded = False
-        for variant in variants:
-            print(f"Trying to download {variant}...", flush=True)
-            try:
-                result = subprocess.run(
-                    ["apt-get", "download", variant],
-                    cwd=str(offline_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-                if result.returncode == 0:
-                    downloaded = True
-                    print(f"Successfully downloaded {variant}", flush=True)
-                    break
-            except Exception as e:
-                        continue
-                
-        if not downloaded:
-            print(f"Warning: Failed to download {pkg_name} (tried variants: {', '.join(variants)})", flush=True)
-    
-    # Скачиваем get-pip.py для офлайн установки pip
-    # ВСЕГДА скачиваем обе версии для совместимости с разными версиями Python на других ПК
-    print("Downloading get-pip.py (both Python 3.8 compatible and standard versions)...", flush=True)
+    # Скачиваем get-pip.py для всех версий Python (3.8, 3.11, 3.13)
+    print("Downloading get-pip.py for all Python versions (3.8, 3.11, 3.13)...", flush=True)
     try:
         import urllib.request
-        get_pip_path = offline_dir / "get-pip.py"
-        get_pip_38_path = offline_dir / "get-pip-3.8.py"
         
-        # Скачиваем версию для Python 3.8
-        try:
-            urllib.request.urlretrieve("https://bootstrap.pypa.io/pip/3.8/get-pip.py", str(get_pip_38_path))
-            os.chmod(get_pip_38_path, 0o644)
-            print(f"Successfully downloaded Python 3.8 compatible get-pip.py", flush=True)
-        except Exception as e:
-            print(f"Warning: Failed to download Python 3.8 compatible get-pip.py: {e}", flush=True)
+        # URLs для разных версий Python
+        get_pip_urls = {
+            "3.8": "https://bootstrap.pypa.io/pip/3.8/get-pip.py",
+            "3.11": "https://bootstrap.pypa.io/get-pip.py",  # Python 3.11 использует стандартную версию
+            "3.13": "https://bootstrap.pypa.io/get-pip.py",
+        }
         
-        # Скачиваем стандартную версию для других версий Python
+        # Также скачиваем стандартную версию для совместимости
+        standard_url = "https://bootstrap.pypa.io/get-pip.py"
+        
+        for version, url in get_pip_urls.items():
+            try:
+                get_pip_path = offline_dir / f"get-pip-{version}.py"
+                urllib.request.urlretrieve(url, str(get_pip_path))
+                os.chmod(get_pip_path, 0o644)
+                print(f"Successfully downloaded get-pip.py for Python {version}", flush=True)
+            except Exception as e:
+                print(f"Warning: Failed to download get-pip.py for Python {version}: {e}", flush=True)
+        
+        # Скачиваем стандартную версию как fallback
         try:
-            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", str(get_pip_path))
-            os.chmod(get_pip_path, 0o644)  # rw-r--r-- - права на чтение для всех
+            get_pip_path = offline_dir / "get-pip.py"
+            urllib.request.urlretrieve(standard_url, str(get_pip_path))
+            os.chmod(get_pip_path, 0o644)
             print(f"Successfully downloaded standard get-pip.py", flush=True)
         except Exception as e:
             print(f"Warning: Failed to download standard get-pip.py: {e}", flush=True)
     except Exception as e:
         print(f"Warning: Failed to download get-pip.py: {e}", flush=True)
     
-    # Скачиваем pip пакеты
-    if not requirements_file.exists():
-        print(f"Requirements file not found: {requirements_file}", flush=True)
-        return False
-
-    print(f"Downloading Python packages from {requirements_file}...", flush=True)
+    # Обновляем список пакетов перед скачиванием
+    print("Updating package list...", flush=True)
     try:
-        # Создаем временный requirements файл без cyclonedds
-        import tempfile
-        temp_req_file = None
+        subprocess.run(
+            ["apt-get", "update"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+    except Exception as e:
+        print(f"Warning: Failed to update package list: {e}", flush=True)
+    
+    # Скачиваем системные пакеты (.deb) для всех версий Python
+    print("Downloading system packages (.deb) for all Python versions...", flush=True)
+    system_packages = {
+        "3.8": [
+            "python3.8-dev",
+            "python3.8-distutils",
+            "python3.8-venv",
+            "libevdev-dev",
+        ],
+        "3.11": [
+            "python3.11-dev",
+            "python3.11-distutils",
+            "python3.11-venv",
+        ],
+        "3.13": [
+            "python3.13-dev",
+            "python3.13-distutils",
+            "python3.13-venv",
+        ],
+    }
+    
+    # Общие системные пакеты
+    common_packages = [
+        "build-essential",
+        "python3-pip",
+    ]
+    
+    # Проверяем доступные версии Python
+    available_versions = get_available_python_versions()
+    
+    # Скачиваем пакеты для доступных версий Python
+    downloaded_packages = []
+    for version in ["3.8", "3.11", "3.13"]:
+        if version in available_versions and version in system_packages:
+            packages = system_packages[version]
+            print(f"Downloading system packages for Python {version}...", flush=True)
+            for pkg in packages:
+                try:
+                    # Используем apt-get download для скачивания .deb файлов
+                    result = subprocess.run(
+                        ["apt-get", "download", pkg],
+                        cwd=str(offline_dir),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+                    if result.returncode == 0:
+                        # Проверяем, что файл действительно скачался
+                        deb_files = list(offline_dir.glob(f"{pkg}*.deb"))
+                        if deb_files:
+                            downloaded_packages.append(pkg)
+                            print(f"  ✓ Downloaded {pkg}", flush=True)
+                        else:
+                            print(f"  ✗ Failed to download {pkg}: file not found", flush=True)
+                    else:
+                        print(f"  ✗ Failed to download {pkg}: {result.stderr[:100]}", flush=True)
+                except Exception as e:
+                    print(f"  ✗ Failed to download {pkg}: {e}", flush=True)
+    
+    # Скачиваем общие пакеты
+    print("Downloading common system packages...", flush=True)
+    for pkg in common_packages:
         try:
-            with open(requirements_file, 'r', encoding='utf-8') as f:
-                req_lines = f.readlines()
-            
-            # Фильтруем cyclonedds
-            filtered_lines = [line for line in req_lines if not line.strip().startswith('cyclonedds')]
-            
-            if len(filtered_lines) != len(req_lines):
-                temp_req_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-                temp_req_file.write(''.join(filtered_lines))
-                temp_req_file.close()
-                req_file_to_use = temp_req_file.name
-                print("Skipping cyclonedds (already available offline)", flush=True)
-            else:
-                req_file_to_use = str(requirements_file)
-            
             result = subprocess.run(
-                [
-                    sys.executable, "-m", "pip", "download",
-                    "-r", req_file_to_use,
-                    "-d", str(offline_dir),
-                    "--prefer-binary"
-                ],
+                ["apt-get", "download", pkg],
+                cwd=str(offline_dir),
+                check=False,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=120
             )
-            
-            if result.returncode != 0:
-                print(f"Warning: Some packages failed to download: {result.stderr}", flush=True)
-        finally:
-            if temp_req_file and os.path.exists(temp_req_file.name):
-                os.unlink(temp_req_file.name)
-    except Exception as e:
-        print(f"Error downloading pip packages: {e}", flush=True)
-        return False
+            if result.returncode == 0:
+                deb_files = list(offline_dir.glob(f"{pkg}*.deb"))
+                if deb_files:
+                    downloaded_packages.append(pkg)
+                    print(f"  ✓ Downloaded {pkg}", flush=True)
+                else:
+                    print(f"  ✗ Failed to download {pkg}: file not found", flush=True)
+            else:
+                print(f"  ✗ Failed to download {pkg}: {result.stderr[:100]}", flush=True)
+        except Exception as e:
+            print(f"  ✗ Failed to download {pkg}: {e}", flush=True)
+    
+    if downloaded_packages:
+        print(f"Successfully downloaded {len(downloaded_packages)} system packages", flush=True)
+    else:
+        print("Warning: No system packages were downloaded", flush=True)
+    
+    # НЕ скачиваем pip пакеты - они будут установлены онлайн при создании venv
+    # Это упрощает процесс и уменьшает размер offline_packages
     
     # Создаем метаданные с правильными правами
     metadata = {
@@ -1561,6 +1133,7 @@ def download_dependencies():
 def install_dependencies_offline():
     """
     Устанавливает зависимости из локальных файлов (офлайн).
+    Сначала устанавливает системные пакеты (.deb), затем Python пакеты.
     
     Returns:
         True если успешно
@@ -1579,7 +1152,7 @@ def install_dependencies_offline():
     else:
         print("No internet connection, using offline packages only", flush=True)
     
-    # Устанавливаем системные пакеты
+    # Устанавливаем системные пакеты из offline_packages
     if not is_windows():
         if not check_sudo_permissions():
             print("Warning: No sudo permissions. System packages will not be installed.", flush=True)
@@ -1589,37 +1162,79 @@ def install_dependencies_offline():
             if deb_files:
                 print(f"Installing {len(deb_files)} system packages from {offline_dir}...", flush=True)
                 try:
-                    result = subprocess.run(
-                        ["sudo", "dpkg", "-i"] + [str(f) for f in deb_files],
-                        capture_output=True,
-                        text=True,
-                        timeout=300
-                    )
+                    # Устанавливаем пакеты по одному для лучшей обработки ошибок
+                    installed_count = 0
+                    failed_packages = []
                     
-                    if result.returncode != 0:
+                    for deb_file in deb_files:
+                        pkg_name = deb_file.stem
+                        print(f"  Installing {pkg_name}...", flush=True)
+                        result = subprocess.run(
+                            ["sudo", "dpkg", "-i", str(deb_file)],
+                            capture_output=True,
+                            text=True,
+                            timeout=120
+                        )
+                        
+                        if result.returncode == 0:
+                            installed_count += 1
+                            print(f"    ✓ {pkg_name} installed", flush=True)
+                        else:
+                            failed_packages.append(pkg_name)
+                            print(f"    ✗ {pkg_name} failed: {result.stderr[:100]}", flush=True)
+                    
+                    # Исправляем зависимости если были ошибки
+                    if failed_packages:
                         print("Fixing dependencies...", flush=True)
-                        subprocess.run(
+                        fix_result = subprocess.run(
                             ["sudo", "apt-get", "install", "-f", "-y"],
                             capture_output=True,
                             text=True,
                             timeout=300
                         )
-                    print("System packages installed successfully", flush=True)
+                        if fix_result.returncode == 0:
+                            print("Dependencies fixed successfully", flush=True)
+                    
+                    # Пробуем установить неудачные пакеты онлайн если есть интернет
+                    if failed_packages and has_internet:
+                        print(f"Trying to install {len(failed_packages)} failed packages online...", flush=True)
+                        for pkg in failed_packages:
+                            # Извлекаем имя пакета без версии для apt-get
+                            pkg_base = pkg.split('_')[0] if '_' in pkg else pkg.split('-')[0] if '-' in pkg else pkg
+                            try:
+                                online_result = subprocess.run(
+                                    ["sudo", "apt-get", "install", "-y", pkg_base],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=120
+                                )
+                                if online_result.returncode == 0:
+                                    print(f"  ✓ {pkg_base} installed online", flush=True)
+                                    installed_count += 1
+                            except Exception:
+                                pass
+                    
+                    if installed_count > 0:
+                        print(f"Successfully installed {installed_count} system packages", flush=True)
+                    else:
+                        print("Warning: No system packages were installed", flush=True)
                 except Exception as e:
                     print(f"Error installing system packages: {e}", flush=True)
                     if has_internet:
                         print("Trying online installation...", flush=True)
-                        python_version = get_python_version()
-                        package_name = f"python{python_version}-venv"
-                        try:
-                            subprocess.run(
-                                ["sudo", "apt-get", "install", "-y", package_name],
-                                capture_output=True,
-                                text=True,
-                                timeout=120
-                            )
-                        except Exception:
-                            pass
+                        # Пробуем установить базовые пакеты онлайн
+                        available_versions = get_available_python_versions()
+                        for version in ["3.8", "3.11", "3.13"]:
+                            if version in available_versions:
+                                try:
+                                    subprocess.run(
+                                        [f"sudo", "apt-get", "install", "-y", f"python{version}-dev", f"python{version}-venv"],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=120
+                                    )
+                                except Exception:
+                                    pass
     
     # Устанавливаем pip пакеты
     if offline_dir.exists():
@@ -1835,8 +1450,14 @@ def run_services():
         return False
 
 
-def main():
-    """Главная функция приложения."""
+def main(python_version: str = None):
+    """
+    Главная функция приложения.
+    
+    Args:
+        python_version: Версия Python для использования (например, "3.8", "3.11", "3.13").
+                       Если None, используется логика выбора версии по умолчанию.
+    """
     try:
         try:
             import api.robot as robot_api
@@ -1857,44 +1478,129 @@ def main():
         
         in_docker = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true'
     
+        # Проверяем, запущены ли мы уже из venv (чтобы избежать повторного создания venv после os.execv)
+        venv_already_active = False
         if not in_docker:
-            # Проверяем полноту комплекта офлайн пакетов
-            is_complete, missing = check_offline_packages_completeness()
+            venv_python_check = Path(sys.executable)
+            # Проверяем, запущены ли мы из venv (путь содержит venv или venv-{version})
+            if 'venv' in str(venv_python_check) or 'VIRTUAL_ENV' in os.environ:
+                venv_already_active = True
+    
+        if not in_docker and not venv_already_active:
+            # Устанавливаем системные зависимости из offline_packages перед созданием venv
+            try:
+                install_dependencies_offline()
+            except Exception as e:
+                print(f"Warning: Failed to install system dependencies: {e}", flush=True)
             
-            if not is_complete:
-                print(f"Incomplete offline packages set. Missing: {len(missing)} package(s)", flush=True)
-                if check_internet():
-                    print("Downloading missing dependencies for offline installation...", flush=True)
-                    download_dependencies()
-                else:
-                    print("Warning: No internet connection and incomplete offline packages. Some features may not work.", flush=True)
-                    if missing:
-                        print(f"Missing packages: {', '.join(missing[:10])}{'...' if len(missing) > 10 else ''}", flush=True)
+            # Скачиваем get-pip.py для всех версий Python если есть интернет
+            if check_internet():
+                try:
+                    offline_dir = Path("offline_packages")
+                    offline_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    import urllib.request
+                    get_pip_urls = {
+                        "3.8": "https://bootstrap.pypa.io/pip/3.8/get-pip.py",
+                        "3.11": "https://bootstrap.pypa.io/get-pip.py",  # Python 3.11 использует стандартную версию
+                        "3.13": "https://bootstrap.pypa.io/get-pip.py",
+                    }
+                    standard_url = "https://bootstrap.pypa.io/get-pip.py"
+                    
+                    for version, url in get_pip_urls.items():
+                        get_pip_path = offline_dir / f"get-pip-{version}.py"
+                        if not get_pip_path.exists():
+                            try:
+                                urllib.request.urlretrieve(url, str(get_pip_path))
+                                os.chmod(get_pip_path, 0o644)
+                                print(f"Downloaded get-pip.py for Python {version}", flush=True)
+                            except Exception:
+                                pass
+                    
+                    # Скачиваем стандартную версию
+                    standard_path = offline_dir / "get-pip.py"
+                    if not standard_path.exists():
+                        try:
+                            urllib.request.urlretrieve(standard_url, str(standard_path))
+                            os.chmod(standard_path, 0o644)
+                            print(f"Downloaded standard get-pip.py", flush=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            
+            # Автоматически настраиваем venv для ВСЕХ доступных версий Python (3.8, 3.11, 3.13)
+            # Если указана конкретная версия через --version, используем её, иначе создаем для всех
+            # Пропускаем создание venv, если уже запущены из venv (после os.execv)
+            if venv_already_active:
+                print("Already running from venv, skipping venv setup", flush=True)
+                venv_path = Path("venv").resolve()
+                if not venv_path.exists():
+                    # Если venv не существует, пытаемся найти venv-{version}
+                    python_version_from_env = os.environ.get('PYTHON_VERSION')
+                    if python_version_from_env:
+                        venv_path = Path(f"venv-{python_version_from_env}").resolve()
             else:
-                print("Offline packages complete.", flush=True)
-            
-            if not setup_virtual_environment():
-                sys.exit(1)
-            
-            venv_path = Path("venv").resolve()
-            if is_windows():
-                venv_python = venv_path / "Scripts" / "python.exe"
+                # Определяем версию Python для использования
+                selected_version = python_version
+                if not selected_version:
+                    # Ищем первую доступную готовую версию Python
+                    available_versions = get_available_python_versions()
+                    for version in ["3.13", "3.11", "3.8"]:
+                        if version in available_versions:
+                            venv_check = Path(f"venv-{version}")
+                            venv_ready_check = venv_check / ".ready"
+                            if venv_check.exists() and venv_ready_check.exists():
+                                selected_version = version
+                                break
+                    
+                    # Если не нашли готовую версию, используем первую доступную
+                    if not selected_version and available_versions:
+                        selected_version = available_versions[0]
+                
+                if selected_version:
+                    # Создаем venv для выбранной версии если нужно
+                    if not setup_virtual_environment(selected_version):
+                        print(f"Warning: Failed to setup virtual environment for Python {selected_version}", flush=True)
+                    # Используем venv для указанной версии
+                    venv_path = Path(f"venv-{selected_version}").resolve()
+                    # Сохраняем версию в переменную окружения для использования в run.py
+                    os.environ['PYTHON_VERSION'] = selected_version
+                else:
+                    # Если версия не указана и нет доступных, создаем venv для всех доступных версий
+                    print("Setting up virtual environments for all available Python versions...", flush=True)
+                    if not setup_virtual_environment(None):
+                        print("Warning: Failed to setup some virtual environments", flush=True)
+                    # Используем основной venv (созданный из первой доступной версии)
+                    venv_path = Path("venv").resolve()
+                    # Очищаем переменную окружения если версия не указана
+                    if 'PYTHON_VERSION' in os.environ:
+                        del os.environ['PYTHON_VERSION']
+        
+        if is_windows():
+            venv_python = venv_path / "Scripts" / "python.exe"
         else:
             venv_python = venv_path / "bin" / "python3"
             if not venv_python.exists():
                 venv_python = venv_path / "bin" / "python"
+        
+        if venv_python.exists():
+            venv_python_resolved = venv_python.resolve()
+            current_python = Path(sys.executable).resolve()
             
-            if venv_python.exists():
-                venv_python_resolved = venv_python.resolve()
-                current_python = Path(sys.executable).resolve()
-                
-                try:
-                    venv_same = venv_python_resolved.samefile(current_python)
-                except (OSError, ValueError):
-                    venv_same = (str(venv_python_resolved) == str(current_python))
-                
-                if not venv_same:
-                    os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
+            try:
+                venv_same = venv_python_resolved.samefile(current_python)
+            except (OSError, ValueError):
+                venv_same = (str(venv_python_resolved) == str(current_python))
+            
+            if not venv_same:
+                os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
+        else:
+            selected_version = python_version or os.environ.get('PYTHON_VERSION')
+            if selected_version:
+                print(f"Error: venv-{selected_version} not found or incomplete", flush=True)
+            else:
+                print("Error: venv not found or incomplete", flush=True)
         
         if is_windows():
             try:
@@ -1969,99 +1675,86 @@ if __name__ == '__main__':
     
     # Обработка аргументов командной строки
     parser = argparse.ArgumentParser(description='RGW2.0 Main Service')
-    parser.add_argument('--auto', action='store_true', help='Full automatic setup: download deps, install deps, setup venv, setup autostart')
-    parser.add_argument('--setup-venv', action='store_true', help='Setup virtual environment only')
-    parser.add_argument('--download-deps', action='store_true', help='Download dependencies for offline installation')
-    parser.add_argument('--install-deps', action='store_true', help='Install dependencies from offline packages')
-    parser.add_argument('--setup', action='store_true', help='Full setup: download deps, install deps, setup venv, setup autostart')
+    parser.add_argument('--version', type=str, choices=['3.8', '3.11', '3.13'], help='Python version to use (3.8, 3.11, or 3.13)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
     
-    # Полная автоматическая настройка при первом запуске (--auto)
-    if args.auto:
-        print("=" * 60, flush=True)
-        print("RGW2.0 Automatic Setup", flush=True)
-        print("=" * 60, flush=True)
-        
-        # Скачиваем зависимости если есть интернет
-        if check_internet():
-            print("Downloading dependencies...", flush=True)
-            download_dependencies()
-        else:
-            print("No internet connection. Using existing offline packages if available.", flush=True)
-        
-        # Устанавливаем зависимости
-        print("Installing dependencies...", flush=True)
-        install_dependencies_offline()
-        
-        # Настраиваем venv
-        print("Setting up virtual environment...", flush=True)
-        if not setup_virtual_environment():
-            print("Error: Failed to setup virtual environment", flush=True)
-            sys.exit(1)
-        
-        # Настраиваем автозапуск
-        print("Setting up autostart...", flush=True)
-        if not setup_autostart():
-            print("Warning: Failed to setup autostart", flush=True)
-        
-        print("=" * 60, flush=True)
-        print("Automatic setup complete!", flush=True)
-        print("=" * 60, flush=True)
-        sys.exit(0)
+    # Проверяем автозапуск
+    autostart_configured = False
+    if not is_windows():
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-enabled", "rgw2"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            autostart_configured = result.returncode == 0
+        except Exception:
+            pass
     
-    # Полная настройка (--setup)
-    if args.setup:
-        print("=" * 60, flush=True)
-        print("RGW2.0 Full Setup", flush=True)
-        print("=" * 60, flush=True)
-        
-        # Скачиваем зависимости если есть интернет
-        if check_internet():
-            print("Downloading dependencies...", flush=True)
-            download_dependencies()
-        else:
-            print("No internet connection. Using existing offline packages if available.", flush=True)
-        
-        # Устанавливаем зависимости
-        print("Installing dependencies...", flush=True)
-        install_dependencies_offline()
-        
-        # Настраиваем venv
-        print("Setting up virtual environment...", flush=True)
-        if not setup_virtual_environment():
-            print("Error: Failed to setup virtual environment", flush=True)
-            sys.exit(1)
-        
-        # Настраиваем автозапуск
-        print("Setting up autostart...", flush=True)
-        if not setup_autostart():
-            print("Warning: Failed to setup autostart", flush=True)
-        
-        print("=" * 60, flush=True)
-        print("Setup complete!", flush=True)
-        print("=" * 60, flush=True)
-        sys.exit(0)
+    # Проверяем установлены ли зависимости
+    dependencies_installed = True
+    if not is_windows():
+        # Проверяем наличие критичных системных пакетов
+        try:
+            result = subprocess.run(
+                ["dpkg", "-l", "python3.8-dev", "python3.11-dev", "python3.13-dev", "libevdev-dev", "build-essential"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # Если команда не выполнилась успешно, возможно пакеты не установлены
+            if result.returncode != 0:
+                dependencies_installed = False
+        except Exception:
+            dependencies_installed = False
     
-    # Скачивание зависимостей
-    if args.download_deps:
-        if download_dependencies():
-            sys.exit(0)
-        else:
-            sys.exit(1)
-            
-    # Установка зависимостей
-    if args.install_deps:
-        if install_dependencies_offline():
-            sys.exit(0)
-        else:
-            sys.exit(1)
+    # Если зависимости не установлены - устанавливаем их
+    if not dependencies_installed:
+        if args.debug:
+            print("Installing system dependencies...", flush=True)
+        try:
+            install_dependencies_offline()
+        except Exception as e:
+            if args.debug:
+                print(f"Warning: Failed to install dependencies: {e}", flush=True)
     
-    # Если указан флаг --setup-venv, настраиваем venv и выходим
-    if args.setup_venv:
-        if setup_virtual_environment():
-            sys.exit(0)
-        else:
-            sys.exit(1)
+    # Если автозапуск не настроен - настраиваем его
+    if not autostart_configured:
+        if args.debug:
+            print("Setting up autostart...", flush=True)
+        try:
+            setup_autostart()
+        except Exception as e:
+            if args.debug:
+                print(f"Warning: Failed to setup autostart: {e}", flush=True)
+    
+    # Определяем версию Python для использования
+    python_version = args.version
+    if not python_version:
+        # Ищем первую доступную готовую версию Python
+        available_versions = get_available_python_versions()
+        for version in ["3.13", "3.11", "3.8"]:
+            if version in available_versions:
+                venv_check = Path(f"venv-{version}")
+                venv_ready_check = venv_check / ".ready"
+                if venv_check.exists() and venv_ready_check.exists():
+                    python_version = version
+                    break
+        
+        # Если не нашли готовую версию, используем первую доступную
+        if not python_version and available_versions:
+            python_version = available_versions[0]
+    
+    if not python_version:
+        print("Error: No Python version available", flush=True)
+        sys.exit(1)
+    
+    if args.debug:
+        print(f"Using Python version: {python_version}", flush=True)
+        print(f"Autostart configured: {autostart_configured}", flush=True)
+        print(f"Dependencies installed: {dependencies_installed}", flush=True)
     
     _sig_received = False
     
@@ -2113,7 +1806,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        main()
+        main(python_version)
         import time
         while True:
             time.sleep(60)

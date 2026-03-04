@@ -873,7 +873,28 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     
     def __init__(self, *args, **kwargs):
         self.flask_app = kwargs.pop('flask_app', None)
-        super().__init__(*args, directory=kwargs.pop('directory', None), **kwargs)
+        self.custom_directory = kwargs.pop('directory', None)
+        super().__init__(*args, directory=self.custom_directory, **kwargs)
+    
+    def translate_path(self, path):
+        """Переопределяем translate_path для правильной обработки путей."""
+        # Убираем query string если есть
+        if '?' in path:
+            path = path.split('?')[0]
+        
+        # Если directory задан, используем его
+        if self.custom_directory:
+            # Убираем ведущий слэш
+            path = path.lstrip('/')
+            # Если путь пустой или это директория, добавляем index.html
+            if not path or path.endswith('/'):
+                path = 'index.html'
+            # Формируем полный путь
+            full_path = os.path.join(self.custom_directory, path)
+            return os.path.normpath(full_path)
+        
+        # Иначе используем стандартную логику
+        return super().translate_path(path)
     
     def end_headers(self):
         """Добавляет заголовки CORS если нужно."""
@@ -964,14 +985,135 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
     
+    def guess_type(self, path):
+        """Определяет MIME тип файла с правильной поддержкой JavaScript модулей."""
+        import mimetypes
+        # Используем mimetypes напрямую вместо super().guess_type() для совместимости
+        mimetype, encoding = mimetypes.guess_type(path)
+        
+        # Исправляем MIME типы для JavaScript модулей
+        if path.endswith('.js'):
+            mimetype = 'application/javascript'
+        elif path.endswith('.mjs'):
+            mimetype = 'application/javascript'
+        elif path.endswith('.css'):
+            mimetype = 'text/css'
+        elif path.endswith('.json'):
+            mimetype = 'application/json'
+        elif path.endswith('.wasm'):
+            mimetype = 'application/wasm'
+        
+        return mimetype, encoding
+    
+    def send_head(self):
+        """Отправляет заголовки ответа с правильными MIME типами."""
+        path = self.translate_path(self.path)
+        f = None
+        try:
+            f = open(path, 'rb')
+        except OSError:
+            # Не используем send_error, чтобы избежать вызова log_error
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            return None
+        
+        try:
+            fs = os.fstat(f.fileno())
+            # Используем guess_type для правильного определения MIME типа
+            ctype = self.guess_type(self.path)[0]
+            if ctype is None:
+                ctype = 'application/octet-stream'
+            
+            # Убеждаемся, что для JavaScript модулей установлен правильный тип
+            if self.path.endswith('.js') or self.path.endswith('.mjs'):
+                ctype = 'application/javascript; charset=utf-8'
+            elif self.path.endswith('.css'):
+                ctype = 'text/css; charset=utf-8'
+            
+            self.send_response(200)
+            self.send_header("Content-type", ctype)
+            self.send_header("Content-Length", str(fs[6]))
+            self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
+            self.end_headers()
+            return f
+        except:
+            if f:
+                f.close()
+            raise
+    
     def do_GET(self):
         """Обрабатывает GET запросы."""
         if self.path.startswith('/api') or self.path == '/health':
             self.handle_api_request('GET')
             return
         
-        if not os.path.exists(self.translate_path(self.path)):
+        # Для корневого пути сразу перенаправляем на index.html
+        if self.path == '/' or self.path == '':
             self.path = '/index.html'
+        
+        # Проверяем существование файла
+        try:
+            file_path = self.translate_path(self.path)
+        except Exception:
+            file_path = None
+        
+        # Для статических файлов (assets, css, js и т.д.) не перенаправляем на index.html
+        # Перенаправляем только для HTML страниц (SPA routing)
+        if file_path is None or not os.path.exists(file_path):
+            # Если это статический файл (assets, css, js, images и т.д.), возвращаем 404
+            is_static_file = (
+                any(self.path.startswith(prefix) for prefix in ['/assets/', '/static/', '/css/', '/js/', '/images/', '/img/', '/fonts/', '/font/']) or
+                any(self.path.lower().endswith(ext) for ext in ['.js', '.mjs', '.css', '.json', '.wasm', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot'])
+            )
+            
+            if is_static_file:
+                # Статический файл не найден - возвращаем 404
+                self.send_response(404)
+                self.send_header('Content-Type', 'text/html')
+                self.end_headers()
+                self.wfile.write(b'<h1>404 Not Found</h1>')
+                return
+            else:
+                # Для HTML страниц (SPA routing) перенаправляем на index.html
+                original_path = self.path
+                self.path = '/index.html'
+                # Проверяем существование index.html после изменения пути
+                try:
+                    index_path = self.translate_path(self.path)
+                    # Отладочный вывод (можно убрать после исправления)
+                    if not index_path or not os.path.exists(index_path):
+                        print(f"[WEB DEBUG] index.html not found at: {index_path}", flush=True)
+                        print(f"[WEB DEBUG] directory: {self.directory}", flush=True)
+                        print(f"[WEB DEBUG] path: {self.path}", flush=True)
+                    
+                    if index_path and os.path.exists(index_path) and os.path.isfile(index_path):
+                        # index.html существует, обрабатываем через send_head и send файл
+                        f = self.send_head()
+                        if f:
+                            try:
+                                self.copyfile(f, self.wfile)
+                            finally:
+                                f.close()
+                        return
+                    else:
+                        # index.html не найден, возвращаем 404
+                        self.send_response(404)
+                        self.send_header('Content-Type', 'text/html')
+                        self.end_headers()
+                        self.wfile.write(b'<h1>404 Not Found - index.html not found</h1>')
+                        return
+                except Exception as e:
+                    # Ошибка при проверке, возвращаем 404
+                    import traceback
+                    print(f"[WEB ERROR] Exception in do_GET: {e}", flush=True)
+                    print(f"[WEB ERROR] Traceback: {traceback.format_exc()}", flush=True)
+                    self.send_response(404)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+                    self.wfile.write(f'<h1>404 Not Found - Error: {str(e)}</h1>'.encode())
+                    return
+        
         return super().do_GET()
     
     def do_POST(self):
@@ -1063,7 +1205,9 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
             kwargs['flask_app'] = flask_app
             return CustomHTTPRequestHandler(*args, **kwargs)
         
-        with socketserver.TCPServer(("", port), handler_factory) as httpd:
+        with socketserver.ThreadingTCPServer(("", port), handler_factory) as httpd:
+            # Разрешаем переиспользование адреса для быстрого перезапуска
+            httpd.allow_reuse_address = True
             print(f"Web server started on port {port}", flush=True)
             print(f"Serving files from: {build_path}", flush=True)
             print(f"API endpoints registered: {len(flask_app.url_map._rules)} routes", flush=True)

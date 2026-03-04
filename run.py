@@ -24,7 +24,15 @@ if 'PYTHONUNBUFFERED' not in os.environ:
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
-venv_path = Path("venv").resolve()
+# Проверяем, указана ли версия Python через переменную окружения
+python_version = os.environ.get('PYTHON_VERSION')
+if python_version:
+    # Используем venv для указанной версии
+    venv_path = Path(f"venv-{python_version}").resolve()
+else:
+    # Используем основной venv
+    venv_path = Path("venv").resolve()
+
 if venv_path.exists():
     venv_python = venv_path / "bin" / "python3"
     if not venv_python.exists():
@@ -507,7 +515,7 @@ class ServiceRunner:
 
 def run_services():
     """Запускает все сервисы из папки services."""
-    print("test_version")
+    print("test_version1")
     try:
         runner = ServiceRunner()
         runner.run_all_services()

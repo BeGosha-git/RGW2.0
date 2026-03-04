@@ -135,7 +135,7 @@ def _placeholder_frame() -> bytes:
         return b""
 
 
-def _capture_all_screens(quality: int = 60) -> bytes | None:
+def _capture_all_screens(quality: int = 60):
     """Захват всех мониторов в один JPEG. При ошибке — заглушка."""
     if not mss or not Image:
         return _placeholder_frame() or None

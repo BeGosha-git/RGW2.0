@@ -54,7 +54,7 @@ def _read_exact(reader, n: int) -> bytes:
     return buf
 
 
-async def read_header_async(reader, n: int = HEADER_SIZE) -> tuple | None:
+async def read_header_async(reader, n: int = HEADER_SIZE):
     """Асинхронно читает заголовок."""
     data = await _read_exact_async(reader, HEADER_SIZE)
     if not data or len(data) < HEADER_SIZE:

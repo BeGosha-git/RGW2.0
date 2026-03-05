@@ -220,6 +220,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             pass
 
 
+def check_port_available(check_port):
+    """Проверяет, свободен ли порт."""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        result = sock.connect_ex(('127.0.0.1', check_port))
+        sock.close()
+        return result != 0
+    except:
+        sock.close()
+        return False
+
+
 async def accept_loop(port: int):
     async def handle(reader, writer):
         addr = writer.get_extra_info("peername", ("?", "?"))
@@ -297,14 +311,24 @@ async def accept_loop(port: int):
             except Exception:
                 pass
 
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
-    print(f"[RD Server] Listening on 0.0.0.0:{port}", flush=True)
-    async with server:
-        await server.serve_forever()
+    try:
+        server = await asyncio.start_server(handle, "0.0.0.0", port)
+        print(f"[RD Server] Listening on 0.0.0.0:{port}", flush=True)
+        async with server:
+            await server.serve_forever()
+    except OSError as e:
+        if "Address already in use" in str(e) or e.errno == 98:
+            print(f"[RD Server] Error: Port {port} is already in use. Another instance may be running.", flush=True)
+            raise
+        else:
+            raise
 
 
 def run(port=None):
     """Точка входа. Порт из аргумента, из параметров сервиса remote_desktop или 9009."""
+    import subprocess
+    import time
+    
     if port is None:
         try:
             import services_manager
@@ -312,7 +336,30 @@ def run(port=None):
             port = int(params.get("server_port", DEFAULT_PORT))
         except Exception:
             port = DEFAULT_PORT
-    asyncio.run(accept_loop(port))
+    
+    # Проверяем, свободен ли порт
+    if not check_port_available(port):
+        print(f"[RD Server] Port {port} is in use. Trying to free it...", flush=True)
+        try:
+            # Пробуем освободить порт
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], 
+                         capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
+            time.sleep(1)
+        except Exception:
+            pass
+        
+        # Если порт все еще занят, выводим предупреждение
+        if not check_port_available(port):
+            print(f"[RD Server] Warning: Port {port} is still in use. Another instance may be running.", flush=True)
+            print(f"[RD Server] Continuing anyway...", flush=True)
+    
+    try:
+        asyncio.run(accept_loop(port))
+    except OSError as e:
+        if "Address already in use" in str(e) or e.errno == 98:
+            print(f"[RD Server] Error: Could not bind to port {port}. Please stop the existing instance.", flush=True)
+        else:
+            raise
 
 
 if __name__ == "__main__":

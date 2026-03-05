@@ -35,6 +35,7 @@ function RobotsPage() {
   const [connectionUpdate, setConnectionUpdate] = useState(0)
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 })
   const [currentPage, setCurrentPage] = useState(1) // Пагинация
+  const [localCameras, setLocalCameras] = useState([]) // Локальные камеры
   const containerRef = useRef(null)
   const cardRefs = useRef({})
   const abortControllerRef = useRef(null)
@@ -627,6 +628,36 @@ function RobotsPage() {
       clearTimeout(timeoutId)
     }
   }, [robots.length, selectedGroup, filteredRobots.length])
+
+  // Загружаем список локальных камер
+  useEffect(() => {
+    const fetchLocalCameras = async () => {
+      try {
+        const response = await fetch('/api/cameras/list')
+        const data = await response.json()
+        if (data.success && data.cameras) {
+          setLocalCameras(data.cameras)
+          // Автоматически запускаем потоки для всех камер
+          for (const camera of data.cameras) {
+            try {
+              await fetch(`/api/cameras/${camera.id}/start`, { method: 'POST' })
+            } catch (e) {
+              console.error(`Failed to start camera ${camera.id}:`, e)
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error fetching local cameras:', e)
+      }
+    }
+    
+    if (viewMode === 'view') {
+      fetchLocalCameras()
+      // Обновляем список каждые 10 секунд
+      const interval = setInterval(fetchLocalCameras, 10000)
+      return () => clearInterval(interval)
+    }
+  }, [viewMode])
 
   const handleCommandChange = useCallback(async (robotId, command) => {
     const robot = robots.find(r => r.id === robotId)
@@ -1381,6 +1412,51 @@ function RobotsPage() {
       {viewMode === 'view' && (
         <div className="robots-view-mode">
           <h2 className="robots-title">Просмотр камер</h2>
+          
+          {/* Локальные камеры */}
+          {localCameras.length > 0 && (
+            <div className="cameras-section">
+              <h3 className="cameras-section-title">Локальные камеры</h3>
+              <div className="cameras-grid">
+                {localCameras.map((camera) => {
+                  // Для RealSense используем параметр index, для USB - обычный URL
+                  let cameraStreamUrl = `/api/cameras/${camera.id}/mjpeg`
+                  if (camera.type === 'realsense' && camera.index !== undefined) {
+                    cameraStreamUrl += `?index=${camera.index}&width=640&height=480&quality=80`
+                  } else {
+                    cameraStreamUrl += `?width=640&height=480&quality=80`
+                  }
+                  return (
+                    <div key={camera.id} className="camera-card">
+                      <h3>{camera.name}</h3>
+                      <div className="camera-stream">
+                        <img
+                          src={cameraStreamUrl}
+                          alt={`Камера ${camera.name}`}
+                          onError={(e) => {
+                            e.target.style.display = 'none'
+                            const errorBox = e.target.nextSibling
+                            if (errorBox) errorBox.style.display = 'flex'
+                          }}
+                        />
+                        <div className="camera-error" style={{ display: 'none' }}>
+                          <span>Камера недоступна</span>
+                        </div>
+                      </div>
+                      <div className="camera-info">
+                        {camera.type === 'realsense' ? 'RealSense' : 'USB'} • {camera.id}
+                        {camera.type === 'realsense' && camera.index !== undefined && ` • Index: ${camera.index}`}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          
+          {/* Камеры роботов */}
+          <div className="cameras-section">
+            <h3 className="cameras-section-title">Камеры роботов</h3>
           <div className="cameras-grid">
             {paginatedRobots.map((robot) => {
               const robotIP = robot.ip
@@ -1417,6 +1493,7 @@ function RobotsPage() {
                 </div>
               )
             })}
+            </div>
           </div>
           {/* Пагинация для камер */}
           {totalPages > 1 && (

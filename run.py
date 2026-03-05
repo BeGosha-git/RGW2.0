@@ -123,22 +123,13 @@ class ServiceRunner:
                         filepath = os.path.join(root, file)
                         service_files.append(filepath)
         
-        # Ищем сервисы в папке api
-        if os.path.exists(api_dir):
-            for root, dirs, files in os.walk(api_dir):
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
-                
-                if '__pycache__' in root:
-                    continue
-                
-                for file in files:
-                    if file.endswith('.py') and file != '__init__.py':
-                        if file.endswith('_client.py'):
-                            continue
-                        filepath = os.path.join(root, file)
-                        service_files.append(filepath)
+        # Ищем сервисы в папке api (только api/api.py, остальные - модули)
+        api_service_file = os.path.join(api_dir, "api.py")
+        if os.path.exists(api_service_file):
+            service_files.append(api_service_file)
         
-        return service_files
+        # Удаляем дубликаты
+        return list(dict.fromkeys(service_files))
     
     def load_service(self, filepath: str) -> bool:
         """
@@ -174,6 +165,10 @@ class ServiceRunner:
             if filepath_obj.name == 'example_service.py':
                 return False
             
+            # Игнорируем модули из api/ (они не сервисы)
+            if filepath_obj.parent.name == "api" and filepath_obj.name != "api.py":
+                return False
+            
             if filepath_obj.parent.name == "services" or filepath_obj.parent.parent.name == "services":
                 if filepath_obj.name == "docker_service.py" and filepath_obj.parent.name == "windows_docker":
                     service_name = "docker_service"
@@ -181,10 +176,16 @@ class ServiceRunner:
                     service_name = filepath_obj.parent.name
                 else:
                     service_name = filepath_obj.stem
-            elif filepath_obj.parent.name == "api":
+            elif filepath_obj.parent.name == "api" and filepath_obj.name == "api.py":
                 service_name = "api"
             else:
                 service_name = os.path.splitext(os.path.basename(filepath))[0]
+            
+            # Проверяем, не загружен ли уже этот сервис
+            for existing_service in self.services:
+                if existing_service.get("service_name") == service_name:
+                    print(f"Service {service_name} is already loaded, skipping duplicate...", flush=True)
+                    return False
             
             # Проверяем, включен ли сервис
             if not self.manager.is_service_enabled(service_name):

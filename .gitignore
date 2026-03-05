@@ -55,3 +55,5 @@ data/
 
 # Docker
 .dockerignore
+*.tar.gz
+venv-*.tar.gz

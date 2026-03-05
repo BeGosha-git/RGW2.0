@@ -471,6 +471,19 @@
   position: relative;
 }
 
+.cameras-section {
+  margin-bottom: 2rem;
+}
+
+.cameras-section-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--border-color);
+}
+
 .cameras-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));

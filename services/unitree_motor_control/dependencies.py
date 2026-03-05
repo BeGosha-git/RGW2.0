@@ -91,11 +91,27 @@ def setup_dependencies():
         import numpy
         numpy_ok = True
         print("[Dependencies] numpy already installed", flush=True)
-    except ImportError:
+    except (ImportError, ModuleNotFoundError) as e:
+        # Проверяем, может быть numpy установлен, но сломан (например, отсутствует _multiarray_umath)
+        error_str = str(e).lower()
+        if '_multiarray_umath' in error_str or 'numpy.core' in error_str:
+            print("[Dependencies] numpy is broken, reinstalling...", flush=True)
+            # Пробуем переустановить numpy
+            try:
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'uninstall', '-y', 'numpy'],
+                    check=False,
+                    timeout=60,
+                    capture_output=True,
+                    text=True
+                )
+            except Exception:
+                pass
+        
         print("[Dependencies] Installing numpy...", flush=True)
         try:
             install_result = subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '--quiet', 'numpy>=1.20.0'],
+                [sys.executable, '-m', 'pip', 'install', '--quiet', '--force-reinstall', 'numpy>=1.20.0'],
                 check=True,
                 timeout=300,
                 capture_output=True,
@@ -107,7 +123,10 @@ def setup_dependencies():
         except subprocess.TimeoutExpired:
             print("[Dependencies] Timeout installing numpy", flush=True)
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
+            if e.stderr:
+                error_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode()
+            else:
+                error_msg = str(e)
             print(f"[Dependencies] Failed to install numpy: {error_msg[:200]}", flush=True)
         except Exception as e:
             print(f"[Dependencies] Error installing numpy: {e}", flush=True)
@@ -151,7 +170,10 @@ def setup_dependencies():
                 except subprocess.TimeoutExpired:
                     print("[Dependencies] Timeout installing cyclonedds from offline packages", flush=True)
                 except subprocess.CalledProcessError as e:
-                    error_msg = e.stderr.decode() if e.stderr else str(e)
+                    if e.stderr:
+                        error_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode()
+                    else:
+                        error_msg = str(e)
                     print(f"[Dependencies] Failed to install cyclonedds from offline packages: {error_msg[:200]}", flush=True)
                 except Exception as e:
                     print(f"[Dependencies] Error installing cyclonedds from offline packages: {e}", flush=True)
@@ -177,7 +199,10 @@ def setup_dependencies():
                     print(f"[Dependencies] Timeout installing {package_name}", flush=True)
                     continue
                 except subprocess.CalledProcessError as e:
-                    error_msg = e.stderr.decode() if e.stderr else str(e)
+                    if e.stderr:
+                        error_msg = e.stderr if isinstance(e.stderr, str) else e.stderr.decode()
+                    else:
+                        error_msg = str(e)
                     print(f"[Dependencies] Failed to install {package_name}: {error_msg[:200]}", flush=True)
                     continue
                 except Exception as e:

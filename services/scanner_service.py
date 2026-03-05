@@ -64,12 +64,18 @@ def run_service_loop(scan_interval: int = 20, scan_port: int = 8080):
         print(f"Scanner service: Error registering initial status: {e}", flush=True)
     
     scans_count = 0
+    # Подсети для чередования
+    subnets = ["192.168.88", "192.168.123"]
+    subnet_counter = 0  # Индекс текущей подсети
     
-    # Выполняем первое сканирование сразу
+    # Выполняем первое сканирование сразу (начинаем с первой подсети)
     try:
-        print(f"Performing initial network scan on port {scan_port}...", flush=True)
-        scanner.scan_network(port=scan_port)
+        current_subnet = subnets[subnet_counter]
+        print(f"Performing initial network scan on subnet {current_subnet} (port {scan_port})...", flush=True)
+        scanner.scan_network(port=scan_port, network_base=current_subnet)
         scans_count += 1
+        subnet_counter = (subnet_counter + 1) % 2  # Переключаем на следующую подсеть
+
         try:
             status.register_service_data(service_name, {
                 "status": "running",
@@ -121,11 +127,17 @@ def run_service_loop(scan_interval: int = 20, scan_port: int = 8080):
             # Ждем перед следующим сканированием
             time.sleep(scan_interval)
             
-            # Выполняем сканирование
+            # Выполняем сканирование (чередуем подсети)
             try:
-                print(f"Performing network scan on port {scan_port}...", flush=True)
-                scanner.scan_network(port=scan_port)
+                current_subnet = subnets[subnet_counter]
+                print(f"Performing network scan on subnet {current_subnet} (port {scan_port})...", flush=True)
+                scanner.scan_network(port=scan_port, network_base=current_subnet)
                 scans_count += 1
+                # Переключаем на следующую подсеть для следующего сканирования
+                subnet_counter = (subnet_counter + 1) % 2
+
+                if subnet_counter > 100:
+                    subnet_counter = 0
                 
                 # Обновляем данные в status.py
                 try:

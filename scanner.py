@@ -80,12 +80,13 @@ def save_ips(ips: List[str], scan_timestamp: float):
         print(f"Error saving ips.json: {str(e)}", flush=True)
 
 
-def scan_network(port: Optional[int] = None):
+def scan_network(port: Optional[int] = None, network_base: Optional[str] = None):
     """
     Выполняет сканирование сети и сохраняет результаты.
     
     Args:
         port: Порт для сканирования (None = из конфигурации, по умолчанию 8080)
+        network_base: Базовая подсеть для сканирования (например, "192.168.88" или "192.168.123")
     
     Returns:
         True если успешно
@@ -100,8 +101,11 @@ def scan_network(port: Optional[int] = None):
         
         scan_start = time.time()
         
+        # Уменьшаем таймаут в 1.5 раза (было 0.5, стало 0.333)
+        timeout = 0.5 / 1.5
+        
         # Сканируем сеть
-        found_ips = network.find_robots_in_network(port=port, timeout=0.5)
+        found_ips = network.find_robots_in_network(port=port, timeout=timeout, network_base=network_base)
         
         scan_end = time.time()
         scan_duration = scan_end - scan_start
@@ -109,7 +113,8 @@ def scan_network(port: Optional[int] = None):
         # Сохраняем результаты
         save_ips(found_ips, scan_end)
         
-        print(f"Scan completed in {scan_duration:.2f}s. Found {len(found_ips)} IP(s): {found_ips}", flush=True)
+        network_info = f"subnet {network_base}" if network_base else "default network"
+        print(f"Scan completed in {scan_duration:.2f}s on {network_info}. Found {len(found_ips)} IP(s): {found_ips}", flush=True)
         return True
         
     except Exception as e:

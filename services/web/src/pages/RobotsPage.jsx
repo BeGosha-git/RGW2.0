@@ -1413,86 +1413,102 @@ function RobotsPage() {
         <div className="robots-view-mode">
           <h2 className="robots-title">Просмотр камер</h2>
           
-          {/* Локальные камеры */}
-          {localCameras.length > 0 && (
+          {/* Локальные камеры - только usb_2 и usb_3 */}
+          {localCameras.filter(c => c.id === 'usb_2' || c.id === 'usb_3').length > 0 && (
             <div className="cameras-section">
               <h3 className="cameras-section-title">Локальные камеры</h3>
               <div className="cameras-grid">
-                {localCameras.map((camera) => {
-                  // Для RealSense используем параметр index, для USB - обычный URL
-                  let cameraStreamUrl = `/api/cameras/${camera.id}/mjpeg`
-                  if (camera.type === 'realsense' && camera.index !== undefined) {
-                    cameraStreamUrl += `?index=${camera.index}&width=640&height=480&quality=80`
-                  } else {
-                    cameraStreamUrl += `?width=640&height=480&quality=80`
-                  }
-                  return (
-                    <div key={camera.id} className="camera-card">
-                      <h3>{camera.name}</h3>
-                      <div className="camera-stream">
-                        <img
-                          src={cameraStreamUrl}
-                          alt={`Камера ${camera.name}`}
-                          onError={(e) => {
-                            e.target.style.display = 'none'
-                            const errorBox = e.target.nextSibling
-                            if (errorBox) errorBox.style.display = 'flex'
-                          }}
-                        />
-                        <div className="camera-error" style={{ display: 'none' }}>
-                          <span>Камера недоступна</span>
+                {localCameras
+                  .filter(camera => camera.id === 'usb_2' || camera.id === 'usb_3')
+                  .map((camera) => {
+                    const cameraStreamUrl = `/api/cameras/${camera.id}/mjpeg`
+                    return (
+                      <div key={camera.id} className="camera-card">
+                        <h3>{camera.name}</h3>
+                        <div className="camera-stream">
+                          <img
+                            src={cameraStreamUrl}
+                            alt={`Камера ${camera.name}`}
+                            onError={(e) => {
+                              e.target.style.display = 'none'
+                              const errorBox = e.target.nextSibling
+                              if (errorBox) errorBox.style.display = 'flex'
+                            }}
+                          />
+                          <div className="camera-error" style={{ display: 'none' }}>
+                            <span>Камера недоступна</span>
+                          </div>
+                        </div>
+                        <div className="camera-info">
+                          USB • {camera.id}
                         </div>
                       </div>
-                      <div className="camera-info">
-                        {camera.type === 'realsense' ? 'RealSense' : 'USB'} • {camera.id}
-                        {camera.type === 'realsense' && camera.index !== undefined && ` • Index: ${camera.index}`}
-                      </div>
-                    </div>
-                  )
-                })}
+                    )
+                  })}
               </div>
             </div>
           )}
           
-          {/* Камеры роботов */}
+          {/* Камеры роботов - только usb_2 и usb_3 */}
           <div className="cameras-section">
             <h3 className="cameras-section-title">Камеры роботов</h3>
-          <div className="cameras-grid">
-            {paginatedRobots.map((robot) => {
-              const robotIP = robot.ip
-              const cameraStreamUrl = robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
-                ? `http://${robotIP}:5002/api/cameras/4/mjpeg?quality=40&fps=30&width=640&height=480`
-                : null
+            <div className="cameras-grid">
+              {paginatedRobots.map((robot) => {
+                const robotIP = robot.ip
+                // Используем актуальные стримы usb_2 и usb_3
+                const cameraStreams = [
+                  {
+                    id: 'usb_2',
+                    name: 'USB Camera 2',
+                    url: robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
+                      ? `http://${robotIP}:5000/api/cameras/usb_2/mjpeg`
+                      : null
+                  },
+                  {
+                    id: 'usb_3',
+                    name: 'USB Camera 3',
+                    url: robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
+                      ? `http://${robotIP}:5000/api/cameras/usb_3/mjpeg`
+                      : null
+                  }
+                ]
 
-              return (
-                <div key={robot.id} className="camera-card">
-                  <h3>{robot.name}</h3>
-                  {cameraStreamUrl ? (
-                    <div className="camera-stream">
-                      <img
-                        src={cameraStreamUrl}
-                        alt={`Камера ${robot.name}`}
-                        onError={(e) => {
-                          e.target.style.display = 'none'
-                          const errorBox = e.target.nextSibling
-                          if (errorBox) errorBox.style.display = 'flex'
-                        }}
-                      />
-                      <div className="camera-error" style={{ display: 'none' }}>
-                        <span>Камера недоступна</span>
+                return (
+                  <div key={robot.id} className="camera-card">
+                    <h3>{robot.name}</h3>
+                    {cameraStreams.map((camera) => (
+                      <div key={camera.id} style={{ marginBottom: '10px' }}>
+                        <div className="camera-info" style={{ marginBottom: '5px', fontSize: '12px' }}>
+                          {camera.name}
+                        </div>
+                        {camera.url ? (
+                          <div className="camera-stream">
+                            <img
+                              src={camera.url}
+                              alt={`${camera.name} - ${robot.name}`}
+                              onError={(e) => {
+                                e.target.style.display = 'none'
+                                const errorBox = e.target.nextSibling
+                                if (errorBox) errorBox.style.display = 'flex'
+                              }}
+                            />
+                            <div className="camera-error" style={{ display: 'none' }}>
+                              <span>Камера недоступна</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="camera-error">
+                            <span>IP не определен</span>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ) : (
-                    <div className="camera-error">
-                      <span>IP не определен</span>
-                    </div>
-                  )}
-                  {robotIP && (
-                    <div className="camera-info">{robotIP}:5002</div>
-                  )}
-                </div>
-              )
-            })}
+                    ))}
+                    {robotIP && (
+                      <div className="camera-info">{robotIP}:5000</div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
           {/* Пагинация для камер */}

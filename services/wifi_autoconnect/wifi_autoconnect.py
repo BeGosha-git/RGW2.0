@@ -14,6 +14,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # Импортируем services_manager для обнаружения сервиса
 import services_manager
 
+# Имя сервиса для регистрации
+SERVICE_NAME = "wifi_autoconnect"
+
+def get_service_name() -> str:
+    """Возвращает имя сервиса."""
+    return SERVICE_NAME
+
 # Параметры Wi-Fi сети
 WIFI_SSID = "BeRobots"
 WIFI_PASSWORD = "Unitree0408"

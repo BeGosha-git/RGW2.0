@@ -2,16 +2,18 @@
 Модуль для управления сервисами через services.json.
 Управляет статусами сервисов (ON/OFF/SLEEP) и их параметрами.
 """
-import os
-import json
 import platform
 import ast
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
+from utils.logger import get_logger
+from utils.file_utils import JSONFileManager
+from utils.path_utils import get_data_dir
 
+logger = get_logger(__name__)
 
-SERVICES_FILE = Path("data") / "services.json"
+SERVICES_FILE = get_data_dir() / "services.json"
 
 
 class ServicesManager:
@@ -20,10 +22,14 @@ class ServicesManager:
     def __init__(self):
         """Инициализация менеджера сервисов."""
         self.services_file = SERVICES_FILE
-        self.ensure_data_dir()
+        self.file_manager = JSONFileManager(SERVICES_FILE, {
+            "last_update": datetime.now().isoformat(),
+            "services": {}
+        })
+        self._ensure_data_dir()
         self.load_services()
     
-    def ensure_data_dir(self):
+    def _ensure_data_dir(self):
         """Создает директорию data если её нет."""
         self.services_file.parent.mkdir(parents=True, exist_ok=True)
     
@@ -34,15 +40,15 @@ class ServicesManager:
         Returns:
             Словарь с данными о сервисах
         """
-        if not self.services_file.exists():
+        data = self.file_manager.load()
+        
+        if not data or not isinstance(data, dict):
             return {
                 "last_update": datetime.now().isoformat(),
                 "services": {}
             }
         
         try:
-            with open(self.services_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
             
             services = data.get("services", {})
             updated = False
@@ -90,7 +96,7 @@ class ServicesManager:
             if updated:
                 data["services"] = services
                 self.save_services(data)
-                print(f"[ServicesManager] Updated services.json to new format", flush=True)
+                logger.info("Updated services.json to new format")
             
             # Убеждаемся, что data не None и имеет правильную структуру
             if data is None or not isinstance(data, dict):
@@ -105,7 +111,7 @@ class ServicesManager:
             
             return data
         except Exception as e:
-            print(f"[ServicesManager] Error loading services.json: {e}", flush=True)
+            logger.error(f"Error loading services.json: {e}", exc_info=True)
             return {
                 "last_update": datetime.now().isoformat(),
                 "services": {}
@@ -118,12 +124,9 @@ class ServicesManager:
         Args:
             data: Данные для сохранения
         """
-        try:
-            data["last_update"] = datetime.now().isoformat()
-            with open(self.services_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"[ServicesManager] Error saving services.json: {str(e)}", flush=True)
+        data["last_update"] = datetime.now().isoformat()
+        if not self.file_manager.save(data):
+            logger.error(f"Failed to save services.json")
     
     def get_service_defaults(self, service_name: str) -> Dict[str, Any]:
         """
@@ -524,7 +527,7 @@ class ServicesManager:
                 services[service_name]["parameters"]["enabled"] = enabled
                 
                 new_services_count += 1
-                print(f"[ServicesManager] Added new service: {service_name} (enabled={enabled}, status={status})", flush=True)
+                logger.info(f"Added new service: {service_name} (enabled={enabled}, status={status})")
         
         # Удаляем несуществующие сервисы (кроме системных)
         services_to_remove = []
@@ -535,7 +538,7 @@ class ServicesManager:
         for service_name in services_to_remove:
             del services[service_name]
             removed_services_count += 1
-            print(f"[ServicesManager] Removed non-existent service: {service_name}", flush=True)
+            logger.info(f"Removed non-existent service: {service_name}")
         
         # Всегда обновляем last_update, даже если новых сервисов нет
         # Это показывает, что проверка была выполнена
@@ -543,9 +546,9 @@ class ServicesManager:
         self.save_services(data)
         
         if new_services_count > 0:
-            print(f"[ServicesManager] Found {new_services_count} new service(s). services.json updated.", flush=True)
+            logger.info(f"Found {new_services_count} new service(s). services.json updated.")
         else:
-            print(f"[ServicesManager] Service check completed. No new services found. Total: {len(services)}", flush=True)
+            logger.debug(f"Service check completed. No new services found. Total: {len(services)}")
     
     def is_service_enabled(self, service_name: str) -> bool:
         """
@@ -776,7 +779,7 @@ class ServicesManager:
             dependencies = [dep for dep in dependencies if dep != "services_manager" and dep != current_service_name]
             
         except Exception as e:
-            print(f"[ServicesManager] Error analyzing dependencies for {filepath}: {str(e)}", flush=True)
+            logger.error(f"Error analyzing dependencies for {filepath}: {e}", exc_info=True)
         
         return dependencies
     
@@ -817,12 +820,12 @@ class ServicesManager:
                 data["services"] = services
                 self.save_services(data)
                 
-                print(f"[ServicesManager] Updated dependencies for {service_name}: {detected_dependencies}", flush=True)
+                logger.info(f"Updated dependencies for {service_name}: {detected_dependencies}")
                 return True
             
             return False
         except Exception as e:
-            print(f"[ServicesManager] Error updating dependencies for {service_name}: {str(e)}", flush=True)
+            logger.error(f"Error updating dependencies for {service_name}: {e}", exc_info=True)
             return False
 
 

@@ -2,16 +2,19 @@
 Модуль для получения статуса и параметров робота.
 Поддерживает динамическую регистрацию данных от сервисов.
 """
-import os
-import json
 import platform
 import socket
-from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
+from utils.logger import get_logger
+from utils.path_utils import get_project_root, get_data_dir
+from utils.file_utils import JSONFileManager
+from pathlib import Path
+
+logger = get_logger(__name__)
 
 # Определяем корень проекта (папка с main.py)
-PROJECT_ROOT = Path(__file__).parent.absolute()
+PROJECT_ROOT = get_project_root()
 
 # Глобальный реестр данных от сервисов
 _service_data_registry: Dict[str, Dict[str, Any]] = {}
@@ -89,30 +92,32 @@ def get_robot_status() -> Dict[str, Any]:
     
     # Параметры робота из settings.json
     try:
-        settings_path = PROJECT_ROOT / "data" / "settings.json"
-        if settings_path.exists():
-            with open(settings_path, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-                status_data["robot"] = {
-                    "robot_type": settings.get("RobotType", "UNKNOWN"),
-                    "robot_id": settings.get("RobotID", "UNKNOWN"),
-                    "robot_group": settings.get("RobotGroup", "UNKNOWN"),
-                    "version_priority": settings.get("VersionPriority", "UNKNOWN")
-                }
-                status_data["settings"] = settings
+        settings_path = get_data_dir() / "settings.json"
+        settings_manager = JSONFileManager(settings_path)
+        
+        if settings_manager.exists():
+            settings = settings_manager.load()
+            status_data["robot"] = {
+                "robot_type": settings.get("RobotType", "UNKNOWN"),
+                "robot_id": settings.get("RobotID", "UNKNOWN"),
+                "robot_group": settings.get("RobotGroup", "UNKNOWN"),
+                "version_priority": settings.get("VersionPriority", "UNKNOWN")
+            }
+            status_data["settings"] = settings
         else:
             # Файл не найден - добавляем отладочную информацию
-            status_data["robot"]["error"] = f"Settings file not found"
+            status_data["robot"]["error"] = "Settings file not found"
             status_data["robot"]["debug"] = {
                 "project_root": str(PROJECT_ROOT),
                 "settings_path": str(settings_path),
                 "cwd": str(Path.cwd())
             }
     except Exception as e:
+        logger.error(f"Error loading settings: {e}", exc_info=True)
         status_data["robot"]["error"] = str(e)
         status_data["robot"]["debug"] = {
             "project_root": str(PROJECT_ROOT),
-            "settings_path": str(PROJECT_ROOT / "data" / "settings.json")
+            "settings_path": str(get_data_dir() / "settings.json")
         }
     
     # Системная информация
@@ -131,16 +136,18 @@ def get_robot_status() -> Dict[str, Any]:
     
     # Информация о версии
     try:
-        version_path = PROJECT_ROOT / "data" / "version.json"
-        if version_path.exists():
-            with open(version_path, 'r', encoding='utf-8') as f:
-                version_data = json.load(f)
-                status_data["version"] = {
-                    "version": version_data.get("version", "UNKNOWN"),
-                    "version_type": version_data.get("version_type", "STABLE"),
-                    "files_count": len(version_data.get("files", []))
-                }
+        version_path = get_data_dir() / "version.json"
+        version_manager = JSONFileManager(version_path)
+        
+        if version_manager.exists():
+            version_data = version_manager.load()
+            status_data["version"] = {
+                "version": version_data.get("version", "UNKNOWN"),
+                "version_type": version_data.get("version_type", "STABLE"),
+                "files_count": len(version_data.get("files", []))
+            }
     except Exception as e:
+        logger.error(f"Error loading version: {e}", exc_info=True)
         status_data["version"]["error"] = str(e)
     
     # Сетевая информация

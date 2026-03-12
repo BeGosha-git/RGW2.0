@@ -10,6 +10,11 @@ import time
 from pathlib import Path
 from typing import List, Dict
 import services_manager
+from utils.logger import get_logger
+from utils.path_utils import get_project_root, get_venv_path
+from utils.network_utils import PortManager
+
+logger = get_logger(__name__)
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -26,12 +31,7 @@ sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
 
 # Проверяем, указана ли версия Python через переменную окружения
 python_version = os.environ.get('PYTHON_VERSION')
-if python_version:
-    # Используем venv для указанной версии
-    venv_path = Path(f"venv-{python_version}").resolve()
-else:
-    # Используем основной venv
-    venv_path = Path("venv").resolve()
+venv_path = get_venv_path(python_version)
 
 if venv_path.exists():
     venv_python = venv_path / "bin" / "python3"
@@ -184,12 +184,12 @@ class ServiceRunner:
             # Проверяем, не загружен ли уже этот сервис
             for existing_service in self.services:
                 if existing_service.get("service_name") == service_name:
-                    print(f"Service {service_name} is already loaded, skipping duplicate...", flush=True)
+                    logger.debug(f"Service {service_name} is already loaded, skipping duplicate...")
                     return False
             
             # Проверяем, включен ли сервис
             if not self.manager.is_service_enabled(service_name):
-                print(f"Service {service_name} is disabled, skipping...", flush=True)
+                logger.debug(f"Service {service_name} is disabled, skipping...")
                 service_info = self.manager.get_service(service_name)
                 if service_info:
                     current_status = service_info.get("status", "OFF")
@@ -208,7 +208,7 @@ class ServiceRunner:
             if current_status != expected_status:
                 self.manager.update_service_status(service_name, expected_status)
             
-            print(f"Loading service: {service_name} (enabled={enabled}, status={expected_status})", flush=True)
+            logger.info(f"Loading service: {service_name} (enabled={enabled}, status={expected_status})")
             
             module_name = service_name
             
@@ -231,12 +231,10 @@ class ServiceRunner:
             if run_func:
                 def service_wrapper():
                     try:
-                        print(f"Starting service thread: {service_name}", flush=True)
+                        logger.info(f"Starting service thread: {service_name}")
                         run_func()
                     except Exception as e:
-                        print(f"Error in service {service_name}: {e}", flush=True)
-                        import traceback
-                        traceback.print_exc()
+                        logger.error(f"Error in service {service_name}: {e}", exc_info=True)
                 
                 thread = threading.Thread(target=service_wrapper, daemon=False)
                 thread.start()
@@ -250,26 +248,24 @@ class ServiceRunner:
                     "service_name": service_name
                 })
                 
-                print(f"Service {service_name} started successfully", flush=True)
+                logger.info(f"Service {service_name} started successfully")
                 return True
             else:
-                print(f"Warning: Service {service_name} has no run() or main() function", flush=True)
+                logger.warning(f"Service {service_name} has no run() or main() function")
                 return False
                 
         except Exception as e:
-            print(f"Error loading service {filepath}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error loading service {filepath}: {e}", exc_info=True)
             return False
     
     def run_all_services(self):
         """Запускает все найденные сервисы."""
         self.running = True
-        print("Discovering services...", flush=True)
+        logger.info("Discovering services...")
         service_files = self.find_services()
         
         if not service_files:
-            print("No service files found. Waiting...", flush=True)
+            logger.warning("No service files found. Waiting...")
             try:
                 while True:
                     time.sleep(60)
@@ -280,21 +276,19 @@ class ServiceRunner:
         self.service_files = service_files
         self.running = True
         
-        print(f"Found {len(service_files)} service file(s), starting...", flush=True)
+        logger.info(f"Found {len(service_files)} service file(s), starting...")
         for service_file in service_files:
             try:
                 loaded = self.load_service(service_file)
                 if not loaded:
-                    print(f"Failed to load service from {service_file}", flush=True)
+                    logger.debug(f"Failed to load service from {service_file}")
             except Exception as e:
-                print(f"Error loading service {service_file}: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error loading service {service_file}: {e}", exc_info=True)
             time.sleep(0.1)
         
-        print(f"Loaded {len(self.services)} service(s) successfully", flush=True)
+        logger.info(f"Loaded {len(self.services)} service(s) successfully")
         if len(self.services) == 0:
-            print("No services started. Checking why...", flush=True)
+            logger.warning("No services started. Checking why...")
             # Показываем какие сервисы найдены и почему не запущены
             for service_file in service_files:
                 try:
@@ -312,11 +306,11 @@ class ServiceRunner:
                         service_name = os.path.splitext(os.path.basename(service_file))[0]
                     
                     enabled = self.manager.is_service_enabled(service_name)
-                    print(f"  {service_name}: enabled={enabled}", flush=True)
+                    logger.debug(f"  {service_name}: enabled={enabled}")
                 except Exception:
                     pass
             
-            print("Waiting for services to be enabled...", flush=True)
+            logger.info("Waiting for services to be enabled...")
             try:
                 while True:
                     time.sleep(60)
@@ -342,7 +336,7 @@ class ServiceRunner:
         last_motor_check = time.time()
         motor_check_interval = 5
         
-        print("Entering main service loop...", flush=True)
+        logger.info("Entering main service loop...")
         try:
             while self.running:
                 current_time = time.time()
@@ -470,8 +464,6 @@ class ServiceRunner:
     def cleanup_ports(self):
         """Освобождает порты, используемые сервисами."""
         try:
-            import subprocess
-            
             ports_to_clean = set()
             
             web_service = self.manager.get_service("web")
@@ -492,26 +484,10 @@ class ServiceRunner:
                 scanner_port = scanner_params.get("port", 8080)
                 ports_to_clean.add(scanner_port)
             
-            for port in ports_to_clean:
-                try:
-                    subprocess.run(["fuser", "-k", f"{port}/tcp"], 
-                                 capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
-                except Exception:
-                    try:
-                        result = subprocess.run(["lsof", "-ti", f":{port}"], 
-                                               capture_output=True, timeout=2, text=True)
-                        if result.returncode == 0 and result.stdout.strip():
-                            pids = result.stdout.strip().split('\n')
-                            for pid in pids:
-                                try:
-                                    subprocess.run(["kill", "-9", pid], 
-                                                 capture_output=True, timeout=1, stderr=subprocess.DEVNULL)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            port_manager = PortManager()
+            port_manager.free_ports(ports_to_clean)
+        except Exception as e:
+            logger.warning(f"Error cleaning up ports: {e}")
 
 
 def run_services():

@@ -2,12 +2,13 @@
 Модуль для связи с другими роботами и серверами через сеть.
 """
 import requests
-import json
 import socket
 from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
-import time
 import concurrent.futures
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class NetworkClient:
@@ -43,7 +44,7 @@ class NetworkClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"GET request error to {url}: {str(e)}")
+            logger.debug(f"GET request error to {url}: {e}")
             return None
     
     def post(self, url: str, data: Optional[Dict] = None) -> Optional[Dict]:
@@ -66,7 +67,7 @@ class NetworkClient:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            print(f"POST request error to {url}: {str(e)}")
+            logger.debug(f"POST request error to {url}: {e}")
             return None
     
     def put(self, url: str, data: Optional[Dict] = None) -> Optional[bytes]:
@@ -85,7 +86,7 @@ class NetworkClient:
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
-            print(f"PUT request error to {url}: {str(e)}")
+            logger.debug(f"PUT request error to {url}: {e}")
             return None
     
     def download_file(self, url: str, filepath: str) -> bool:
@@ -109,7 +110,7 @@ class NetworkClient:
             
             return True
         except requests.exceptions.RequestException as e:
-            print(f"Download error from {url}: {str(e)}")
+            logger.error(f"Download error from {url}: {e}")
             return False
     
     def upload_file(self, url: str, filepath: str) -> bool:
@@ -129,7 +130,7 @@ class NetworkClient:
                 response.raise_for_status()
             return True
         except (requests.exceptions.RequestException, IOError) as e:
-            print(f"Upload error to {url}: {str(e)}")
+            logger.error(f"Upload error to {url}: {e}")
             return False
     
     def check_connection(self, host: str, port: int = 80) -> bool:
@@ -230,7 +231,7 @@ def get_local_network_base() -> str:
         if len(ip_parts) == 4:
             return '.'.join(ip_parts[:3])
     except Exception as e:
-        print(f"Error determining local network: {str(e)}")
+        logger.warning(f"Error determining local network: {e}")
     
     # Fallback на стандартную подсеть
     return "192.168.1"
@@ -265,7 +266,7 @@ def find_robots_in_network(network_base: Optional[str] = None,
     found_robots = []
     check_client = NetworkClient(timeout=max(2, int(timeout * 3)))
     
-    print(f"Scanning network {network_base}.0/24 (0-255) on port {port}...", flush=True)
+    logger.info(f"Scanning network {network_base}.0/24 (0-255) on port {port}...")
     
     def check_ip(ip_address):
         try:
@@ -276,7 +277,7 @@ def find_robots_in_network(network_base: Optional[str] = None,
             try:
                 robot_info = check_client.get_robot_info(base_url)
                 if robot_info and isinstance(robot_info, dict) and robot_info.get("success") is not False:
-                    print(f"Found robot at {ip_address}:{port}", flush=True)
+                    logger.debug(f"Found robot at {ip_address}:{port}")
                     return ip_address
             except Exception:
                 pass
@@ -284,7 +285,7 @@ def find_robots_in_network(network_base: Optional[str] = None,
             try:
                 health_info = check_client.get_from_robot(base_url, "health")
                 if health_info and isinstance(health_info, dict):
-                    print(f"Found robot at {ip_address}:{port} (via /health)", flush=True)
+                    logger.debug(f"Found robot at {ip_address}:{port} (via /health)")
                     return ip_address
             except Exception:
                 pass
@@ -298,16 +299,14 @@ def find_robots_in_network(network_base: Optional[str] = None,
             results = list(executor.map(check_ip, ip_addresses))
             found_robots = [ip for ip in results if ip is not None]
         
-        print(f"Scan complete. Found {len(found_robots)} robot(s).", flush=True)
+        logger.info(f"Scan complete. Found {len(found_robots)} robot(s).")
         return found_robots
     except RuntimeError as e:
         # Обрабатываем ошибку "cannot schedule new futures after interpreter shutdown"
         if "cannot schedule new futures" in str(e) or "interpreter shutdown" in str(e):
-            print(f"Network scan interrupted: interpreter is shutting down", flush=True)
+            logger.warning("Network scan interrupted: interpreter is shutting down")
             return []
         raise
     except Exception as e:
-        print(f"Error during network scan: {str(e)}", flush=True)
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error during network scan: {e}", exc_info=True)
         return []

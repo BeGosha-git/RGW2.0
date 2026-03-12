@@ -9,6 +9,7 @@ import threading
 import socket
 import warnings
 import contextlib
+import atexit
 from pathlib import Path
 from typing import Dict, Optional, List
 from collections import deque
@@ -248,15 +249,22 @@ class CameraStream:
         if not REALSENSE_AVAILABLE:
             return False
         
-        # Сначала закрываем старый pipeline если есть
-        if self.pipeline:
+        # Сначала закрываем старый pipeline если есть (с защитой от segfault)
+        if self.pipeline is not None:
             try:
                 with _suppress_stderr():
-                    self.pipeline.stop()
+                    try:
+                        if hasattr(self.pipeline, 'stop'):
+                            self.pipeline.stop()
+                    except (RuntimeError, AttributeError, Exception):
+                        # Игнорируем ошибки при остановке
+                        pass
             except Exception:
                 pass
             finally:
                 self.pipeline = None
+                # Даем время системе освободить ресурсы
+                time.sleep(0.1)
         
         # Небольшая пауза перед перезапуском
         time.sleep(0.5)
@@ -294,15 +302,22 @@ class CameraStream:
                     raise frame_error
         except Exception as e:
             print(f"[CameraStream] RealSense start error ({self.camera_id}): {e}", flush=True)
-            # Гарантированно закрываем pipeline
-            if self.pipeline:
+            # Гарантированно закрываем pipeline (с защитой от segfault)
+            if self.pipeline is not None:
                 try:
                     with _suppress_stderr():
-                        self.pipeline.stop()
+                        try:
+                            if hasattr(self.pipeline, 'stop'):
+                                self.pipeline.stop()
+                        except (RuntimeError, AttributeError, Exception):
+                            # Игнорируем ошибки при остановке
+                            pass
                 except Exception:
                     pass
                 finally:
                     self.pipeline = None
+                    # Даем время системе освободить ресурсы
+                    time.sleep(0.1)
             return False
     
     def _start_usb(self) -> bool:
@@ -351,17 +366,23 @@ class CameraStream:
                 finally:
                     self.cap = None
             
-            if self.pipeline:
+            if self.pipeline is not None:
                 try:
-                    # Останавливаем pipeline с обработкой генератора
+                    # Останавливаем pipeline с обработкой генератора (с защитой от segfault)
                     with _suppress_stderr():
-                        self.pipeline.stop()
-                except Exception as stop_error:
-                    # Даже если stop() выбросил исключение, продолжаем
-                    print(f"[CameraStream] Pipeline stop error (ignored): {stop_error}", flush=True)
+                        try:
+                            if hasattr(self.pipeline, 'stop'):
+                                self.pipeline.stop()
+                        except (RuntimeError, AttributeError, Exception) as stop_error:
+                            # Даже если stop() выбросил исключение, продолжаем
+                            print(f"[CameraStream] Pipeline stop error (ignored): {stop_error}", flush=True)
+                except Exception as e:
+                    print(f"[CameraStream] Pipeline cleanup error (ignored): {e}", flush=True)
                 finally:
                     # Гарантированно очищаем ссылку
                     self.pipeline = None
+                    # Даем время системе освободить ресурсы
+                    time.sleep(0.1)
             
             # Пауза перед перезапуском для стабильности
             time.sleep(1.0)
@@ -374,15 +395,22 @@ class CameraStream:
                 
         except Exception as e:
             print(f"[CameraStream] Error restarting camera {self.camera_id}: {e}", flush=True)
-            # Гарантируем очистку при ошибке
-            if self.pipeline:
+            # Гарантируем очистку при ошибке (с защитой от segfault)
+            if self.pipeline is not None:
                 try:
                     with _suppress_stderr():
-                        self.pipeline.stop()
+                        try:
+                            if hasattr(self.pipeline, 'stop'):
+                                self.pipeline.stop()
+                        except (RuntimeError, AttributeError, Exception):
+                            # Игнорируем ошибки при остановке
+                            pass
                 except Exception:
                     pass
                 finally:
                     self.pipeline = None
+                    # Даем время системе освободить ресурсы
+                    time.sleep(0.1)
             return False
     
     def _stream_loop(self):
@@ -550,27 +578,54 @@ class CameraStream:
         self._cleanup()
     
     def _cleanup(self):
-        """Очистка ресурсов."""
-        if self.cap:
+        """Очистка ресурсов с защитой от segfault."""
+        # Освобождаем USB камеру
+        if self.cap is not None:
             try:
-                with _suppress_stderr():
-                    self.cap.release()
+                # Проверяем, что камера еще открыта перед освобождением
+                if hasattr(self.cap, 'isOpened') and self.cap.isOpened():
+                    with _suppress_stderr():
+                        self.cap.release()
+                elif hasattr(self.cap, 'release'):
+                    # Если isOpened недоступен, пытаемся освободить напрямую
+                    with _suppress_stderr():
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
             except Exception:
                 pass
-            self.cap = None
-        if self.pipeline:
+            finally:
+                self.cap = None
+        
+        # Освобождаем RealSense pipeline
+        if self.pipeline is not None:
             try:
+                # RealSense требует особой осторожности
                 with _suppress_stderr():
-                    self.pipeline.stop()
+                    try:
+                        # Проверяем, что pipeline еще активен
+                        if hasattr(self.pipeline, 'stop'):
+                            self.pipeline.stop()
+                    except (RuntimeError, AttributeError, Exception):
+                        # Игнорируем ошибки при остановке
+                        pass
             except Exception:
                 pass
-            self.pipeline = None
-        if self.udp_socket:
+            finally:
+                # Гарантированно очищаем ссылку
+                self.pipeline = None
+                # Даем время системе освободить ресурсы
+                time.sleep(0.1)
+        
+        # Освобождаем UDP сокет
+        if self.udp_socket is not None:
             try:
                 self.udp_socket.close()
             except Exception:
                 pass
-            self.udp_socket = None
+            finally:
+                self.udp_socket = None
     
     def stop(self):
         """Остановка потока камеры."""
@@ -701,8 +756,26 @@ def get_all_streams() -> Dict:
 
 # ─── Цикл сервиса ──────────────────────────────────────────────────────────────
 
+def _cleanup_all_streams():
+    """Безопасная очистка всех потоков камер при завершении."""
+    print("[CameraStream] Cleaning up all camera streams...", flush=True)
+    with _streams_lock:
+        stream_ids = list(_camera_streams.keys())
+        for cid in stream_ids:
+            try:
+                stop_camera_stream(cid)
+            except Exception as e:
+                print(f"[CameraStream] Error stopping stream {cid}: {e}", flush=True)
+    print("[CameraStream] All streams cleaned up", flush=True)
+
+
 def run_service_loop():
     service_name = get_service_name()
+    
+    # Регистрируем очистку при завершении (atexit работает в любом потоке)
+    # signal.signal() работает только в главном потоке, поэтому не используем его здесь
+    atexit.register(_cleanup_all_streams)
+    
     try:
         manager = services_manager.get_services_manager()
     except Exception as e:
@@ -717,41 +790,45 @@ def run_service_loop():
         "streams_active": 0
     })
     
-    while True:
-        try:
-            svc_info = manager.get_service(service_name)
-            svc_status = svc_info.get("status", "ON")
-            
-            if svc_status == "OFF":
-                print("[CameraStream] Service OFF — stopping all streams", flush=True)
-                for cid in list(_camera_streams.keys()):
-                    stop_camera_stream(cid)
+    try:
+        while True:
+            try:
+                svc_info = manager.get_service(service_name)
+                svc_status = svc_info.get("status", "ON")
+                
+                if svc_status == "OFF":
+                    print("[CameraStream] Service OFF — stopping all streams", flush=True)
+                    _cleanup_all_streams()
+                    status.unregister_service_data(service_name)
+                    break
+                elif svc_status == "SLEEP":
+                    time.sleep(1)
+                    continue
+                
+                cameras = detect_cameras()
+                prev = status.get_service_data(service_name) or {}
+                status.register_service_data(service_name, {
+                    "status": "running",
+                    "started_at": prev.get("started_at", time.time()),
+                    "cameras_detected": len(cameras),
+                    "streams_active": len(_camera_streams),
+                    "cameras": cameras,
+                    "realsense_udp_port": REALSENSE_UDP_PORT
+                })
+                time.sleep(5)
+                
+            except KeyboardInterrupt:
+                _cleanup_all_streams()
                 status.unregister_service_data(service_name)
                 break
-            elif svc_status == "SLEEP":
+            except Exception as e:
+                print(f"[CameraStream] Error: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
                 time.sleep(1)
-                continue
-            
-            cameras = detect_cameras()
-            prev = status.get_service_data(service_name) or {}
-            status.register_service_data(service_name, {
-                "status": "running",
-                "started_at": prev.get("started_at", time.time()),
-                "cameras_detected": len(cameras),
-                "streams_active": len(_camera_streams),
-                "cameras": cameras,
-                "realsense_udp_port": REALSENSE_UDP_PORT
-            })
-            time.sleep(5)
-            
-        except KeyboardInterrupt:
-            for cid in list(_camera_streams.keys()):
-                stop_camera_stream(cid)
-            status.unregister_service_data(service_name)
-            break
-        except Exception as e:
-            print(f"[CameraStream] Error: {e}", flush=True)
-            time.sleep(1)
+    finally:
+        # Гарантированная очистка при любом завершении
+        _cleanup_all_streams()
 
 
 def run():

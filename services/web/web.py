@@ -1214,7 +1214,7 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                 print(f"Web server started on port {port}", flush=True)
                 print(f"Serving files from: {build_path}", flush=True)
                 print(f"API endpoints registered: {len(flask_app.url_map._rules)} routes", flush=True)
-            sys.stdout.flush()
+                sys.stdout.flush()
             
             shutdown_requested = threading.Event()
             web_shutdown_allowed = threading.Event()
@@ -1335,7 +1335,7 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                 print(f"Port {found_port} is available. Using it instead...", flush=True)
                 run_web_server(port=found_port, build_dir=build_dir)
                 return
-            else:
+        else:
                 print(f"Error: All ports 8080-8085 are in use. Please free a port or kill existing web server.", flush=True)
                 print(f"Attempting to kill process on port {port}...", flush=True)
                 try:
@@ -1350,8 +1350,8 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                 except Exception:
                     pass
                 print(f"Error: Could not free port {port}. Please manually kill the process using it.", flush=True)
-        else:
-            print(f"Error starting web server: {str(e)}", flush=True)
+    except Exception as e:
+        print(f"Error starting web server: {str(e)}", flush=True)
     except KeyboardInterrupt:
         print("\n[WEB] Web server stopped", flush=True)
 
@@ -1370,9 +1370,9 @@ def run():
     
     if os.environ.get('RGW2_DEBUG'):
         print(f"Web service starting from: {current_dir}", flush=True)
-    print(f"Build directory: {build_dir}", flush=True)
-    print(f"Port: {port}", flush=True)
-    sys.stdout.flush()
+        print(f"Build directory: {build_dir}", flush=True)
+        print(f"Port: {port}", flush=True)
+        sys.stdout.flush()
     
     run_web_server(port=port, build_dir=str(build_dir))
 

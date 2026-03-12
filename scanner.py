@@ -50,23 +50,34 @@ def load_ips() -> Dict[str, Any]:
         }
 
 
-def save_ips(ips: List[str], scan_timestamp: float):
+def save_ips(ips: List[str], scan_timestamp: float, network_base: Optional[str] = None):
     """
     Сохраняет найденные IP адреса в файл.
+    Удаляет старые IP из той же подсети перед добавлением новых.
     
     Args:
         ips: Список найденных IP адресов
         scan_timestamp: Временная метка сканирования
+        network_base: Базовая подсеть (например, "192.168.88" или "192.168.123")
+                      Если указана, удаляет старые IP из этой подсети перед добавлением новых
     """
     ips_file = ensure_data_dir()
     
     # Загружаем существующие данные
     data = load_ips()
+    existing_ips = data.get("ips", [])
     
-    # Обновляем данные - храним только последний скан
+    # Если указана подсеть, удаляем старые IP из этой подсети
+    if network_base:
+        existing_ips = [ip for ip in existing_ips if not ip.startswith(network_base + ".")]
+    
+    # Объединяем существующие IP (без удаленных) с новыми, убираем дубликаты
+    all_ips = list(dict.fromkeys(existing_ips + ips))
+    
+    # Обновляем данные
     data["last_scan"] = scan_timestamp
     data["scan_count"] = data.get("scan_count", 0) + 1
-    data["ips"] = ips
+    data["ips"] = all_ips
     
     # Удаляем историю, если она есть (больше не храним)
     if "history" in data:
@@ -75,7 +86,7 @@ def save_ips(ips: List[str], scan_timestamp: float):
     try:
         with open(ips_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Saved {len(ips)} IP(s) to {ips_file}", flush=True)
+        print(f"Saved {len(all_ips)} IP(s) to {ips_file} (added {len(ips)} from subnet {network_base if network_base else 'default'})", flush=True)
     except Exception as e:
         print(f"Error saving ips.json: {str(e)}", flush=True)
 
@@ -110,8 +121,8 @@ def scan_network(port: Optional[int] = None, network_base: Optional[str] = None)
         scan_end = time.time()
         scan_duration = scan_end - scan_start
         
-        # Сохраняем результаты
-        save_ips(found_ips, scan_end)
+        # Сохраняем результаты (объединяем с существующими, удаляя старые из той же подсети)
+        save_ips(found_ips, scan_end, network_base=network_base)
         
         network_info = f"subnet {network_base}" if network_base else "default network"
         print(f"Scan completed in {scan_duration:.2f}s on {network_info}. Found {len(found_ips)} IP(s): {found_ips}", flush=True)

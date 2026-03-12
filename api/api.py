@@ -123,6 +123,32 @@ def camera_mjpeg_stream(camera_id):
     )
 
 
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    """Возвращает статус робота."""
+    try:
+        import status
+        return jsonify(status.get_robot_status())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error getting status: {str(e)}"
+        }), 500
+
+
+@app.route('/status', methods=['GET'])
+def status_short():
+    """Короткий путь для /status (используется в network_api)."""
+    try:
+        import status
+        return jsonify(status.get_robot_status())
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error getting status: {str(e)}"
+        }), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Проверка здоровья API."""

@@ -242,8 +242,17 @@ class RobotAPI:
                         with open(commands_path, 'w', encoding='utf-8') as f:
                             json.dump(data, f, indent=4, ensure_ascii=False)
             except Exception:
-                # Если файл поврежден, создаем новый
-                pass
+                # Файл поврежден — пересоздаём с дефолтными командами
+                default_data = {
+                    "version": "1.0.0",
+                    "lastUpdated": None,
+                    "commands": [default_update_command]
+                }
+                try:
+                    with open(commands_path, 'w', encoding='utf-8') as f:
+                        json.dump(default_data, f, indent=4, ensure_ascii=False)
+                except Exception:
+                    pass
         else:
             # Создаем новый файл с дефолтной командой
             default_commands = {

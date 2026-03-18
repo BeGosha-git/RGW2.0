@@ -6,7 +6,6 @@ import os
 import sys
 import platform
 import subprocess
-import venv
 import json
 import re
 from pathlib import Path
@@ -1537,93 +1536,81 @@ def main(python_version: str = None, debug: bool = False):
                     pass
             
             # Автоматически настраиваем venv для ВСЕХ доступных версий Python (3.8, 3.11, 3.13) если есть интернет
-            # Пропускаем создание venv, если уже запущены из venv (после os.execv)
-            if venv_already_active:
-                if debug:
-                    print("Already running from venv, skipping venv setup", flush=True)
-                venv_path = Path("venv").resolve()
-                if not venv_path.exists():
-                    # Если venv не существует, пытаемся найти venv-{version}
-                    python_version_from_env = os.environ.get('PYTHON_VERSION')
-                    if python_version_from_env:
-                        venv_path = Path(f"venv-{python_version_from_env}").resolve()
-            else:
-                # Если есть интернет - создаем venv для ВСЕХ доступных версий Python
-                available_versions = get_available_python_versions()
-                if check_internet():
-                    target_versions = ["3.13", "3.11", "3.8"]
-                    for version in target_versions:
-                        if version in available_versions:
-                            venv_check = Path(f"venv-{version}")
-                            venv_ready_check = venv_check / ".ready"
-                            # Создаем venv только если его нет или он не готов
-                            if not (venv_check.exists() and venv_ready_check.exists()):
-                                if debug:
-                                    print(f"Setting up virtual environment for Python {version}...", flush=True)
-                                setup_virtual_environment_for_version(version)
-                
-                # Определяем версию Python для использования
-                selected_version = python_version
-                if not selected_version:
-                    # Ищем первую доступную готовую версию Python
-                    for version in ["3.13", "3.11", "3.8"]:
-                        if version in available_versions:
-                            venv_check = Path(f"venv-{version}")
-                            venv_ready_check = venv_check / ".ready"
-                            if venv_check.exists() and venv_ready_check.exists():
-                                selected_version = version
-                                break
-                    
-                    # Если не нашли готовую версию, используем первую доступную
-                    if not selected_version and available_versions:
-                        selected_version = available_versions[0]
-                
-                if selected_version:
-                    # Создаем venv для выбранной версии если нужно (на случай если не создался выше)
-                    if not setup_virtual_environment(selected_version):
-                        if debug:
-                            print(f"Warning: Failed to setup virtual environment for Python {selected_version}", flush=True)
-                    # Используем venv для указанной версии
-                    venv_path = Path(f"venv-{selected_version}").resolve()
-                    # Сохраняем версию в переменную окружения для использования в run.py
-                    os.environ['PYTHON_VERSION'] = selected_version
-                else:
-                    # Если версия не указана и нет доступных, создаем venv для всех доступных версий
-                    if debug:
-                        print("Setting up virtual environments for all available Python versions...", flush=True)
-                    if not setup_virtual_environment(None):
-                        if debug:
-                            print("Warning: Failed to setup some virtual environments", flush=True)
-                    # Используем основной venv (созданный из первой доступной версии)
-                    venv_path = Path("venv").resolve()
-                    # Очищаем переменную окружения если версия не указана
-                    if 'PYTHON_VERSION' in os.environ:
-                        del os.environ['PYTHON_VERSION']
-        
-        if is_windows():
-            venv_python = venv_path / "Scripts" / "python.exe"
-        else:
-            venv_python = venv_path / "bin" / "python3"
-            if not venv_python.exists():
-                venv_python = venv_path / "bin" / "python"
-        
-        if venv_python.exists():
-            venv_python_resolved = venv_python.resolve()
-            current_python = Path(sys.executable).resolve()
+            available_versions = get_available_python_versions()
+            if check_internet():
+                target_versions = ["3.13", "3.11", "3.8"]
+                for version in target_versions:
+                    if version in available_versions:
+                        venv_check = Path(f"venv-{version}")
+                        venv_ready_check = venv_check / ".ready"
+                        # Создаем venv только если его нет или он не готов
+                        if not (venv_check.exists() and venv_ready_check.exists()):
+                            if debug:
+                                print(f"Setting up virtual environment for Python {version}...", flush=True)
+                            setup_virtual_environment_for_version(version)
             
-            try:
-                venv_same = venv_python_resolved.samefile(current_python)
-            except (OSError, ValueError):
-                venv_same = (str(venv_python_resolved) == str(current_python))
+            # Определяем версию Python для использования
+            selected_version = python_version
+            if not selected_version:
+                # Ищем первую доступную готовую версию Python
+                for version in ["3.13", "3.11", "3.8"]:
+                    if version in available_versions:
+                        venv_check = Path(f"venv-{version}")
+                        venv_ready_check = venv_check / ".ready"
+                        if venv_check.exists() and venv_ready_check.exists():
+                            selected_version = version
+                            break
+                
+                # Если не нашли готовую версию, используем первую доступную
+                if not selected_version and available_versions:
+                    selected_version = available_versions[0]
             
-            if not venv_same:
-                os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
-        else:
-            selected_version = python_version or os.environ.get('PYTHON_VERSION')
             if selected_version:
-                print(f"Error: venv-{selected_version} not found or incomplete", flush=True)
+                # Создаем venv для выбранной версии если нужно (на случай если не создался выше)
+                if not setup_virtual_environment(selected_version):
+                    if debug:
+                        print(f"Warning: Failed to setup virtual environment for Python {selected_version}", flush=True)
+                # Используем venv для указанной версии
+                venv_path = Path(f"venv-{selected_version}").resolve()
+                # Сохраняем версию в переменную окружения для использования в run.py
+                os.environ['PYTHON_VERSION'] = selected_version
             else:
-                print("Error: venv not found or incomplete", flush=True)
+                # Если версия не указана и нет доступных, создаем venv для всех доступных версий
+                if debug:
+                    print("Setting up virtual environments for all available Python versions...", flush=True)
+                if not setup_virtual_environment(None):
+                    if debug:
+                        print("Warning: Failed to setup some virtual environments", flush=True)
+                # Используем основной venv (созданный из первой доступной версии)
+                venv_path = Path("venv").resolve()
+                # Очищаем переменную окружения если версия не указана
+                if 'PYTHON_VERSION' in os.environ:
+                    del os.environ['PYTHON_VERSION']
+
+            if is_windows():
+                venv_python = venv_path / "Scripts" / "python.exe"
+            else:
+                venv_python = venv_path / "bin" / "python3"
+                if not venv_python.exists():
+                    venv_python = venv_path / "bin" / "python"
+
+            if venv_python.exists():
+                venv_python_resolved = venv_python.resolve()
+                current_python = Path(sys.executable).resolve()
+
+                try:
+                    venv_same = venv_python_resolved.samefile(current_python)
+                except (OSError, ValueError):
+                    venv_same = (str(venv_python_resolved) == str(current_python))
+
+                if not venv_same:
+                    os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
+            else:
+                selected_version = python_version or os.environ.get('PYTHON_VERSION')
+                if selected_version:
+                    print(f"Error: venv-{selected_version} not found or incomplete", flush=True)
+                else:
+                    print("Error: venv not found or incomplete", flush=True)
         
         if is_windows():
             try:

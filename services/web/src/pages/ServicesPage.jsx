@@ -30,22 +30,28 @@ function ServicesPage() {
         setServices(result.services || {})
         setError(null)
         
-        // Загружаем детали для каждого сервиса
+        // Загружаем детали для всех сервисов параллельно
+        const serviceNames = Object.keys(result.services || {})
+        const detailResults = await Promise.all(
+          serviceNames.map(serviceName =>
+            fetch(`/api/services/${serviceName}`)
+              .then(r => r.json())
+              .catch(err => {
+                console.error(`Error fetching details for ${serviceName}:`, err)
+                return null
+              })
+          )
+        )
         const details = {}
-        for (const serviceName of Object.keys(result.services || {})) {
-          try {
-            const detailResponse = await fetch(`/api/services/${serviceName}`)
-            const detailResult = await detailResponse.json()
-            if (detailResult.success) {
-              details[serviceName] = {
-                dependencies: detailResult.dependencies || [],
-                depending_services: detailResult.depending_services || []
-              }
+        serviceNames.forEach((serviceName, i) => {
+          const detailResult = detailResults[i]
+          if (detailResult && detailResult.success) {
+            details[serviceName] = {
+              dependencies: detailResult.dependencies || [],
+              depending_services: detailResult.depending_services || []
             }
-          } catch (err) {
-            console.error(`Error fetching details for ${serviceName}:`, err)
           }
-        }
+        })
         setServiceDetails(details)
       } else {
         setError(result.message || 'Ошибка загрузки сервисов')

@@ -251,20 +251,21 @@ class ServicesManager:
         """
         if status not in ["ON", "OFF", "SLEEP"]:
             return False
-        
-        data = self.load_services()
-        services = data.get("services", {})
-        
-        if service_name not in services:
-            self.get_service(service_name)  # Создаем если нет
+
+        with _services_file_lock:
             data = self.load_services()
             services = data.get("services", {})
-        
-        services[service_name]["status"] = status
-        services[service_name]["last_status_change"] = datetime.now().isoformat()
-        
-        data["services"] = services
-        self.save_services(data)
+
+            if service_name not in services:
+                self.get_service(service_name)  # Создаем если нет
+                data = self.load_services()
+                services = data.get("services", {})
+
+            services[service_name]["status"] = status
+            services[service_name]["last_status_change"] = datetime.now().isoformat()
+
+            data["services"] = services
+            self.save_services(data)
         return True
     
     def update_service_enabled(self, service_name: str, enabled: bool) -> bool:
@@ -279,26 +280,27 @@ class ServicesManager:
         Returns:
             True если успешно
         """
-        data = self.load_services()
-        services = data.get("services", {})
-        
-        if service_name not in services:
-            self.get_service(service_name)  # Создаем если нет
+        with _services_file_lock:
             data = self.load_services()
             services = data.get("services", {})
-        
-        if "parameters" not in services[service_name]:
-            services[service_name]["parameters"] = {}
-        
-        services[service_name]["parameters"]["enabled"] = bool(enabled)
-        services[service_name]["last_enabled_change"] = datetime.now().isoformat()
-        
-        expected_status = "ON" if enabled else "OFF"
-        if services[service_name].get("status") != expected_status:
-            services[service_name]["status"] = expected_status
-        
-        data["services"] = services
-        self.save_services(data)
+
+            if service_name not in services:
+                self.get_service(service_name)  # Создаем если нет
+                data = self.load_services()
+                services = data.get("services", {})
+
+            if "parameters" not in services[service_name]:
+                services[service_name]["parameters"] = {}
+
+            services[service_name]["parameters"]["enabled"] = bool(enabled)
+            services[service_name]["last_enabled_change"] = datetime.now().isoformat()
+
+            expected_status = "ON" if enabled else "OFF"
+            if services[service_name].get("status") != expected_status:
+                services[service_name]["status"] = expected_status
+
+            data["services"] = services
+            self.save_services(data)
         return True
     
     def update_service_parameter(self, service_name: str, parameter: str, value: Any) -> bool:
@@ -313,24 +315,25 @@ class ServicesManager:
         Returns:
             True если успешно
         """
-        data = self.load_services()
-        services = data.get("services", {})
-        
-        if service_name not in services:
-            self.get_service(service_name)  # Создаем если нет
+        with _services_file_lock:
             data = self.load_services()
             services = data.get("services", {})
-        
-        if "parameters" not in services[service_name]:
-            services[service_name]["parameters"] = {}
-        
-        services[service_name]["parameters"][parameter] = value
-        services[service_name]["last_parameter_change"] = datetime.now().isoformat()
-        
-        data["services"] = services
-        self.save_services(data)
+
+            if service_name not in services:
+                self.get_service(service_name)  # Создаем если нет
+                data = self.load_services()
+                services = data.get("services", {})
+
+            if "parameters" not in services[service_name]:
+                services[service_name]["parameters"] = {}
+
+            services[service_name]["parameters"][parameter] = value
+            services[service_name]["last_parameter_change"] = datetime.now().isoformat()
+
+            data["services"] = services
+            self.save_services(data)
         return True
-    
+
     def reset_service_parameter(self, service_name: str, parameter: str) -> bool:
         """
         Сбрасывает параметр сервиса к дефолтному значению.
@@ -342,29 +345,30 @@ class ServicesManager:
         Returns:
             True если успешно
         """
-        data = self.load_services()
-        services = data.get("services", {})
-        
-        if service_name not in services:
-            return False
-        
-        defaults = services[service_name].get("defaults", {})
-        default_value = defaults.get(parameter)
-        
-        if default_value is None:
-            # Если нет в defaults, удаляем параметр
-            if "parameters" in services[service_name]:
-                services[service_name]["parameters"].pop(parameter, None)
-        else:
-            # Устанавливаем дефолтное значение
-            if "parameters" not in services[service_name]:
-                services[service_name]["parameters"] = {}
-            services[service_name]["parameters"][parameter] = default_value
-        
-        services[service_name]["last_parameter_change"] = datetime.now().isoformat()
-        
-        data["services"] = services
-        self.save_services(data)
+        with _services_file_lock:
+            data = self.load_services()
+            services = data.get("services", {})
+
+            if service_name not in services:
+                return False
+
+            defaults = services[service_name].get("defaults", {})
+            default_value = defaults.get(parameter)
+
+            if default_value is None:
+                # Если нет в defaults, удаляем параметр
+                if "parameters" in services[service_name]:
+                    services[service_name]["parameters"].pop(parameter, None)
+            else:
+                # Устанавливаем дефолтное значение
+                if "parameters" not in services[service_name]:
+                    services[service_name]["parameters"] = {}
+                services[service_name]["parameters"][parameter] = default_value
+
+            services[service_name]["last_parameter_change"] = datetime.now().isoformat()
+
+            data["services"] = services
+            self.save_services(data)
         return True
     
     def get_all_services(self) -> Dict[str, Any]:
@@ -803,26 +807,26 @@ class ServicesManager:
             
             # Если зависимости изменились, обновляем
             if set(detected_dependencies) != set(current_dependencies):
-                data = self.load_services()
-                services = data.get("services", {})
-                
-                if service_name not in services:
-                    self.get_service(service_name)  # Создаем если нет
+                with _services_file_lock:
                     data = self.load_services()
                     services = data.get("services", {})
-                
-                # Обновляем зависимости в parameters
-                if "parameters" not in services[service_name]:
-                    services[service_name]["parameters"] = {}
-                
-                services[service_name]["parameters"]["dependencies"] = detected_dependencies
-                
-                data["services"] = services
-                self.save_services(data)
-                
+
+                    if service_name not in services:
+                        self.get_service(service_name)  # Создаем если нет
+                        data = self.load_services()
+                        services = data.get("services", {})
+
+                    if "parameters" not in services[service_name]:
+                        services[service_name]["parameters"] = {}
+
+                    services[service_name]["parameters"]["dependencies"] = detected_dependencies
+
+                    data["services"] = services
+                    self.save_services(data)
+
                 logger.info(f"Updated dependencies for {service_name}: {detected_dependencies}")
                 return True
-            
+
             return False
         except Exception as e:
             logger.error(f"Error updating dependencies for {service_name}: {e}", exc_info=True)

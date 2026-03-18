@@ -585,10 +585,10 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
         # Загружаем файл
         print(f"Downloading {filepath} (local: {local_size}, remote: {remote_size})...", flush=True)
         try:
-        if download_file_from_robot(source_ip, filepath, local_path):
+            if download_file_from_robot(source_ip, filepath, local_path):
                 updated_count += 1
                 print(f"Successfully downloaded {filepath}", flush=True)
-        else:
+            else:
                 print(f"Failed to download {filepath}", flush=True)
                 error_count += 1
                 success = False
@@ -681,7 +681,7 @@ def is_this_host(ip: str, port: int) -> bool:
         s.close()
         return local_addr == ip
     except Exception:
-    return False
+        return False
 
 
 def get_ips_from_file() -> List[str]:
@@ -955,8 +955,8 @@ def update_system():
     # 2. Были только пропуски (same size) и нет ошибок (error_count = 0)
     # НЕ обновляем версию если были ошибки загрузки файлов
     should_update_version = success or (error_count == 0 and (updated_count > 0 or skipped_count > 0))
-    
-        version_file = "data/version.json"
+
+    version_file = "data/version.json"
     if should_update_version and os.path.exists(version_file):
         try:
             with open(version_file, 'r', encoding='utf-8') as f:

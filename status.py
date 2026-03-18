@@ -43,8 +43,7 @@ def unregister_service_data(service_name: str) -> None:
         service_name: Имя сервиса
     """
     global _service_data_registry
-    if service_name in _service_data_registry:
-        del _service_data_registry[service_name]
+    _service_data_registry.pop(service_name, None)
 
 
 def get_service_data(service_name: str) -> Optional[Dict[str, Any]]:
@@ -203,11 +202,11 @@ def get_robot_status() -> Dict[str, Any]:
         }
             
     except Exception as e:
-        status_data["network"]["error"] = str(e)
         status_data["network"] = {
             "hostname": socket.gethostname() if 'socket' in dir() else "UNKNOWN",
             "local_ip": "UNKNOWN",
-            "interface_ip": "UNKNOWN"
+            "interface_ip": "UNKNOWN",
+            "error": str(e)
         }
     
     return status_data

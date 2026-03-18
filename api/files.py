@@ -59,14 +59,17 @@ class FilesAPI:
             if os.path.exists(filepath):
                 if os.path.isfile(filepath):
                     os.remove(filepath)
+                    return {
+                        "success": True,
+                        "message": f"{filepath} deleted successfully",
+                        "filepath": filepath
+                    }
                 else:
-                    shutil.rmtree(filepath)
-                
-                return {
-                    "success": True,
-                    "message": f"{filepath} deleted successfully",
-                    "filepath": filepath
-                }
+                    return {
+                        "success": False,
+                        "message": f"{filepath} is a directory — use delete_directory endpoint instead",
+                        "filepath": filepath
+                    }
             else:
                 return {
                     "success": False,

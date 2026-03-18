@@ -50,7 +50,7 @@ SERVICE_NAME = "camera_stream"
 
 # Глобальное хранилище потоков камер
 _camera_streams: Dict[str, Dict] = {}
-_streams_lock = threading.Lock()
+_streams_lock = threading.RLock()
 
 # UDP порт для RealSense стрима (отдельный стабильный порт)
 REALSENSE_UDP_PORT = 5006
@@ -164,6 +164,42 @@ def detect_cameras() -> List[Dict]:
             pass
     
     return cameras
+
+
+def get_selected_cameras() -> List[Dict]:
+    """
+    Возвращает выбранные камеры: всегда usb_2 и еще одну из usb_1, usb_3, usb_4, usb_5.
+    Перебирает от 1 до 5 без повторений, если не получается захватить - ничего не возвращает.
+    """
+    all_cameras = detect_cameras()
+    selected = []
+    
+    # Всегда добавляем usb_2 если доступна
+    usb_2_camera = None
+    for cam in all_cameras:
+        if cam.get("id") == "usb_2":
+            usb_2_camera = cam
+            break
+    
+    if usb_2_camera:
+        selected.append(usb_2_camera)
+    else:
+        # Если usb_2 недоступна, возвращаем пустой список
+        return []
+    
+    # Перебираем usb_1, usb_3, usb_4, usb_5 без повторений
+    candidates = [1, 3, 4, 5]  # Исключаем 2, так как уже добавили
+    for idx in candidates:
+        camera_id = f"usb_{idx}"
+        for cam in all_cameras:
+            if cam.get("id") == camera_id:
+                # Проверяем, что камера не usb_2 (на случай если она уже добавлена)
+                if cam.get("id") != "usb_2":
+                    selected.append(cam)
+                    return selected  # Возвращаем как только нашли одну
+    
+    # Если не нашли вторую камеру, возвращаем только usb_2
+    return selected
 
 
 def _find_camera(camera_id: str, cameras: List[Dict]) -> Optional[Dict]:
@@ -668,7 +704,6 @@ class CameraStream:
             if buf is not None:
                 return buf.tobytes()
         except Exception:
-            pass
             return None
 
 
@@ -692,44 +727,51 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
     with _streams_lock:
         if camera_id in _camera_streams:
             return True  # уже запущен
-        
-        cam_idx = camera_info.get("index", 0)
 
-        # Для RealSense камеры всегда используем отдельный стабильный UDP порт
-        if camera_info["type"] == "realsense":
-            if udp_port is None:
-                udp_port = REALSENSE_UDP_PORT
-            # Для RealSense используем разрешение 80% от максимального (1024x576)
-            if width is None:
-                width = 1024  # 80% от 1280
-            if height is None:
-                height = 576  # 80% от 720
-            # Фиксируем FPS на 30
-            fps = 30
-        else:
-            # UDP для первых 3 USB камер
-            if udp_port is None and cam_idx < 3:
-                udp_port = 5005 + cam_idx
-            # Разрешение: для UDP 80% от максимального, иначе 640x480
-            if width is None:
-                width = 1024 if udp_port else 640  # 80% от 1280
-            if height is None:
-                height = 576 if udp_port else 480  # 80% от 720
-            # Фиксируем FPS на 30
-            fps = 30
+    cam_idx = camera_info.get("index", 0)
 
-        stream = CameraStream(camera_info, udp_port=udp_port, width=width, height=height, fps=fps)
-        if stream.start():
-            _camera_streams[camera_id] = {
-                "stream": stream,
-                "camera_info": camera_info,
-                "started_at": time.time(),
-                "udp_port": udp_port
-            }
-            print(f"[CameraStream] Started camera {camera_id} with UDP port {udp_port}", flush=True)
+    # Для RealSense камеры всегда используем отдельный стабильный UDP порт
+    if camera_info["type"] == "realsense":
+        if udp_port is None:
+            udp_port = REALSENSE_UDP_PORT
+        # Для RealSense используем разрешение 80% от максимального (1024x576)
+        if width is None:
+            width = 1024  # 80% от 1280
+        if height is None:
+            height = 576  # 80% от 720
+        # Фиксируем FPS на 30
+        fps = 30
+    else:
+        # UDP для первых 3 USB камер
+        if udp_port is None and cam_idx < 3:
+            udp_port = 5005 + cam_idx
+        # Разрешение: для UDP 80% от максимального, иначе 640x480
+        if width is None:
+            width = 1024 if udp_port else 640  # 80% от 1280
+        if height is None:
+            height = 576 if udp_port else 480  # 80% от 720
+        # Фиксируем FPS на 30
+        fps = 30
+
+    # Инициализация стрима выполняется вне лока — может занимать 0.5–1.5 сек
+    stream = CameraStream(camera_info, udp_port=udp_port, width=width, height=height, fps=fps)
+    if not stream.start():
+        return False
+
+    with _streams_lock:
+        # Повторная проверка после захвата лока: параллельный вызов мог успеть запустить стрим
+        if camera_id in _camera_streams:
+            stream.stop()
             return True
-    
-    return False
+        _camera_streams[camera_id] = {
+            "stream": stream,
+            "camera_info": camera_info,
+            "started_at": time.time(),
+            "udp_port": udp_port
+        }
+        print(f"[CameraStream] Started camera {camera_id} with UDP port {udp_port}", flush=True)
+
+    return True
 
 
 def stop_camera_stream(camera_id: str) -> bool:

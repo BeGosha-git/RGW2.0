@@ -108,6 +108,10 @@ class CommandExecutor:
                         self.process.stdin.flush()
                         if not keep_stdin_open:
                             self.process.stdin.close()
+            elif not keep_stdin_open and self.process.stdin:
+                with self.stdin_lock:
+                    if self.process.stdin:
+                        self.process.stdin.close()
             
             # Обработка вывода в реальном времени
             while self.process.poll() is None or not (stdout_queue.empty() and stderr_queue.empty()):
@@ -135,10 +139,20 @@ class CommandExecutor:
                     if self.process.stdin:
                         self.process.stdin.close()
             
-            # Ожидание завершения потоков
-            stdout_thread.join(timeout=1)
-            stderr_thread.join(timeout=1)
-            
+            # Ожидание завершения потоков чтения перед финальным дрейном
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+
+            # Финальный дрейн очередей — данные, записанные после выхода из цикла
+            while not stdout_queue.empty():
+                _, line = stdout_queue.get_nowait()
+                if self.log_callback:
+                    self.log_callback(line.rstrip())
+            while not stderr_queue.empty():
+                _, line = stderr_queue.get_nowait()
+                if self.log_callback:
+                    self.log_callback(f"ERROR: {line.rstrip()}")
+
             return self.process.returncode if self.process.returncode is not None else 0
             
         except Exception as e:

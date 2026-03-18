@@ -327,10 +327,10 @@ function RobotsPage() {
 
         const requestController = new AbortController()
         const timeoutId = setTimeout(() => requestController.abort(), timeout)
-        
+
         // Объединяем сигналы: отменяем если отменен основной запрос или истек таймаут
-        const combinedSignal = controller.signal.aborted 
-          ? controller.signal 
+        const combinedSignal = typeof AbortSignal.any === 'function'
+          ? AbortSignal.any([controller.signal, requestController.signal])
           : requestController.signal
         
         try {
@@ -530,10 +530,19 @@ function RobotsPage() {
     }
   }
 
+  // Команды загружаются один раз при монтировании
+  useEffect(() => {
+    fetchCommands()
+    return () => {
+      if (errorTimeoutRef.current) {
+        clearTimeout(errorTimeoutRef.current)
+      }
+    }
+  }, [])
+
   useEffect(() => {
     // Первый запрос сразу
     fetchRobots()
-    fetchCommands() // Загружаем команды при монтировании
     
     // Последующие запросы каждые 20 секунд, но не блокируем UI
     const interval = setInterval(() => {
@@ -634,20 +643,22 @@ function RobotsPage() {
     const fetchLocalCameras = async () => {
       try {
         const response = await fetch('/api/cameras/list')
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`)
+        }
+        const contentType = response.headers.get('content-type')
+        if (!contentType || !contentType.includes('application/json')) {
+          throw new Error('Response is not JSON')
+        }
         const data = await response.json()
         if (data.success && data.cameras) {
           setLocalCameras(data.cameras)
-          // Автоматически запускаем потоки для всех камер
-          for (const camera of data.cameras) {
-            try {
-              await fetch(`/api/cameras/${camera.id}/start`, { method: 'POST' })
-            } catch (e) {
-              console.error(`Failed to start camera ${camera.id}:`, e)
-            }
-          }
+        } else {
+          setLocalCameras([])
         }
       } catch (e) {
         console.error('Error fetching local cameras:', e)
+        setLocalCameras([])
       }
     }
     
@@ -792,9 +803,9 @@ function RobotsPage() {
       console.log(`Executing command "${button.command}" for robot ${robotId} (${robot.ip})`)
 
       // Определяем таймаут в зависимости от типа команды
-      // Для команд обновления используем увеличенный таймаут (5 минут)
+      // Для команд обновления используем увеличенный таймаут (1 минута)
       const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && button.args.includes('update.py')
-      const timeout = isUpdateCommand ? 60 : undefined // 5 минут для обновления
+      const timeout = isUpdateCommand ? 60 : undefined // 1 минута для обновления
       
       const response = await fetch('/api/network/send', {
         method: 'POST',
@@ -1413,13 +1424,13 @@ function RobotsPage() {
         <div className="robots-view-mode">
           <h2 className="robots-title">Просмотр камер</h2>
           
-          {/* Локальные камеры - только usb_2 и usb_3 */}
-          {localCameras.filter(c => c.id === 'usb_2' || c.id === 'usb_3').length > 0 && (
+          {/* Локальные камеры - usb_2 и еще одна из usb_1, usb_3, usb_4, usb_5 */}
+          {localCameras.length > 0 && (
             <div className="cameras-section">
               <h3 className="cameras-section-title">Локальные камеры</h3>
               <div className="cameras-grid">
                 {localCameras
-                  .filter(camera => camera.id === 'usb_2' || camera.id === 'usb_3')
+                  .filter(camera => camera.id && camera.id.startsWith('usb_'))
                   .map((camera) => {
                     const cameraStreamUrl = `/api/cameras/${camera.id}/mjpeg`
                     return (
@@ -1449,29 +1460,22 @@ function RobotsPage() {
             </div>
           )}
           
-          {/* Камеры роботов - только usb_2 и usb_3 */}
+          {/* Камеры роботов - динамические из API */}
           <div className="cameras-section">
             <h3 className="cameras-section-title">Камеры роботов</h3>
             <div className="cameras-grid">
               {paginatedRobots.map((robot) => {
                 const robotIP = robot.ip
-                // Используем актуальные стримы usb_2 и usb_3
-                const cameraStreams = [
-                  {
-                    id: 'usb_2',
-                    name: 'USB Camera 2',
+                // Используем актуальные стримы из localCameras (usb_2 и еще одна)
+                const cameraStreams = localCameras
+                  .filter(camera => camera.id && camera.id.startsWith('usb_'))
+                  .map(camera => ({
+                    id: camera.id,
+                    name: camera.name || `USB Camera ${camera.id.split('_')[1]}`,
                     url: robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
-                      ? `http://${robotIP}:5000/api/cameras/usb_2/mjpeg`
+                      ? `http://${robotIP}:5000/api/cameras/${camera.id}/mjpeg`
                       : null
-                  },
-                  {
-                    id: 'usb_3',
-                    name: 'USB Camera 3',
-                    url: robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
-                      ? `http://${robotIP}:5000/api/cameras/usb_3/mjpeg`
-                      : null
-                  }
-                ]
+                  }))
 
                 return (
                   <div key={robot.id} className="camera-card">

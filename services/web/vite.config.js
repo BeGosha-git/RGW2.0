@@ -13,7 +13,15 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:5000',
         changeOrigin: true,
-      }
+      },
+      // WebSocket proxy for terminal dev mode
+      // In production the frontend connects directly to ws://host:8765
+      '/ws-terminal': {
+        target: 'ws://localhost:8765',
+        ws: true,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ws-terminal/, ''),
+      },
     }
   }
 })

@@ -512,34 +512,7 @@
   color: var(--text-primary);
 }
 
-.camera-stream {
-  width: 100%;
-  height: 200px;
-  border-radius: 20px;
-  overflow: hidden;
-  position: relative;
-  background: black;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.camera-stream img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.camera-error {
-  width: 100%;
-  height: 200px;
-  background: var(--bg-tertiary);
-  border-radius: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-}
+/* WebRTC camera styles are in components/WebRTCVideo.css */
 
 .camera-info {
   margin-top: 0.5rem;
@@ -1011,4 +984,553 @@
 .commands-robots-list::-webkit-scrollbar-thumb:hover,
 .commands-list::-webkit-scrollbar-thumb:hover {
   background: var(--border-hover);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Phone / mobile camera mode
+   ══════════════════════════════════════════════════════════════ */
+
+.phone-mode {
+  display: flex;
+  flex-direction: column;
+  /* Use full viewport height minus the bottom nav */
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  background: var(--bg-primary);
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Camera area (top ~50%) ── */
+.phone-camera-area {
+  flex: 0 0 48%;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  background: #000;
+  overflow: hidden;
+}
+
+.phone-camera-area .camera-stream {
+  border-radius: 0;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+
+.phone-camera-area .camera-stream video {
+  height: 100%;
+  object-fit: cover;
+}
+
+/* "No camera" placeholder */
+.phone-no-camera {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+}
+
+.phone-no-camera-icon {
+  font-size: 2.5rem;
+}
+
+.phone-no-camera p {
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+/* Camera selector dots */
+.phone-cam-dots {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+
+.phone-cam-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.2s, transform 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-cam-dot.active {
+  background: white;
+  transform: scale(1.3);
+}
+
+/* Fullscreen button overlay */
+.phone-fullscreen-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  color: white;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(4px);
+}
+
+/* ── Tab bar ── */
+.phone-tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.phone-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px 6px;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  line-height: 1.2;
+  position: relative;
+}
+
+.phone-tab:active {
+  background: var(--bg-tertiary);
+}
+
+.phone-tab.active {
+  color: var(--accent-primary);
+}
+
+.phone-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 15%;
+  right: 15%;
+  height: 2px;
+  background: var(--accent-primary);
+  border-radius: 2px 2px 0 0;
+}
+
+.phone-tab-icon {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+/* ── Tab content area ── */
+.phone-tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg-primary);
+}
+
+/* ── Camera tab ── */
+.phone-cam-tab {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.phone-cam-tab-label {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.phone-cam-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.phone-cam-pill {
+  padding: 0.45rem 1rem;
+  border-radius: 20px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-cam-pill.active {
+  background: rgba(33, 150, 243, 0.15);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.phone-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.2s;
+}
+
+.phone-action-btn:active {
+  background: var(--bg-tertiary);
+}
+
+/* ── Robots tab ── */
+.phone-robots-tab {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.phone-robot-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-robot-item.selected {
+  border-color: var(--accent-primary);
+  background: rgba(33, 150, 243, 0.08);
+}
+
+.phone-robot-item:active {
+  background: var(--bg-tertiary);
+}
+
+.phone-robot-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.phone-robot-dot.online {
+  background: var(--accent-success);
+  box-shadow: 0 0 6px var(--accent-success);
+}
+
+.phone-robot-dot.offline {
+  background: var(--accent-danger);
+}
+
+.phone-robot-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.phone-robot-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phone-robot-ip {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.phone-robot-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.phone-robot-ping {
+  font-size: 0.72rem;
+  color: var(--accent-warning);
+  font-family: monospace;
+}
+
+.phone-robot-status-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.phone-robot-status-badge.online {
+  background: rgba(76, 175, 80, 0.15);
+  color: var(--accent-success);
+}
+
+.phone-robot-status-badge.offline {
+  background: rgba(244, 67, 54, 0.12);
+  color: var(--accent-danger);
+}
+
+/* ── Commands tab ── */
+.phone-commands-tab {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.phone-robot-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.phone-robot-selector-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.phone-robot-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.phone-robot-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 20px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-robot-pill.active {
+  border-color: var(--accent-primary);
+  background: rgba(33, 150, 243, 0.12);
+  color: var(--accent-primary);
+}
+
+/* Commands 2-column grid */
+.phone-commands-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.phone-command-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.9rem 0.5rem;
+  border-radius: var(--radius-md);
+  border: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  line-height: 1.3;
+  min-height: 56px;
+  transition: opacity 0.15s, transform 0.1s;
+  -webkit-tap-highlight-color: transparent;
+  word-break: break-word;
+}
+
+.phone-command-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.phone-command-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.phone-command-btn.executing {
+  opacity: 0.7;
+}
+
+.phone-cmd-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+@keyframes phone-spin {
+  to { transform: rotate(360deg); }
+}
+
+.phone-cmd-spin {
+  display: inline-block;
+  animation: phone-spin 1s linear infinite;
+  margin-right: 0.3rem;
+}
+
+.phone-cmd-robot-status {
+  margin-top: 0.25rem;
+}
+
+/* ── Shared empty state ── */
+.phone-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.phone-empty span {
+  font-size: 2rem;
+}
+
+.phone-empty p {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* ── Error toast ── */
+.phone-error-toast {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(244, 67, 54, 0.92);
+  color: white;
+  padding: 8px 18px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  z-index: 30;
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Mobile responsive fixes for non-phone modes
+   ══════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* Camera grid: single column */
+  .cameras-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* View mode selector: horizontal wrap */
+  .view-modes-menu {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    position: static;
+    width: 100%;
+  }
+
+  .view-mode-button {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8rem;
+  }
+
+  .robots-page-header h1 {
+    font-size: 1.1rem;
+  }
+
+  .camera-card {
+    padding: 0.75rem;
+  }
+
+  /* Groups menu: reposition from absolute */
+  .groups-menu {
+    position: static;
+    width: 100%;
+    max-width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+    border-radius: var(--radius-md);
+  }
+
+  /* Commands mode: stack panels vertically */
+  .robots-commands-mode {
+    flex-direction: column;
+  }
+
+  .commands-robots-panel {
+    min-width: 0 !important;
+    width: 100%;
+    max-height: 280px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .commands-actions-panel {
+    flex: 1;
+    min-height: 250px;
+  }
+
+  /* Hide mode selector on phone mode */
+  .phone-mode ~ .view-modes-menu {
+    display: none;
+  }
 }

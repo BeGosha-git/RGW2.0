@@ -244,6 +244,86 @@ def register_network_endpoints():
             return jsonify({"success": False, "message": "target_ip and endpoint required"}), 400
         return jsonify(network_api.send_data(target_ip, endpoint, payload, port=port, timeout=timeout))
 
+    # ── WebRTC signaling proxy (same-origin, avoids browser CORS) ──────────────
+    @flask_app.route('/api/robots/<target_ip>/cameras/<camera_id>/webrtc/offer', methods=['POST', 'OPTIONS'])
+    def api_robot_camera_webrtc_offer(target_ip, camera_id):
+        """
+        Same-origin proxy for WebRTC signaling to a remote robot.
+        Browser calls this endpoint; server forwards to http://<target_ip>:<port>/api/cameras/<camera_id>/webrtc/offer.
+        """
+        if request.method == 'OPTIONS':
+            return '', 204
+
+        data = request.get_json(force=True) or {}
+        ports = data.get('ports')
+        if not isinstance(ports, list) or not ports:
+            ports = [5000, 5001, 5002, 5003, 5004, 5007, 5008]
+
+        payload = {
+            'sdp': data.get('sdp', ''),
+            'type': data.get('type', 'offer'),
+            # forward quality mode for low/thumbnail vs fullscreen
+            'quality': data.get('quality', 'high'),
+        }
+        if not payload['sdp']:
+            return jsonify({'success': False, 'message': 'sdp field required'}), 400
+
+        last = None
+        endpoint = f"/api/cameras/{camera_id}/webrtc/offer"
+        for port in ports:
+            try:
+                res = network_api.send_data(target_ip, endpoint, payload, port=int(port), timeout=20)
+            except Exception as e:
+                last = {'success': False, 'message': str(e), 'port': port}
+                continue
+
+            if not res or not res.get('success'):
+                last = {'success': False, 'message': res.get('message', 'proxy failed') if isinstance(res, dict) else 'proxy failed', 'port': port}
+                continue
+
+            remote = res.get('response')
+            if isinstance(remote, dict) and remote.get('success'):
+                return jsonify(remote), 200
+
+            last = {'success': False, 'message': (remote.get('message') if isinstance(remote, dict) else 'remote signaling error') or 'remote signaling error', 'port': port}
+
+        return jsonify(last or {'success': False, 'message': 'no reachable api ports'}), 502
+
+    @flask_app.route('/api/robots/<target_ip>/cameras/<camera_id>/webrtc/<conn_id>', methods=['DELETE', 'OPTIONS'])
+    def api_robot_camera_webrtc_close(target_ip, camera_id, conn_id):
+        """Same-origin proxy to close a remote WebRTC connection."""
+        if request.method == 'OPTIONS':
+            return '', 204
+
+        ports = request.args.get('ports', '')
+        try_ports = []
+        if ports:
+            for p in ports.split(','):
+                p = p.strip()
+                if p.isdigit():
+                    try_ports.append(int(p))
+        if not try_ports:
+            try_ports = [5000, 5001, 5002, 5003, 5004, 5007, 5008]
+
+        last = None
+        endpoint = f"/api/cameras/{camera_id}/webrtc/{conn_id}"
+        for port in try_ports:
+            try:
+                # NetworkAPI doesn't have DELETE; use requests directly for this one.
+                import requests
+                r = requests.delete(f"http://{target_ip}:{int(port)}{endpoint}", timeout=5)
+                if r.status_code >= 200 and r.status_code < 300:
+                    try:
+                        return jsonify(r.json()), 200
+                    except Exception:
+                        return jsonify({'success': True}), 200
+                last = {'success': False, 'message': f'HTTP {r.status_code}', 'port': port}
+            except Exception as e:
+                last = {'success': False, 'message': str(e), 'port': port}
+                continue
+
+        return jsonify(last or {'success': False, 'message': 'no reachable api ports'}), 502
+
 
 def register_robot_endpoints():
     """Регистрирует endpoints для управления роботом."""
@@ -905,6 +985,9 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     
     def do_OPTIONS(self):
         """Обрабатывает OPTIONS запросы для CORS."""
+        if self._is_camera_api():
+            self._proxy_to_api_server('OPTIONS')
+            return
         self.send_response(200)
         self.end_headers()
     
@@ -1042,8 +1125,136 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 f.close()
             raise
     
+    # ── Camera API proxy ──────────────────────────────────────────────────────
+    # /api/cameras/* маршруты обслуживаются отдельным Flask-сервером (api/api.py)
+    # на порту 5000. Прокси пересылает запросы туда прозрачно.
+    _PROXY_PREFIXES = ('/api/cameras/', '/api/cameras')
+
+    def _is_camera_api(self) -> bool:
+        p = self.path.split('?')[0]
+        return p == '/api/cameras' or p.startswith('/api/cameras/')
+
+    def _get_api_port(self) -> int:
+        """
+        Возвращает порт API, учитывая, что API может уйти на fallback-порт
+        (5001/5002/...) если 5000 занят.
+        """
+        import socket
+
+        configured = None
+        try:
+            import services_manager as _sm
+            configured = int(_sm.get_api_port())
+        except Exception:
+            configured = None
+
+        candidates = []
+        if configured:
+            candidates.append(configured)
+        # Common API fallback ports (see api/api.py)
+        for p in (5000, 5001, 5002, 5003, 5004, 5007, 5008):
+            if p not in candidates:
+                candidates.append(p)
+
+        for port in candidates:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                s.connect(('127.0.0.1', int(port)))
+                s.close()
+                return int(port)
+            except Exception:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+        return configured or 5000
+
+    def _proxy_to_api_server(self, method: str):
+        """Прокси HTTP-запроса к внешнему API-серверу (обычно порт 5000)."""
+        import http.client
+
+        api_port = self._get_api_port()
+        try:
+            body = None
+            if method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 0:
+                    body = self.rfile.read(content_length)
+
+            fwd_headers = {}
+            for k in ('Content-Type', 'Accept', 'Authorization', 'Origin'):
+                v = self.headers.get(k)
+                if v:
+                    fwd_headers[k] = v
+            if body:
+                fwd_headers['Content-Length'] = str(len(body))
+
+            conn = http.client.HTTPConnection('127.0.0.1', api_port, timeout=30)
+            conn.request(method, self.path, body=body, headers=fwd_headers)
+            resp = conn.getresponse()
+
+            self.send_response(resp.status)
+            hop_by_hop = {
+                'connection', 'keep-alive', 'transfer-encoding',
+                'upgrade', 'proxy-authenticate', 'proxy-authorization',
+                'te', 'trailer'
+            }
+            content_type = ''
+            for header, value in resp.getheaders():
+                if header.lower() not in hop_by_hop:
+                    self.send_header(header, value)
+                    if header.lower() == 'content-type':
+                        content_type = value
+            self.end_headers()
+
+            # Стриминг для MJPEG, обычное чтение для остального
+            if 'multipart' in content_type:
+                try:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+            else:
+                data = resp.read()
+                if data:
+                    try:
+                        self.wfile.write(data)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+            conn.close()
+
+        except ConnectionRefusedError:
+            try:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                import json as _json
+                self.wfile.write(_json.dumps({
+                    'success': False,
+                    'message': f'Camera API server unavailable (port {api_port})'
+                }).encode())
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                import json as _json
+                self.wfile.write(_json.dumps({'success': False, 'message': str(e)}).encode())
+            except Exception:
+                pass
+
     def do_GET(self):
         """Обрабатывает GET запросы."""
+        if self._is_camera_api():
+            self._proxy_to_api_server('GET')
+            return
         if self.path.startswith('/api') or self.path == '/health':
             self.handle_api_request('GET')
             return
@@ -1119,6 +1330,9 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     
     def do_POST(self):
         """Обрабатывает POST запросы."""
+        if self._is_camera_api():
+            self._proxy_to_api_server('POST')
+            return
         if self.path.startswith('/api'):
             self.handle_api_request('POST')
             return
@@ -1128,6 +1342,9 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     
     def do_PUT(self):
         """Обрабатывает PUT запросы."""
+        if self._is_camera_api():
+            self._proxy_to_api_server('PUT')
+            return
         if self.path.startswith('/api'):
             self.handle_api_request('PUT')
             return
@@ -1137,6 +1354,9 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     
     def do_DELETE(self):
         """Обрабатывает DELETE запросы."""
+        if self._is_camera_api():
+            self._proxy_to_api_server('DELETE')
+            return
         if self.path.startswith('/api'):
             self.handle_api_request('DELETE')
             return
@@ -1197,7 +1417,7 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
             result = sock.connect_ex(('127.0.0.1', check_port))
             sock.close()
             return result != 0
-        except:
+        except Exception:
             sock.close()
             return False
     
@@ -1275,17 +1495,16 @@ def run_web_server(port: int = 80, build_dir: str = "build"):
                                     all_dependencies_off = False
                                     break
                                 
-                                import run
                                 try:
-                                    runner = run.ServiceRunner()
-                                    if hasattr(runner, 'services') and hasattr(runner, 'threads'):
+                                    import run as _run_mod
+                                    runner = _run_mod.get_active_runner()
+                                    if runner is not None:
                                         dep_thread_alive = False
                                         for i, service_info in enumerate(runner.services):
                                             if service_info.get("service_name") == dep_name:
                                                 if i < len(runner.threads):
                                                     dep_thread_alive = runner.threads[i].is_alive()
                                                 break
-                                        
                                         if dep_thread_alive:
                                             all_dependencies_off = False
                                             break

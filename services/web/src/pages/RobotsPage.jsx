@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import StatusPanel from '../components/StatusPanel'
 import SelectBox from '../components/SelectBox'
+import WebRTCVideo from '../components/WebRTCVideo'
 import './RobotsPage.css'
+
 
 const COMMAND_COLORS = {
   red: '#f44336',
@@ -36,6 +38,10 @@ function RobotsPage() {
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 })
   const [currentPage, setCurrentPage] = useState(1) // Пагинация
   const [localCameras, setLocalCameras] = useState([]) // Локальные камеры
+  const [fullscreenCamera, setFullscreenCamera] = useState(null) // { signalingUrl, label }
+  const [phoneCameraIndex, setPhoneCameraIndex] = useState(0) // Активная камера в phone-режиме
+  const [mobileTab, setMobileTab] = useState('camera') // 'camera' | 'robots' | 'commands'
+  const [mobileCommandRobotId, setMobileCommandRobotId] = useState(null) // Выбранный робот для команд на телефоне
   const containerRef = useRef(null)
   const cardRefs = useRef({})
   const abortControllerRef = useRef(null)
@@ -65,13 +71,15 @@ function RobotsPage() {
     fetchCurrentIP()
   }, [])
 
-  // Отслеживаем размер окна
+  // Отслеживаем размер окна; автоматически переключаем в phone-режим на мобильных устройствах
   useEffect(() => {
     const handleResize = () => {
-      setWindowSize({
-        width: window.innerWidth,
-        height: window.innerHeight
-      })
+      const w = window.innerWidth
+      const h = window.innerHeight
+      setWindowSize({ width: w, height: h })
+      if (w < 768) {
+        setViewMode(prev => (prev !== 'phone' ? 'phone' : prev))
+      }
     }
     window.addEventListener('resize', handleResize)
     handleResize()
@@ -804,7 +812,7 @@ function RobotsPage() {
 
       // Определяем таймаут в зависимости от типа команды
       // Для команд обновления используем увеличенный таймаут (1 минута)
-      const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && button.args.includes('update.py')
+      const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && (button.args.includes('upgrade.py') || button.args.includes('update.py'))
       const timeout = isUpdateCommand ? 60 : undefined // 1 минута для обновления
       
       const response = await fetch('/api/network/send', {
@@ -895,7 +903,7 @@ function RobotsPage() {
 
         try {
           // Определяем таймаут в зависимости от типа команды
-          const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && button.args.includes('update.py')
+          const isUpdateCommand = button.id === 'update_system' || button.command === 'python3' && button.args && (button.args.includes('upgrade.py') || button.args.includes('update.py'))
           const timeout = isUpdateCommand ? 300 : undefined // 5 минут для обновления
           
           const response = await fetch('/api/network/send', {
@@ -1185,14 +1193,14 @@ function RobotsPage() {
         {[
           { id: 'groups', label: 'Группы' },
           { id: 'view', label: 'Просмотр' },
-          { id: 'commands', label: 'Команды' }
+          { id: 'commands', label: 'Команды' },
+          { id: 'phone', label: 'Камера' },
         ].map((mode) => (
           <button
             key={mode.id}
             className={`view-mode-button ${viewMode === mode.id ? 'active' : ''}`}
             onClick={() => {
               setViewMode(mode.id)
-              // Сбрасываем выбор при переключении режима
               if (mode.id !== 'commands') {
                 setSelectedRobots(new Set())
                 setSelectedControlRobot(null)
@@ -1432,26 +1440,36 @@ function RobotsPage() {
                 {localCameras
                   .filter(camera => camera.id && camera.id.startsWith('usb_'))
                   .map((camera) => {
-                    const cameraStreamUrl = `/api/cameras/${camera.id}/mjpeg`
+                    // Relative URL — web.py proxies /api/cameras/* → port 5000
+                    const offerUrl = `/api/cameras/${camera.id}/webrtc/offer`
                     return (
-                      <div key={camera.id} className="camera-card">
+                      <div key={camera.id} className="camera-card" style={{ position: 'relative' }}>
                         <h3>{camera.name}</h3>
-                        <div className="camera-stream">
-                          <img
-                            src={cameraStreamUrl}
-                            alt={`Камера ${camera.name}`}
-                            onError={(e) => {
-                              e.target.style.display = 'none'
-                              const errorBox = e.target.nextSibling
-                              if (errorBox) errorBox.style.display = 'flex'
-                            }}
-                          />
-                          <div className="camera-error" style={{ display: 'none' }}>
-                            <span>Камера недоступна</span>
-                          </div>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setFullscreenCamera({ signalingUrl: offerUrl, label: camera.id })
+                          }}
+                          style={{
+                            position: 'absolute',
+                            top: 10,
+                            right: 10,
+                            zIndex: 2,
+                            background: 'rgba(13,17,23,0.6)',
+                            color: 'white',
+                            border: '1px solid rgba(255,255,255,0.25)',
+                            borderRadius: 10,
+                            padding: '6px 10px',
+                            cursor: 'pointer',
+                          }}
+                          title="Во весь экран (качество выше)"
+                        >
+                          Во весь экран
+                        </button>
+                        <WebRTCVideo signalingUrl={offerUrl} label={camera.id} qualityMode="low" />
                         <div className="camera-info">
-                          USB • {camera.id}
+                          USB • {camera.id} • WebRTC
                         </div>
                       </div>
                     )
@@ -1466,40 +1484,57 @@ function RobotsPage() {
             <div className="cameras-grid">
               {paginatedRobots.map((robot) => {
                 const robotIP = robot.ip
-                // Используем актуальные стримы из localCameras (usb_2 и еще одна)
+                const hasValidIP = robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
+                // Use same camera IDs as local cameras (both robots share the same model/setup)
                 const cameraStreams = localCameras
                   .filter(camera => camera.id && camera.id.startsWith('usb_'))
                   .map(camera => ({
                     id: camera.id,
                     name: camera.name || `USB Camera ${camera.id.split('_')[1]}`,
-                    url: robotIP && /^\d+\.\d+\.\d+\.\d+$/.test(robotIP)
-                      ? `http://${robotIP}:5000/api/cameras/${camera.id}/mjpeg`
-                      : null
+                    // Same-origin proxy URL — no CORS, web.py forwards to remote robot
+                    offerUrl: hasValidIP
+                      ? `/api/robots/${robotIP}/cameras/${camera.id}/webrtc/offer`
+                      : null,
                   }))
 
                 return (
                   <div key={robot.id} className="camera-card">
                     <h3>{robot.name}</h3>
                     {cameraStreams.map((camera) => (
-                      <div key={camera.id} style={{ marginBottom: '10px' }}>
+                      <div key={camera.id} style={{ marginBottom: '10px', position: 'relative' }}>
                         <div className="camera-info" style={{ marginBottom: '5px', fontSize: '12px' }}>
                           {camera.name}
                         </div>
-                        {camera.url ? (
-                          <div className="camera-stream">
-                            <img
-                              src={camera.url}
-                              alt={`${camera.name} - ${robot.name}`}
-                              onError={(e) => {
-                                e.target.style.display = 'none'
-                                const errorBox = e.target.nextSibling
-                                if (errorBox) errorBox.style.display = 'flex'
+                        {camera.offerUrl ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setFullscreenCamera({ signalingUrl: camera.offerUrl, label: `${robot.name}/${camera.id}` })
                               }}
+                              style={{
+                                position: 'absolute',
+                                top: 0,
+                                right: 0,
+                                zIndex: 2,
+                                background: 'rgba(13,17,23,0.6)',
+                                color: 'white',
+                                border: '1px solid rgba(255,255,255,0.25)',
+                                borderRadius: 10,
+                                padding: '6px 10px',
+                                cursor: 'pointer',
+                              }}
+                              title="Во весь экран (качество выше)"
+                            >
+                              Во весь экран
+                            </button>
+                            <WebRTCVideo
+                              signalingUrl={camera.offerUrl}
+                              label={`${robot.name}/${camera.id}`}
+                              qualityMode="low"
                             />
-                            <div className="camera-error" style={{ display: 'none' }}>
-                              <span>Камера недоступна</span>
-                            </div>
-                          </div>
+                          </>
                         ) : (
                           <div className="camera-error">
                             <span>IP не определен</span>
@@ -1508,7 +1543,7 @@ function RobotsPage() {
                       </div>
                     ))}
                     {robotIP && (
-                      <div className="camera-info">{robotIP}:5000</div>
+                      <div className="camera-info">{robotIP} • WebRTC</div>
                     )}
                   </div>
                 )
@@ -1763,6 +1798,291 @@ function RobotsPage() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Режим "Камера" (телефон) ── */}
+      {viewMode === 'phone' && (() => {
+        const phoneCameras = localCameras
+          .filter(c => c.id && c.id.startsWith('usb_'))
+          .map(c => ({
+            id: c.id,
+            label: c.name || c.id,
+            offerUrl: `/api/cameras/${c.id}/webrtc/offer`,
+          }))
+        const safeIndex = Math.min(phoneCameraIndex, Math.max(0, phoneCameras.length - 1))
+        const activeCamera = phoneCameras[safeIndex] || null
+
+        // Resolve robot for commands tab
+        const localRobots = robots.filter(r => r.isCurrent || (currentRobotIP && r.ip === currentRobotIP))
+        const defaultCmdRobotId = localRobots[0]?.id || (robots[0]?.id ?? null)
+        const cmdRobotId = mobileCommandRobotId || defaultCmdRobotId
+        const cmdRobot = robots.find(r => r.id === cmdRobotId) || null
+        const phoneCommands = availableCommands.filter(c => c.showButton)
+
+        return (
+          <div className="phone-mode">
+
+            {/* ── Camera area ── */}
+            <div className="phone-camera-area">
+              {activeCamera ? (
+                <WebRTCVideo
+                  signalingUrl={activeCamera.offerUrl}
+                  label={activeCamera.label}
+                  qualityMode="high"
+                />
+              ) : (
+                <div className="phone-no-camera">
+                  <span className="phone-no-camera-icon">📷</span>
+                  <p>Камеры не найдены</p>
+                </div>
+              )}
+
+              {/* Camera selector dots */}
+              {phoneCameras.length > 1 && (
+                <div className="phone-cam-dots">
+                  {phoneCameras.map((cam, i) => (
+                    <button
+                      key={cam.id}
+                      className={`phone-cam-dot${i === safeIndex ? ' active' : ''}`}
+                      onClick={() => setPhoneCameraIndex(i)}
+                      aria-label={cam.label}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Fullscreen button */}
+              {activeCamera && (
+                <button
+                  className="phone-fullscreen-btn"
+                  onClick={() => setFullscreenCamera({ signalingUrl: activeCamera.offerUrl, label: activeCamera.label })}
+                  aria-label="Развернуть на весь экран"
+                >
+                  ⛶
+                </button>
+              )}
+            </div>
+
+            {/* ── Tab bar ── */}
+            <div className="phone-tab-bar">
+              <button
+                className={`phone-tab${mobileTab === 'camera' ? ' active' : ''}`}
+                onClick={() => setMobileTab('camera')}
+              >
+                <span className="phone-tab-icon">📷</span>
+                <span>Камера</span>
+              </button>
+              <button
+                className={`phone-tab${mobileTab === 'robots' ? ' active' : ''}`}
+                onClick={() => setMobileTab('robots')}
+              >
+                <span className="phone-tab-icon">🤖</span>
+                <span>Роботы</span>
+              </button>
+              <button
+                className={`phone-tab${mobileTab === 'commands' ? ' active' : ''}`}
+                onClick={() => setMobileTab('commands')}
+              >
+                <span className="phone-tab-icon">⚡</span>
+                <span>Команды</span>
+              </button>
+              <button
+                className={`phone-tab${mobileTab === 'view' ? ' active' : ''}`}
+                onClick={() => { setMobileTab('view'); setViewMode('view') }}
+              >
+                <span className="phone-tab-icon">◫</span>
+                <span>Все камеры</span>
+              </button>
+            </div>
+
+            {/* ── Tab content ── */}
+            <div className="phone-tab-content">
+
+              {/* Camera tab */}
+              {mobileTab === 'camera' && (
+                <div className="phone-cam-tab">
+                  {phoneCameras.length === 0 ? (
+                    <div className="phone-empty">
+                      <span>📷</span><p>Камеры не найдены</p>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="phone-cam-tab-label">Выбрать камеру:</p>
+                      <div className="phone-cam-pills">
+                        {phoneCameras.map((cam, i) => (
+                          <button
+                            key={cam.id}
+                            className={`phone-cam-pill${i === safeIndex ? ' active' : ''}`}
+                            onClick={() => setPhoneCameraIndex(i)}
+                          >
+                            {cam.label}
+                          </button>
+                        ))}
+                      </div>
+                      {activeCamera && (
+                        <button
+                          className="phone-action-btn"
+                          onClick={() => setFullscreenCamera({ signalingUrl: activeCamera.offerUrl, label: activeCamera.label })}
+                        >
+                          ⛶ Развернуть на весь экран
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Robots tab */}
+              {mobileTab === 'robots' && (
+                <div className="phone-robots-tab">
+                  {robots.length === 0 ? (
+                    <div className="phone-empty">
+                      <span>🤖</span><p>Роботы не найдены</p>
+                    </div>
+                  ) : (
+                    robots.map(robot => (
+                      <div
+                        key={robot.id}
+                        className={`phone-robot-item${mobileCommandRobotId === robot.id ? ' selected' : ''}`}
+                        onClick={() => setMobileCommandRobotId(robot.id === mobileCommandRobotId ? null : robot.id)}
+                      >
+                        <span className={`phone-robot-dot ${robot.status}`} />
+                        <div className="phone-robot-text">
+                          <span className="phone-robot-name">{robot.name}</span>
+                          <span className="phone-robot-ip">{robot.ip}</span>
+                        </div>
+                        <div className="phone-robot-meta">
+                          {robot.ping != null && (
+                            <span className="phone-robot-ping">{robot.ping} мс</span>
+                          )}
+                          <span className={`phone-robot-status-badge ${robot.status}`}>
+                            {robot.status === 'online' ? 'online' : 'offline'}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* Commands tab */}
+              {mobileTab === 'commands' && (
+                <div className="phone-commands-tab">
+                  {/* Robot selector */}
+                  {robots.length > 1 && (
+                    <div className="phone-robot-selector">
+                      <span className="phone-robot-selector-label">Робот:</span>
+                      <div className="phone-robot-pills">
+                        {robots.map(robot => (
+                          <button
+                            key={robot.id}
+                            className={`phone-robot-pill${cmdRobotId === robot.id ? ' active' : ''} ${robot.status}`}
+                            onClick={() => setMobileCommandRobotId(robot.id)}
+                          >
+                            <span className={`phone-robot-dot ${robot.status}`} />
+                            {robot.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!cmdRobotId ? (
+                    <div className="phone-empty">
+                      <span>⚡</span><p>Нет доступных роботов</p>
+                    </div>
+                  ) : phoneCommands.length === 0 ? (
+                    <div className="phone-empty">
+                      <span>⚡</span><p>Команды не настроены</p>
+                    </div>
+                  ) : (
+                    <div className="phone-commands-grid">
+                      {phoneCommands.map(cmd => {
+                        const buttonKey = `button-${cmdRobotId}-${cmd.name}`
+                        const isExec = executingCommands.has(buttonKey)
+                        const color = cmd.buttonConfig?.color || 'primary'
+                        return (
+                          <button
+                            key={cmd.id}
+                            className={`phone-command-btn command-btn-${color}${isExec ? ' executing' : ''}`}
+                            disabled={isExec}
+                            onClick={() => handleExecuteCommand(cmd, cmdRobotId)}
+                            title={cmd.description || cmd.name}
+                          >
+                            {isExec ? (
+                              <><span className="phone-cmd-spin">◐</span> Выполняется...</>
+                            ) : (
+                              <>
+                                {cmd.buttonConfig?.icon && (
+                                  <span className="phone-cmd-icon">
+                                    {cmd.buttonConfig.icon === 'restart' && '⟲'}
+                                    {cmd.buttonConfig.icon === 'update' && '◈'}
+                                    {cmd.buttonConfig.icon === 'info' && '◉'}
+                                    {!['restart', 'update', 'info'].includes(cmd.buttonConfig.icon) && '▶'}
+                                  </span>
+                                )}
+                                {cmd.name}
+                              </>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {cmdRobot && (
+                    <div className="phone-cmd-robot-status">
+                      <StatusPanel
+                        status={robotStatuses[cmdRobotId] || { isProcessing: false }}
+                        onInterrupt={() => handleInterrupt(cmdRobotId)}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {error && <div className="phone-error-toast">{error}</div>}
+          </div>
+        )
+      })()}
+
+      {fullscreenCamera && (
+        <div
+          className="webrtc-fullscreen-overlay"
+          onClick={() => setFullscreenCamera(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="webrtc-fullscreen-bar"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ color: 'white', fontWeight: 'bold' }}>
+              {fullscreenCamera.label}
+            </div>
+            <button
+              type="button"
+              className="webrtc-fullscreen-close-btn"
+              onClick={(e) => {
+                e.stopPropagation()
+                setFullscreenCamera(null)
+              }}
+            >
+              Закрыть
+            </button>
+          </div>
+          <div
+            className="webrtc-fullscreen-content"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <WebRTCVideo
+              signalingUrl={fullscreenCamera.signalingUrl}
+              label={fullscreenCamera.label}
+              qualityMode="high"
+            />
           </div>
         </div>
       )}

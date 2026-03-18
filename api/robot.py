@@ -207,46 +207,54 @@ class RobotAPI:
     def ensure_default_commands() -> None:
         """
         Создает дефолтный commands.json если файл не существует.
-        Проверяет наличие команды обновления и добавляет её если отсутствует.
+        Проверяет наличие обязательных команд и добавляет их если отсутствуют.
         """
         commands_path = PROJECT_ROOT / "data" / "commands.json"
         data_dir = commands_path.parent
         data_dir.mkdir(parents=True, exist_ok=True)
-        
-        default_update_command = {
-            "id": "update_system",
-            "name": "Обновление системы",
-            "description": "Ищет более новую версию и загружает только измененные файлы",
-            "command": "python3",
-            "args": ["update.py"],
-            "showButton": True,
-            "buttonConfig": {
-                "position": 1,
-                "color": "primary",
-                "icon": "update"
-            }
-        }
-        
+
+        _default_commands = [
+            {
+                "id": "update_system",
+                "name": "Обновление системы",
+                "description": "Ищет более новую версию и загружает только измененные файлы",
+                "command": "python3",
+                "args": ["upgrade.py"],
+                "showButton": True,
+                "buttonConfig": {"position": 1, "color": "primary", "icon": "update"},
+            },
+            {
+                "id": "force_update_system",
+                "name": "Принудительное обновление",
+                "description": "Принудительно обновляет файлы с удалённого робота, игнорируя версию",
+                "command": "python3",
+                "args": ["upgrade.py", "--force"],
+                "showButton": True,
+                "buttonConfig": {"position": 2, "color": "danger", "icon": "update"},
+            },
+        ]
+
         if commands_path.exists():
-            # Проверяем, есть ли команда обновления
             try:
                 with open(commands_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    commands = data.get("commands", [])
-                    # Проверяем наличие команды обновления по id
-                    has_update_command = any(cmd.get("id") == "update_system" for cmd in commands)
-                    if not has_update_command:
-                        # Добавляем команду обновления если её нет
-                        commands.append(default_update_command)
-                        data["commands"] = commands
-                        with open(commands_path, 'w', encoding='utf-8') as f:
-                            json.dump(data, f, indent=4, ensure_ascii=False)
+                commands = data.get("commands", [])
+                existing_ids = {cmd.get("id") for cmd in commands}
+                changed = False
+                for default_cmd in _default_commands:
+                    if default_cmd["id"] not in existing_ids:
+                        commands.append(default_cmd)
+                        changed = True
+                if changed:
+                    data["commands"] = commands
+                    with open(commands_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=4, ensure_ascii=False)
             except Exception:
                 # Файл поврежден — пересоздаём с дефолтными командами
                 default_data = {
                     "version": "1.0.0",
                     "lastUpdated": None,
-                    "commands": [default_update_command]
+                    "commands": _default_commands,
                 }
                 try:
                     with open(commands_path, 'w', encoding='utf-8') as f:
@@ -254,15 +262,14 @@ class RobotAPI:
                 except Exception:
                     pass
         else:
-            # Создаем новый файл с дефолтной командой
-            default_commands = {
+            default_data = {
                 "version": "1.0.0",
                 "lastUpdated": None,
-                "commands": [default_update_command]
+                "commands": _default_commands,
             }
             try:
                 with open(commands_path, 'w', encoding='utf-8') as f:
-                    json.dump(default_commands, f, indent=4, ensure_ascii=False)
+                    json.dump(default_data, f, indent=4, ensure_ascii=False)
             except Exception:
                 pass
     

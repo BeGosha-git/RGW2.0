@@ -16,18 +16,18 @@ from utils.network_utils import PortManager
 
 logger = get_logger(__name__)
 
-if hasattr(sys.stdout, 'reconfigure'):
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-        sys.stderr.reconfigure(line_buffering=True)
-    except Exception:
-        pass
-
 if 'PYTHONUNBUFFERED' not in os.environ:
     os.environ['PYTHONUNBUFFERED'] = '1'
 
-sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    else:
+        sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+        sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
+except Exception:
+    pass
 
 # Проверяем, указана ли версия Python через переменную окружения
 python_version = os.environ.get('PYTHON_VERSION')
@@ -129,7 +129,14 @@ class ServiceRunner:
             service_files.append(api_service_file)
         
         # Удаляем дубликаты
-        return list(dict.fromkeys(service_files))
+        service_files = list(dict.fromkeys(service_files))
+
+        # Сортируем так, чтобы файлы, чьё имя совпадает с именем родительской папки,
+        # загружались первыми (например camera_stream.py раньше webrtc_handler.py)
+        from pathlib import Path as _Path
+        service_files.sort(key=lambda f: (0 if _Path(f).stem == _Path(f).parent.name else 1, f))
+
+        return service_files
     
     def load_service(self, filepath: str) -> bool:
         """
@@ -209,13 +216,17 @@ class ServiceRunner:
                 self.manager.update_service_status(service_name, expected_status)
             
             logger.info(f"Loading service: {service_name} (enabled={enabled}, status={expected_status})")
-            
+
             module_name = service_name
-            
+            # api/api.py must NOT be registered as sys.modules['api'] because that
+            # would shadow the api/ package and break "import api.files" in web.py.
+            if service_name == 'api' and filepath_obj.name == 'api.py':
+                module_name = '_rgw_api_service'
+
             spec = importlib.util.spec_from_file_location(module_name, filepath)
             if spec is None or spec.loader is None:
                 return False
-            
+
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
@@ -445,20 +456,27 @@ class ServiceRunner:
     def stop_all_services(self):
         """Останавливает все сервисы."""
         self.running = False
-        
+
         try:
             motor_service_status = self.manager.get_service("unitree_motor_control")
-            if motor_service_status.get("status") == "ON":
-                threads_to_stop = [t for i, t in enumerate(self.threads) if i < len(self.services) and self.services[i].get("service_name") != "unitree_motor_control"]
+            if motor_service_status and motor_service_status.get("status") == "ON":
+                threads_to_stop = [
+                    t for i, t in enumerate(self.threads)
+                    if i < len(self.services)
+                    and self.services[i].get("service_name") != "unitree_motor_control"
+                ]
                 for thread in threads_to_stop:
                     thread.join(timeout=5)
+                # Still free ports even when motor is running —
+                # web/api ports must be released so a restart can bind them.
+                self.cleanup_ports()
                 return
         except Exception:
             pass
-        
+
         for thread in self.threads:
             thread.join(timeout=5)
-        
+
         self.cleanup_ports()
     
     def cleanup_ports(self):
@@ -490,10 +508,22 @@ class ServiceRunner:
             logger.warning(f"Error cleaning up ports: {e}")
 
 
+# Module-level singleton — web.py and others can reference this
+# to get the actually-running ServiceRunner without creating a new empty one.
+_active_runner: 'ServiceRunner | None' = None
+
+
+def get_active_runner() -> 'ServiceRunner | None':
+    """Return the currently running ServiceRunner instance, or None."""
+    return _active_runner
+
+
 def run_services():
     """Запускает все сервисы из папки services."""
+    global _active_runner
     try:
         runner = ServiceRunner()
+        _active_runner = runner
         runner.run_all_services()
     except Exception:
         try:
@@ -502,6 +532,8 @@ def run_services():
         except KeyboardInterrupt:
             pass
         raise
+    finally:
+        _active_runner = None
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@
 Управляет статусами сервисов (ON/OFF/SLEEP) и их параметрами.
 """
 import platform
+import threading
 import ast
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -14,6 +15,11 @@ from utils.path_utils import get_data_dir
 logger = get_logger(__name__)
 
 SERVICES_FILE = get_data_dir() / "services.json"
+
+# Reentrant lock protecting all writes to services.json.
+# Must be module-level so all ServicesManager instances (singleton pattern)
+# share the same lock — preventing concurrent file corruption.
+_services_file_lock = threading.RLock()
 
 
 class ServicesManager:
@@ -138,8 +144,6 @@ class ServicesManager:
         Returns:
             Дефолтные настройки
         """
-        import platform
-        
         defaults = {
             "scanner_service": {
                 "status": "ON",

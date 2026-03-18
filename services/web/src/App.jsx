@@ -7,7 +7,6 @@ import './App.css'
 // Lazy loading для всех страниц
 const HomePage = lazy(() => import('./pages/HomePage'))
 const FileEditorPage = lazy(() => import('./pages/FileEditorPage'))
-const RobotControlPage = lazy(() => import('./pages/RobotControlPage'))
 const RobotsPage = lazy(() => import('./pages/RobotsPage'))
 const TerminalPage = lazy(() => import('./pages/TerminalPage'))
 const ServicesPage = lazy(() => import('./pages/ServicesPage'))
@@ -30,26 +29,43 @@ function Navigation() {
   ]
 
   return (
-    <nav className="main-nav">
-      <div className="nav-container">
-        <div className="nav-logo">
-          <span className="glow-text">RGW</span>
-          <span className="nav-version">2.0</span>
+    <>
+      {/* Desktop top navigation */}
+      <nav className="main-nav desktop-nav">
+        <div className="nav-container">
+          <div className="nav-logo">
+            <span className="glow-text">RGW</span>
+            <span className="nav-version">2.0</span>
+          </div>
+          <div className="nav-links">
+            {navItems.map(item => (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`nav-link ${isActive(item.path) ? 'active' : ''}`}
+              >
+                <span className="nav-link-icon">{item.icon}</span>
+                {item.label}
+              </Link>
+            ))}
+          </div>
         </div>
-        <div className="nav-links">
-          {navItems.map(item => (
-            <Link 
-              key={item.path}
-              to={item.path} 
-              className={`nav-link ${isActive(item.path) ? 'active' : ''}`}
-            >
-              <span className="nav-link-icon">{item.icon}</span>
-              {item.label}
-            </Link>
-          ))}
-        </div>
-      </div>
-    </nav>
+      </nav>
+
+      {/* Mobile bottom navigation */}
+      <nav className="mobile-bottom-nav">
+        {navItems.map(item => (
+          <Link
+            key={item.path}
+            to={item.path}
+            className={`mobile-nav-item ${isActive(item.path) ? 'active' : ''}`}
+          >
+            <span className="mobile-nav-icon">{item.icon}</span>
+            <span className="mobile-nav-label">{item.label}</span>
+          </Link>
+        ))}
+      </nav>
+    </>
   )
 }
 
@@ -64,7 +80,6 @@ function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/editor" element={<FileEditorPage />} />
             <Route path="/robots" element={<RobotsPage />} />
-            <Route path="/robots-old" element={<RobotControlPage />} />
             <Route path="/services" element={<ServicesPage />} />
               <Route path="/motors" element={<MotorControlPage />} />
             <Route path="/terminal" element={<TerminalPage />} />

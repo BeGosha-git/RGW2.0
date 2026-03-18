@@ -118,72 +118,46 @@ def scan_project_files():
 
 def check_and_update_version():
     """
-    Проверяет файлы проекта и обновляет версию в data/version.json если файлы изменились.
-    
+    Refreshes the file list in data/version.json without changing the version number.
+
+    The version number is intentionally NOT auto-incremented here.  It only
+    changes when update_system() successfully pulls files from another robot.
+    This prevents the patch counter from bumping on every restart (e.g. after
+    `npm run build` creates new asset hash filenames).
+
     Returns:
-        True если версия была обновлена или не требовала обновления
+        True on success, False on exception.
     """
     try:
         os.makedirs("data", exist_ok=True)
-        
+
         version_file = "data/version.json"
-        
+
         current_version = "1.00.01"
-        current_files = []
         existing_version_type = "STABLE"
-        
+
         if os.path.exists(version_file):
             try:
                 with open(version_file, 'r', encoding='utf-8') as f:
                     existing_data = json.load(f)
                     current_version = existing_data.get("version", "1.00.01")
-                    current_files = existing_data.get("files", [])
                     existing_version_type = existing_data.get("version_type", "STABLE")
             except Exception:
                 pass
-        
+
         files_list = scan_project_files()
-        
-        current_files_sorted = sorted(current_files, key=lambda x: x.get("path", ""))
-        files_list_sorted = sorted(files_list, key=lambda x: x.get("path", ""))
-        
-        files_changed = False
-        
-        if len(current_files_sorted) != len(files_list_sorted):
-            files_changed = True
-        else:
-            for current_file, new_file in zip(current_files_sorted, files_list_sorted):
-                if (current_file.get("path") != new_file.get("path") or 
-                    current_file.get("size") != new_file.get("size")):
-                    files_changed = True
-                    break
-        
-        if files_changed:
-            version_parts = current_version.split('.')
-            if len(version_parts) >= 3:
-                try:
-                    last_part = int(version_parts[2])
-                    last_part += 1
-                    version_parts[2] = str(last_part).zfill(2)
-                    new_version = '.'.join(version_parts)
-                except ValueError:
-                    new_version = current_version
-            else:
-                new_version = current_version
-            
-            version_data = {
-                "version": new_version,
-                "version_type": existing_version_type,
-                "files": files_list
-            }
-            
-            with open(version_file, 'w', encoding='utf-8') as f:
-                json.dump(version_data, f, indent=4, ensure_ascii=False)
-            
-            return True
-        else:
-            return True
-            
+
+        version_data = {
+            "version": current_version,
+            "version_type": existing_version_type,
+            "files": files_list,
+        }
+
+        with open(version_file, 'w', encoding='utf-8') as f:
+            json.dump(version_data, f, indent=4, ensure_ascii=False)
+
+        return True
+
     except Exception:
         return False
 
@@ -840,84 +814,102 @@ def restart_project() -> None:
     sys.exit(0)  # Код 0 = успешное завершение, перезапуск обрабатывается main.py
 
 
-def update_system():
+def update_system(force: bool = False, source_ip: str = None):
     """
     Основная функция обновления системы.
+
+    Args:
+        force:     Если True — игнорирует сравнение версий и обновляет файлы
+                   даже если удалённая версия старше или совпадает с локальной.
+        source_ip: Если задан — использует только этот IP как источник обновления,
+                   минуя поиск среди всех известных роботов.
+
     Использует ips.json для поиска роботов, находит наивысшую версию,
     соответствующую приоритету, и обновляет файлы.
     Если изменены сервисы - перезапускает только их, иначе перезапускает проект.
     """
-    try:
-        import scanner
-        scanner.scan_network()  # Использует порт из конфигурации scanner_service
-    except Exception:
-        pass
-    
-    robot_ips = get_ips_from_file()
-    # Не считать этот ПК источником версии — исключаем свои IP (по списку и по проверке сокетом)
-    local_ips = get_local_ips()
-    try:
-        import services_manager as sm
-        api_port = sm.get_api_port()
-    except Exception:
-        api_port = 5000
-    excluded = [ip for ip in robot_ips if ip in local_ips or is_this_host(ip, api_port)]
-    robot_ips = [ip for ip in robot_ips if ip not in local_ips and not is_this_host(ip, api_port)]
-    if excluded:
-        print(f"This host IP(s) excluded from version sources: {excluded}", flush=True)
-    if not robot_ips:
-        print("No other robots in network (or only this host in ips), skipping update check.", flush=True)
-        return True
+    # --- Discover candidate IPs -------------------------------------------------
+    if source_ip:
+        # Forced update from a specific IP — skip network scan entirely
+        robot_ips = [source_ip]
+        print(f"Forced update: using explicit source IP {source_ip}", flush=True)
+    else:
+        try:
+            import scanner
+            scanner.scan_network()
+        except Exception:
+            pass
+
+        robot_ips = get_ips_from_file()
+        local_ips = get_local_ips()
+        try:
+            import services_manager as sm
+            api_port = sm.get_api_port()
+        except Exception:
+            api_port = 5000
+        excluded = [ip for ip in robot_ips if ip in local_ips or is_this_host(ip, api_port)]
+        robot_ips = [ip for ip in robot_ips if ip not in local_ips and not is_this_host(ip, api_port)]
+        if excluded:
+            print(f"This host IP(s) excluded from version sources: {excluded}", flush=True)
+        if not robot_ips:
+            print("No other robots in network (or only this host in ips), skipping update check.", flush=True)
+            return True
+
     print(f"Checking version from other robot(s): {robot_ips}", flush=True)
-    
+
     # Актуализируем свой version.json перед сравнением (список файлов и размеры, без пересборки venv)
     print("Updating local version.json (file list and sizes)...", flush=True)
     try:
         update_version_file(skip_venv_archive=True)
     except Exception as e:
         print(f"Warning: could not update local version.json: {e}", flush=True)
-    
+
     priority = get_version_priority_from_settings()
     version_info = find_best_version_by_priority(robot_ips, priority)
-    
+
     if not version_info or not version_info.get("success"):
         print("No version info found or update not needed", flush=True)
         return True
-    
-    source_ip = version_info.get("source_ip")
+
+    chosen_source_ip = version_info.get("source_ip")
     version_data = version_info.get("version", {})
     remote_version = version_data.get("version", "0.00.00")
     remote_version_type = version_data.get("version_type", "STABLE")
-    
+
     current_version = "0.00.00"
     version_file = "data/version.json"
     if os.path.exists(version_file):
         with open(version_file, 'r', encoding='utf-8') as f:
             current_data = json.load(f)
             current_version = current_data.get("version", "0.00.00")
-    
+
     print(f"Current version: {current_version}, Remote version: {remote_version}", flush=True)
-    
+
     network_api = network_api_module.NetworkAPI()
     version_comparison = network_api._compare_versions(remote_version, current_version)
     print(f"Version comparison result: {version_comparison} (1 = remote newer, 0 = same, -1 = remote older)", flush=True)
-    
-    if version_comparison < 0:
-        print(f"Remote version {remote_version} (from {source_ip}) is older than current {current_version}, skipping update", flush=True)
+
+    if not force and version_comparison < 0:
+        print(
+            f"Remote version {remote_version} (from {chosen_source_ip}) is older than current "
+            f"{current_version}, skipping update (use --force to override)",
+            flush=True,
+        )
         return True
-    
+
     files_to_update = version_data.get("files", [])
-    # Проверяем файлы на источнике и у себя, актуализируем вес и список того, что нужно обновлять
     print("Actualizing file list from source and local...", flush=True)
     files_to_update, need_update_count, up_to_date_count = actualize_file_list_from_source_and_local(
-        source_ip, files_to_update
+        chosen_source_ip, files_to_update
     )
     print(f"Actualized: {need_update_count} file(s) need update, {up_to_date_count} file(s) up to date (same size)", flush=True)
 
-    # При одинаковой версии — обновляем только если есть файлы с отличиями по размеру
-    if version_comparison == 0 and need_update_count == 0:
+    if not force and version_comparison == 0 and need_update_count == 0:
         print(f"Same version {remote_version}, all files match (sizes equal). No update needed.", flush=True)
         return True
+
+    if force:
+        print(f"Forced update: proceeding regardless of version/file comparison.", flush=True)
 
     # Только при реальном обновлении обновляем version.json и venv-архив (иначе create_venv_archive тормозит на минуты)
     update_version_file()
@@ -925,35 +917,34 @@ def update_system():
     if not files_to_update:
         print("No files to update in version data", flush=True)
         return True
-    
+
     changed_services = get_changed_services(files_to_update)
     has_service_changes = len(changed_services) > 0
-    
+
     has_non_service_changes = any(
         not file_info.get("path", "").startswith("services/")
         for file_info in files_to_update
     )
-    
+
     requirements_changed = any(
         file_info.get("path", "") == "requirements.txt"
         for file_info in files_to_update
     )
-    
+
     main_py_changed = any(
         file_info.get("path", "") == "main.py"
         for file_info in files_to_update
     )
-    
+
     venv_updated = False
-    if check_venv_exists_on_robot(source_ip):
-        venv_updated = download_venv_from_robot(source_ip)
-    
-    success, updated_count, skipped_count, error_count = update_files_from_robot(source_ip, files_to_update)
-    
+    if check_venv_exists_on_robot(chosen_source_ip):
+        venv_updated = download_venv_from_robot(chosen_source_ip)
+
+    success, updated_count, skipped_count, error_count = update_files_from_robot(chosen_source_ip, files_to_update)
+
     # Обновляем версию только если:
     # 1. Все файлы успешно загружены (success = True), ИЛИ
     # 2. Были только пропуски (same size) и нет ошибок (error_count = 0)
-    # НЕ обновляем версию если были ошибки загрузки файлов
     should_update_version = success or (error_count == 0 and (updated_count > 0 or skipped_count > 0))
 
     version_file = "data/version.json"
@@ -961,14 +952,13 @@ def update_system():
         try:
             with open(version_file, 'r', encoding='utf-8') as f:
                 version_data_local = json.load(f)
-            
-            # Обновляем версию только если удаленная версия новее
+
             current_version_str = version_data_local.get("version", "0.00.00")
-            if network_api._compare_versions(remote_version, current_version_str) > 0:
+            if force or network_api._compare_versions(remote_version, current_version_str) > 0:
                 print(f"Updating version from {current_version_str} to {remote_version}", flush=True)
                 version_data_local["version"] = remote_version
                 version_data_local["version_type"] = remote_version_type
-                
+
                 with open(version_file, 'w', encoding='utf-8') as f:
                     json.dump(version_data_local, f, indent=4, ensure_ascii=False)
                 print(f"Version updated to {remote_version}", flush=True)
@@ -980,8 +970,7 @@ def update_system():
             traceback.print_exc()
     elif not should_update_version:
         print(f"Skipping version update due to download errors ({error_count} errors)", flush=True)
-        
-    # Перезапускаем сервисы/проект только если обновление было успешным
+
     if success:
         if not venv_updated and (requirements_changed or main_py_changed):
             try:
@@ -990,7 +979,7 @@ def update_system():
                 venv_recreate_flag.touch()
             except Exception:
                 pass
-        
+
         if has_non_service_changes:
             print("Restarting project due to non-service changes", flush=True)
             restart_project()
@@ -1000,9 +989,17 @@ def update_system():
                 restart_service(service_name)
     else:
         print(f"Update completed with errors. Version synced to {remote_version}, but some files failed to download.", flush=True)
-    
+
     return success
 
 
 if __name__ == '__main__':
-    update_system()
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser(description="RGW2 system updater")
+    _parser.add_argument('--force', action='store_true',
+                         help='Ignore version comparison and force update')
+    _parser.add_argument('--ip', default=None, metavar='IP',
+                         help='Force update from this specific IP (implies --force)')
+    _args = _parser.parse_args()
+    _force = _args.force or bool(_args.ip)
+    update_system(force=_force, source_ip=_args.ip)

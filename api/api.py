@@ -151,6 +151,56 @@ def camera_mjpeg_stream(camera_id):
     )
 
 
+@app.route('/api/cameras/<camera_id>/webrtc/offer', methods=['POST', 'OPTIONS'])
+def webrtc_offer(camera_id):
+    """
+    WebRTC signaling — принять SDP offer от браузера, вернуть SDP answer.
+
+    Body (JSON): { "sdp": "<offer SDP>", "type": "offer" }
+    Response:    { "success": true, "conn_id": "<uuid>", "sdp": "<answer SDP>", "type": "answer" }
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        from services.camera_stream import webrtc_handler
+        data = request.get_json(force=True) or {}
+        offer_sdp = data.get('sdp', '')
+        offer_type = data.get('type', 'offer')
+        quality_mode = data.get('quality', 'high')  # 'low'|'high'
+        if not offer_sdp:
+            return jsonify({'success': False, 'message': 'sdp field required'}), 400
+
+        result = webrtc_handler.handle_offer(camera_id, offer_sdp, offer_type, quality_mode=quality_mode)
+        status_code = 200 if result.get('success') else 500
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/cameras/<camera_id>/webrtc/<conn_id>', methods=['DELETE', 'OPTIONS'])
+def webrtc_close(camera_id, conn_id):
+    """Close a WebRTC peer connection."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        from services.camera_stream import webrtc_handler
+        result = webrtc_handler.close_peer(conn_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/cameras/webrtc/connections', methods=['GET'])
+def webrtc_connections():
+    """List active WebRTC peer connections (for debugging)."""
+    try:
+        from services.camera_stream import webrtc_handler
+        return jsonify({'success': True, 'connections': webrtc_handler.get_active_connections()})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/status', methods=['GET'])
 def api_status():
     """Возвращает статус робота."""
@@ -236,6 +286,15 @@ def run():
             else:
                 print(f"Error: All fallback API ports are in use.", flush=True)
                 return
+
+    # Persist the actual port so other services (web proxy, remote calls) use it.
+    try:
+        manager = services_manager.get_services_manager()
+        current_port = manager.get_service_parameters("api").get("port", 5000)
+        if int(current_port) != int(port):
+            manager.update_service_parameter("api", "port", int(port))
+    except Exception:
+        pass
     
     print(f"Starting API service on port {port}...", flush=True)
     import sys

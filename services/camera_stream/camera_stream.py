@@ -78,12 +78,17 @@ def get_service_name() -> str:
 
 
 def _try_open_camera(camera_idx: int):
-    """Попытка открыть USB камеру с разными backend'ами. Возвращает VideoCapture или None."""
+    """Попытка открыть USB камеру через V4L2 backend'ы. Возвращает VideoCapture или None.
+
+    CAP_ANY намеренно исключён: на системах с GStreamer он может выбрать gst-launch
+    pipeline с внутренней очередью ~1 сек, что добавляет скрытую задержку.
+    Используем только низкоуровневые V4L2 бэкенды.
+    """
     if not CV2_AVAILABLE:
         return None
-    
-    backends = [cv2.CAP_V4L2, cv2.CAP_ANY, cv2.CAP_V4L]
-    
+
+    backends = [cv2.CAP_V4L2, cv2.CAP_V4L]
+
     for backend in backends:
         cap = None
         try:
@@ -141,6 +146,32 @@ def detect_cameras() -> List[Dict]:
                             cap.release()
             except Exception:
                 pass
+
+    # Fallback: если OpenCV не доступен или нет прав открыть камеру, всё равно
+    # показываем устройства /dev/video* в списке (available будет False без прав).
+    try:
+        existing_ids = {c.get("id") for c in cameras if isinstance(c, dict)}
+        for i in range(10):
+            dev_path = f"/dev/video{i}"
+            if not os.path.exists(dev_path):
+                continue
+            cam_id = f"usb_{i}"
+            if cam_id in existing_ids:
+                continue
+            can_rw = os.access(dev_path, os.R_OK | os.W_OK)
+            cameras.append({
+                "id": cam_id,
+                "type": "usb",
+                "name": f"USB Camera {i}",
+                "device_path": dev_path,
+                "index": i,
+                "width": 640,
+                "height": 480,
+                "fps": 30.0,
+                "available": bool(can_rw),
+            })
+    except Exception:
+        pass
     
     # RealSense камеры
     if REALSENSE_AVAILABLE:
@@ -174,18 +205,17 @@ def get_selected_cameras() -> List[Dict]:
     all_cameras = detect_cameras()
     selected = []
     
-    # Всегда добавляем usb_2 если доступна
-    usb_2_camera = None
-    for cam in all_cameras:
-        if cam.get("id") == "usb_2":
-            usb_2_camera = cam
-            break
-    
+    # Предпочитаем usb_2, но не "ломаем" список если она недоступна (например, нет прав).
+    usb_2_camera = next((cam for cam in all_cameras if cam.get("id") == "usb_2"), None)
     if usb_2_camera:
         selected.append(usb_2_camera)
     else:
-        # Если usb_2 недоступна, возвращаем пустой список
-        return []
+        # Fallback: берём первую доступную USB-камеру
+        first_usb = next((cam for cam in all_cameras if cam.get("id", "").startswith("usb_")), None)
+        if first_usb:
+            selected.append(first_usb)
+        else:
+            return []
     
     # Перебираем usb_1, usb_3, usb_4, usb_5 без повторений
     candidates = [1, 3, 4, 5]  # Исключаем 2, так как уже добавили
@@ -198,7 +228,7 @@ def get_selected_cameras() -> List[Dict]:
                     selected.append(cam)
                     return selected  # Возвращаем как только нашли одну
     
-    # Если не нашли вторую камеру, возвращаем только usb_2
+    # Если не нашли вторую камеру, возвращаем одну
     return selected
 
 
@@ -365,17 +395,34 @@ class CameraStream:
             with _suppress_stderr():
                 self.cap = _try_open_camera(idx)
             if not self.cap or not self.cap.isOpened():
+                print(f"[CameraStream] USB open failed ({self.camera_id}) idx={idx} path={self.camera_info.get('device_path')}", flush=True)
                 return False
             with _suppress_stderr():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
                 self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                # Request minimal V4L2 kernel buffer: 1 frame prevents stale-frame latency.
+                # Note: some drivers ignore this, so we also drain below.
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            # Проверяем чтение кадра
-            ret, frame = self.cap.read()
+
+            # Drain V4L2 kernel buffer that accumulated during detect_cameras() probing.
+            # Each grab() returns immediately when a frame is already queued, so this
+            # is fast (<5 ms total) if frames were buffered; if none are queued it just
+            # reads one warm-up frame.  This is the primary fix for 1-second latency on
+            # cameras whose V4L2 driver doesn't honour BUFFERSIZE=1.
+            with _suppress_stderr():
+                for _ in range(5):
+                    ret, _ = self.cap.read()
+                    if not ret:
+                        break
+
+            # Final verification read
+            with _suppress_stderr():
+                ret, frame = self.cap.read()
             if ret and frame is not None:
                 return True
             else:
+                print(f"[CameraStream] USB read failed ({self.camera_id}) idx={idx}", flush=True)
                 self.cap.release()
                 self.cap = None
                 return False
@@ -756,6 +803,7 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
     # Инициализация стрима выполняется вне лока — может занимать 0.5–1.5 сек
     stream = CameraStream(camera_info, udp_port=udp_port, width=width, height=height, fps=fps)
     if not stream.start():
+        print(f"[CameraStream] Failed to start stream for {camera_id}", flush=True)
         return False
 
     with _streams_lock:

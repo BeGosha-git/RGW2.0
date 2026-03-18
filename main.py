@@ -9,7 +9,68 @@ import subprocess
 import json
 import re
 from pathlib import Path
+import faulthandler
 import services_manager
+
+# If a selected venv python segfaults on startup, we must not `execv` into it.
+# We detect this by running a short smoke-test in a subprocess.
+def _python_smoke_test(python_exe: Path) -> bool:
+    import subprocess as _subprocess
+    env = os.environ.copy()
+    # Prevent our own environment tweaks from affecting dynamic linking.
+    env.pop("LD_LIBRARY_PATH", None)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    try:
+        proc = _subprocess.run(
+            [str(python_exe), "-c", "import sys; print('ok', sys.version)"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _pick_usable_venv_python(preferred_version=None):
+    """
+    Returns a python executable path from venv-<version>/bin that successfully
+    starts a minimal python command.
+    """
+    order = ["3.13", "3.11", "3.8"]
+    versions = ([preferred_version] if preferred_version else []) + [v for v in order if v != preferred_version]
+
+    for v in versions:
+        venv_path = Path(f"venv-{v}")
+        venv_ready_flag = venv_path / ".ready"
+
+        # Try to ensure it exists (works offline if tar archives are present).
+        if not venv_path.exists() or not venv_ready_flag.exists():
+            try:
+                setup_virtual_environment_for_version(v)
+            except Exception:
+                pass
+
+        candidates = [
+            venv_path / "bin" / f"python{v}",
+            venv_path / "bin" / "python3",
+            venv_path / "bin" / "python",
+        ]
+        for c in candidates:
+            if c.exists() and _python_smoke_test(c):
+                return c
+    return None
+
+# If Python segfaults (native extension crash), dump a traceback into logs.
+# This makes `systemctl status rgw2` / `journalctl -u rgw2` show where it died.
+try:
+    faulthandler.enable(all_threads=True)
+except Exception:
+    pass
 
 
 def is_windows():
@@ -20,6 +81,121 @@ def is_windows():
         True если Windows, False иначе
     """
     return platform.system() == 'Windows'
+
+
+def _kill_process_tree(pid: int, timeout: float = 3.0) -> bool:
+    """Send SIGTERM to pid, wait timeout seconds, then SIGKILL if still alive."""
+    import signal as _signal
+    import time
+    try:
+        os.kill(pid, _signal.SIGTERM)
+    except ProcessLookupError:
+        return True  # already gone
+    except PermissionError:
+        print(f"No permission to kill PID {pid}", flush=True)
+        return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)  # check still alive
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+
+    # Force kill
+    try:
+        os.kill(pid, _signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _single_instance_guard(force: bool = False) -> None:
+    """
+    Prevent multiple RGW2 instances on the same host.
+    If force=True, kills the existing instance (reads PID from lock file)
+    and then acquires the lock for the current process.
+    """
+    if is_windows():
+        return
+    try:
+        import fcntl
+        lock_dir = Path("data")
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / "rgw2.lock"
+        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if not force:
+                print("Another RGW2 instance is already running. Exiting.\n"
+                      "Use --force to kill it and start a new one.", flush=True)
+                sys.exit(0)
+
+            # --force: read old PID, kill it, then re-acquire the lock
+            try:
+                os.lseek(lock_fd, 0, os.SEEK_SET)
+                raw = os.read(lock_fd, 32).decode(errors='ignore').strip()
+                old_pid = int(raw) if raw.isdigit() else None
+            except Exception:
+                old_pid = None
+
+            if old_pid:
+                print(f"--force: killing existing RGW2 instance (PID {old_pid})…", flush=True)
+                _kill_process_tree(old_pid)
+            else:
+                print("--force: no PID in lock file, removing stale lock…", flush=True)
+
+            # Remove lock file and re-open (the old fd is dead now)
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+            try:
+                lock_path.unlink()
+            except Exception:
+                pass
+
+            import time
+            time.sleep(0.5)  # give the kernel a moment to release ports
+
+            # Also kill any process still holding our ports
+            _force_free_ports([8080, 5000, 8765, 8766])
+
+            lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must succeed now
+
+        os.truncate(lock_fd, 0)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        os.write(lock_fd, str(os.getpid()).encode())
+        # Keep fd open for process lifetime (do not close!)
+    except (BlockingIOError, SystemExit):
+        raise
+    except Exception:
+        # Don't hard-fail if locking isn't available
+        return
+
+
+def _force_free_ports(ports: list) -> None:
+    """Kill whatever process is listening on each port in the list."""
+    for port in ports:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for pid_str in result.stdout.strip().split():
+                    try:
+                        pid = int(pid_str)
+                        if pid != os.getpid():
+                            _kill_process_tree(pid)
+                            print(f"--force: freed port {port} (killed PID {pid})", flush=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 
 def setup_virtual_environment_for_version(python_version: str) -> bool:
@@ -53,9 +229,20 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
     # Если venv уже готов - готово
     if venv_path.exists() and venv_ready_flag.exists() and python_path.exists():
         print(f"Virtual environment for Python {python_version} is ready", flush=True)
-        # Создаем архив если его нет
+        # Обновляем пакеты если requirements.txt изменился
+        packages_updated = _update_packages_if_needed(venv_path, python_path, pip_path, python_version)
+        if not packages_updated:
+            # Critical runtime deps are missing (e.g. `requests` in offline environment).
+            # Mark venv as not ready so the code will re-extract/rebuild it from the tar archive.
+            try:
+                venv_ready_flag.unlink(missing_ok=True)
+            except Exception:
+                pass
+            print(f"[venv-{python_version}] venv marked not-ready (critical deps missing).", flush=True)
+            return False
+        # Создаем/обновляем архив
         venv_archive = Path(f"venv-{python_version}.tar.gz")
-        if not venv_archive.exists():
+        if not venv_archive.exists() or packages_updated:
             try:
                 create_venv_archive_for_version(python_version)
             except Exception:
@@ -86,6 +273,28 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
             
             venv_ready_flag.touch()
             print(f"Successfully extracted venv-{python_version}.tar.gz", flush=True)
+
+            # Restore execute permissions on all bin/ scripts — tarfile extraction
+            # can lose the +x bit depending on the platform umask or filter used.
+            try:
+                import stat as _stat
+                venv_bin_dir = venv_path / "bin"
+                if venv_bin_dir.exists():
+                    for _f in venv_bin_dir.iterdir():
+                        if _f.is_file():
+                            _mode = _f.stat().st_mode
+                            if not (_mode & _stat.S_IXUSR):
+                                os.chmod(str(_f), _mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+            except Exception:
+                pass
+
+            # Обновляем пакеты если архив был собран с другими requirements
+            _update_packages_if_needed(venv_path, python_path, pip_path, python_version)
+            # Пересоздаём архив с актуальными пакетами
+            try:
+                create_venv_archive_for_version(python_version)
+            except Exception:
+                pass
             return True
         except Exception as e:
             print(f"Warning: Failed to extract venv-{python_version}.tar.gz: {e}", flush=True)
@@ -134,9 +343,15 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
     if not install_packages_to_venv(venv_path, python_path, pip_path, python_version):
         print(f"Warning: Failed to install packages for Python {python_version}", flush=True)
         return False
-    
+
     venv_ready_flag.touch()
-    
+
+    # Сохраняем hash requirements.txt чтобы отслеживать изменения
+    requirements_file = Path(f"requirements-{python_version}.txt")
+    if not requirements_file.exists():
+        requirements_file = Path("requirements.txt")
+    _save_requirements_hash(venv_path, requirements_file)
+
     # Создаем архив
     try:
         create_venv_archive_for_version(python_version)
@@ -146,6 +361,122 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
     
     print(f"Virtual environment for Python {python_version} created successfully", flush=True)
     return True
+
+
+def _requirements_hash(requirements_file: Path) -> str:
+    """Return a short SHA-256 digest of requirements.txt (comments stripped)."""
+    import hashlib
+    lines = []
+    try:
+        with open(requirements_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    lines.append(stripped.lower())
+    except Exception:
+        return ''
+    return hashlib.sha256('\n'.join(sorted(lines)).encode()).hexdigest()[:16]
+
+
+def _stored_requirements_hash(venv_path: Path) -> str:
+    """Return the hash that was stored when the venv was last updated."""
+    hash_file = venv_path / '.requirements_hash'
+    try:
+        return hash_file.read_text(encoding='utf-8').strip()
+    except Exception:
+        return ''
+
+
+def _save_requirements_hash(venv_path: Path, requirements_file: Path):
+    """Persist the current requirements hash inside the venv directory."""
+    try:
+        h = _requirements_hash(requirements_file)
+        (venv_path / '.requirements_hash').write_text(h, encoding='utf-8')
+    except Exception:
+        pass
+
+
+def _update_packages_if_needed(venv_path: Path, python_path: Path, pip_path: Path,
+                                 python_version: str) -> bool:
+    """
+    Re-run pip install if requirements.txt changed since the venv was last built.
+    Returns True if packages are up-to-date (no action needed or update succeeded).
+    """
+    requirements_file = Path(f"requirements-{python_version}.txt")
+    if not requirements_file.exists():
+        requirements_file = Path("requirements.txt")
+    if not requirements_file.exists():
+        return True  # Nothing to check
+
+    current_hash = _requirements_hash(requirements_file)
+    stored_hash  = _stored_requirements_hash(venv_path)
+
+    # If hashes match, still verify that critical imports exist.
+    # Otherwise we can mark the venv as "up-to-date" while it is missing
+    # required runtime dependencies (e.g. `requests` in offline environments).
+    if current_hash == stored_hash:
+        check = subprocess.run(
+            [str(python_path), "-c", "import flask, requests"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if check.returncode == 0:
+            return True  # Already up-to-date and critical deps exist
+
+    print(f"[venv-{python_version}] requirements.txt changed — updating packages...", flush=True)
+    # In some offline/tar-extracted venvs `pip` can be missing or non-executable.
+    # Don't crash here — try to (re)install pip and then install requirements.
+    if (not pip_path.exists()) or (not os.access(str(pip_path), os.X_OK)):
+        print(f"[venv-{python_version}] pip missing or not executable; installing pip...", flush=True)
+        return install_packages_to_venv(venv_path, python_path, pip_path, python_version)
+
+    # Offline installs should use local wheels if present.
+    has_internet = check_internet()
+    cmd = [
+        str(pip_path),
+        "install",
+        "--quiet",
+        "--no-warn-script-location",
+        "-r",
+        str(requirements_file),
+    ]
+    if not has_internet:
+        offline_dir = Path("offline_packages")
+        if offline_dir.exists():
+            cmd += ["--no-index", "--find-links", str(offline_dir.resolve())]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except FileNotFoundError:
+        # pip path existed at check time but is broken/not available for execution.
+        print(f"[venv-{python_version}] pip execution failed (FileNotFoundError); reinstalling pip...", flush=True)
+        return install_packages_to_venv(venv_path, python_path, pip_path, python_version)
+    if result.returncode == 0:
+        print(f"[venv-{python_version}] Packages updated successfully", flush=True)
+        _save_requirements_hash(venv_path, requirements_file)
+        return True
+    else:
+        # Partial failure — still save hash so we don't retry on every startup
+        # if it's a known-optional package that can't be built on this platform.
+        print(f"[venv-{python_version}] Some packages failed to update: "
+              f"{result.stderr[:300]}", flush=True)
+        # Check that critical runtime deps imported fine before accepting partial success.
+        check = subprocess.run(
+            [str(python_path), "-c", "import flask, requests"],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+        if check.returncode == 0:
+            _save_requirements_hash(venv_path, requirements_file)
+            return True
+        return False
 
 
 def install_packages_to_venv(venv_path: Path, python_path: Path, pip_path: Path, python_version: str) -> bool:
@@ -1423,8 +1754,8 @@ WantedBy=multi-user.target
 def check_and_update_version():
     """Проверяет и обновляет версию проекта."""
     try:
-        import update
-        return update.check_and_update_version()
+        import upgrade
+        return upgrade.check_and_update_version()
     except Exception:
         return False
 
@@ -1432,8 +1763,8 @@ def check_and_update_version():
 def run_update():
     """Запускает обновление системы."""
     try:
-        import update
-        return update.update_system()
+        import upgrade
+        return upgrade.update_system()
     except Exception:
         return False
 
@@ -1446,7 +1777,10 @@ def run_services():
         return True
     except KeyboardInterrupt:
         return True
-    except Exception:
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[RGW2] run_services error: {e}", flush=True)
         return False
 
 
@@ -1464,19 +1798,24 @@ def main(python_version: str = None, debug: bool = False):
         os.environ['RGW2_DEBUG'] = '1'
     else:
         os.environ.pop('RGW2_DEBUG', None)
+
+    print("[RGW2] entering main()", flush=True)
     try:
         try:
+            print("[RGW2] ensure_default_commands()", flush=True)
             import api.robot as robot_api
             robot_api.RobotAPI.ensure_default_commands()
         except Exception:
             pass
         
         try:
+            print("[RGW2] check_and_update_version()", flush=True)
             check_and_update_version()
         except Exception:
             pass
         
         try:
+            print("[RGW2] refresh_services()", flush=True)
             manager = services_manager.get_services_manager()
             manager.refresh_services()
         except Exception:
@@ -1603,8 +1942,89 @@ def main(python_version: str = None, debug: bool = False):
                 except (OSError, ValueError):
                     venv_same = (str(venv_python_resolved) == str(current_python))
 
+                # Ensure critical deps exist in the selected venv.
+                # Some hosts extract venvs from tar archives without packages like `flask/requests`.
+                deps_version = os.environ.get('PYTHON_VERSION') or (
+                    str(venv_path).split('venv-')[-1] if 'venv-' in str(venv_path) else None
+                )
+                if deps_version and _python_smoke_test(venv_python):
+                    dep_check = subprocess.run(
+                        [str(venv_python), "-c", "import flask, requests"],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    if dep_check.returncode != 0:
+                        print(f"[RGW2] critical deps missing in {venv_path}; installing...", flush=True)
+                        if is_windows():
+                            pip_guess = venv_path / "Scripts" / "pip.exe"
+                        else:
+                            pip_guess = venv_path / "bin" / "pip"
+                        try:
+                            install_packages_to_venv(venv_path, venv_python, pip_guess, deps_version)
+                        except Exception as _e:
+                            print(f"[RGW2] Failed to install critical deps: {_e}", flush=True)
+
                 if not venv_same:
-                    os.execv(str(venv_python_resolved), [str(venv_python_resolved)] + sys.argv)
+                    preferred_version = os.environ.get('PYTHON_VERSION')
+                    # Smoke-test to avoid execv into a python that immediately SIGSEGVs.
+                    if not _python_smoke_test(venv_python):
+                        fallback_python = _pick_usable_venv_python(preferred_version=preferred_version)
+                        if fallback_python:
+                            try:
+                                venv_path = fallback_python.parent.parent
+                                venv_python = fallback_python
+                                os.environ['PYTHON_VERSION'] = venv_path.name.replace('venv-', '')
+                                venv_same = False
+                                print(f"[RGW2] Using fallback venv python: {venv_python}", flush=True)
+                            except Exception:
+                                fallback_python = None
+
+                    # If still not usable, don't execv (prevents systemd crash loops).
+                    if not _python_smoke_test(venv_python):
+                        print(f"[RGW2] venv python smoke-test failed; skipping execv: {venv_python}", flush=True)
+                        venv_same = True
+                        pass
+
+                    # Ensure the venv Python binary is executable (may lose +x
+                    # when the venv is extracted from a tar.gz archive).
+                    if not venv_same and not os.access(str(venv_python), os.X_OK):
+                        try:
+                            import stat as _stat
+                            current_mode = os.stat(str(venv_python)).st_mode
+                            os.chmod(str(venv_python), current_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+                            print(f"Fixed execute permission on {venv_python}", flush=True)
+                        except Exception as _e:
+                            print(f"Warning: could not chmod venv Python: {_e}", flush=True)
+
+                    # Fix all bin/ scripts in the venv (same issue with pip, activate, etc.)
+                    if not venv_same:
+                        venv_bin = venv_path / "bin"
+                        if venv_bin.exists():
+                            try:
+                                import stat as _stat
+                                for _f in venv_bin.iterdir():
+                                    if _f.is_file() and not os.access(str(_f), os.X_OK):
+                                        try:
+                                            _mode = os.stat(str(_f)).st_mode
+                                            os.chmod(str(_f), _mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+
+                    # Set VIRTUAL_ENV so the re-executed process knows it is already
+                    # inside a venv and skips a second re-execution cycle.
+                    if not venv_same:
+                        os.environ['VIRTUAL_ENV'] = str(venv_path)
+                        # Use the *unresolved* symlink path so Python can locate
+                        # pyvenv.cfg and activate site-packages for this venv.
+                        if os.access(str(venv_python), os.X_OK):
+                            print(f"[RGW2] execv -> {venv_python}", flush=True)
+                            os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+                        else:
+                            print(f"Warning: venv Python {venv_python} is not executable, running with current Python", flush=True) 
             else:
                 selected_version = python_version or os.environ.get('PYTHON_VERSION')
                 if selected_version:
@@ -1627,6 +2047,8 @@ def main(python_version: str = None, debug: bool = False):
             if not in_docker:
                 run_update()
             run_services()
+    except SystemExit:
+        raise
     except Exception:
         raise
 
@@ -1682,12 +2104,17 @@ def cleanup_ports():
 if __name__ == '__main__':
     import signal
     import argparse
-    
-    # Обработка аргументов командной строки
+
+    # Parse args BEFORE the instance guard so --force is available
     parser = argparse.ArgumentParser(description='RGW2.0 Main Service')
-    parser.add_argument('--version', type=str, choices=['3.8', '3.11', '3.13'], help='Python version to use (3.8, 3.11, or 3.13)')
+    parser.add_argument('--version', type=str, choices=['3.8', '3.11', '3.13'],
+                        help='Python version to use (3.8, 3.11, or 3.13)')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--force', action='store_true',
+                        help='Kill any existing RGW2 instance and free its ports before starting')
     args = parser.parse_args()
+
+    _single_instance_guard(force=args.force)
     
     # Проверяем автозапуск
     autostart_configured = False
@@ -1826,6 +2253,9 @@ if __name__ == '__main__':
     except SystemExit:
         cleanup_ports()
         raise
-    except Exception:
+    except Exception as _e:
+        import traceback
+        print(f"[RGW2] FATAL ERROR: {_e}", flush=True)
+        traceback.print_exc()
         cleanup_ports()
         sys.exit(1)

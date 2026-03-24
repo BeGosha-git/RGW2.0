@@ -674,6 +674,20 @@ def get_controller() -> Optional[MotorController]:
     return _controller
 
 
+def _get_robot_type() -> str:
+    """Читает тип робота из data/settings.json."""
+    try:
+        settings_path = ROOT / "data" / "settings.json"
+        if not settings_path.exists():
+            return ""
+        import json
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("RobotType", "")).strip().upper()
+    except Exception:
+        return ""
+
+
 def run():
     """
     Основная функция запуска сервиса.
@@ -701,6 +715,23 @@ def run():
     # Параметры конфигурации
     domain_id = params.get("id", 1)
     network_interface = params.get("network", "lo")
+    safety_force_hold = bool(params.get("safety_force_hold", True))
+
+    robot_type = _get_robot_type()
+    if robot_type == "G1":
+        print(f"[{service_name}] RobotType=G1 detected. H1 motor control is disabled for this robot.", flush=True)
+        status.register_service_data(service_name, {
+            "status": "skipped",
+            "initialized": False,
+            "robot_type": robot_type,
+            "reason": "H1 motor control is not used for G1",
+            "safety_force_hold": safety_force_hold,
+        })
+        try:
+            manager.update_service_status(service_name, "OFF")
+        except Exception:
+            pass
+        return
     
     # Проверяем доступность SDK
     if not SDK_AVAILABLE:
@@ -742,6 +773,10 @@ def run():
                 service_status = "ON"
             
             if service_status == "OFF":
+                if not safety_force_hold:
+                    print(f"[{service_name}] safety_force_hold disabled. Stopping on first OFF request.", flush=True)
+                    break
+
                 time_since_last = current_time - last_shutdown_request_time if last_shutdown_request_time > 0 else shutdown_request_timeout + 1
                 
                 if time_since_last > shutdown_request_timeout:

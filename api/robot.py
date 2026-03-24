@@ -4,7 +4,7 @@ API модуль для работы с данным роботом.
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import status
 
 # Определяем корень проекта
@@ -148,6 +148,17 @@ class RobotAPI:
             Результат выполнения
         """
         try:
+            if command == "g1_arm_action":
+                action_name = ""
+                if args and len(args) > 0:
+                    action_name = str(args[0]).strip()
+                if not action_name:
+                    return {
+                        "success": False,
+                        "message": "g1_arm_action requires action name in args[0]"
+                    }
+                return RobotAPI.execute_g1_arm_action(action_name)
+
             import execute
             
             # Собираем stdout и stderr
@@ -201,6 +212,85 @@ class RobotAPI:
                 "success": False,
                 "message": f"Error executing command: {str(e)}",
                 "command": command
+            }
+
+    @staticmethod
+    def _get_robot_type() -> str:
+        try:
+            settings_path = PROJECT_ROOT / "data" / "settings.json"
+            if not settings_path.exists():
+                return ""
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            return str(settings.get("RobotType", "")).strip().upper()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _filter_commands_by_robot_type(commands: List[Dict[str, Any]], robot_type: str) -> List[Dict[str, Any]]:
+        if not robot_type:
+            return commands
+
+        filtered: List[Dict[str, Any]] = []
+        for cmd in commands:
+            allowed_types = cmd.get("robotTypes")
+            if not allowed_types:
+                filtered.append(cmd)
+                continue
+            normalized = {str(item).strip().upper() for item in allowed_types}
+            if robot_type in normalized:
+                filtered.append(cmd)
+        return filtered
+
+    @staticmethod
+    def get_g1_arm_actions() -> Dict[str, Any]:
+        try:
+            from services.unitree_motor_control.g1_arm_action_service import get_g1_actions
+            actions = get_g1_actions()
+            return {
+                "success": True,
+                "actions": [{"name": name, "id": action_id} for name, action_id in actions.items()],
+                "count": len(actions),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error loading G1 arm actions: {e}",
+                "actions": [],
+            }
+
+    @staticmethod
+    def execute_g1_arm_action(action_name: str) -> Dict[str, Any]:
+        robot_type = RobotAPI._get_robot_type()
+        if robot_type != "G1":
+            return {
+                "success": False,
+                "message": f"G1 arm actions are available only for RobotType=G1 (current: {robot_type or 'UNKNOWN'})",
+            }
+
+        try:
+            from services.unitree_motor_control.g1_arm_action_service import get_g1_arm_action_service
+            network_interface = "lo"
+            domain_id = 0
+            try:
+                import services_manager
+                manager = services_manager.get_services_manager()
+                params = manager.get_service_parameters("unitree_motor_control")
+                network_interface = params.get("network", "lo")
+                domain_id = int(params.get("id", 0))
+            except Exception:
+                pass
+
+            service = get_g1_arm_action_service()
+            return service.execute(
+                action_name=action_name,
+                network_interface=network_interface,
+                domain_id=domain_id,
+            )
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error executing G1 arm action: {e}",
             }
     
     @staticmethod
@@ -289,7 +379,10 @@ class RobotAPI:
                     data = json.load(f)
                     return {
                         "success": True,
-                        "commands": data.get("commands", []),
+                        "commands": RobotAPI._filter_commands_by_robot_type(
+                            data.get("commands", []),
+                            RobotAPI._get_robot_type(),
+                        ),
                         "version": data.get("version", "1.0.0"),
                         "lastUpdated": data.get("lastUpdated")
                     }

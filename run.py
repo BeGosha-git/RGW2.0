@@ -7,6 +7,7 @@ import sys
 import importlib.util
 import threading
 import time
+import signal
 from pathlib import Path
 from typing import List, Dict
 import services_manager
@@ -15,6 +16,8 @@ from utils.path_utils import get_project_root, get_venv_path
 from utils.network_utils import PortManager
 
 logger = get_logger(__name__)
+_signal_lock = threading.Lock()
+_shutdown_in_progress = False
 
 if 'PYTHONUNBUFFERED' not in os.environ:
     os.environ['PYTHONUNBUFFERED'] = '1'
@@ -137,7 +140,7 @@ class ServiceRunner:
         service_files.sort(key=lambda f: (0 if _Path(f).stem == _Path(f).parent.name else 1, f))
 
         return service_files
-    
+
     def load_service(self, filepath: str) -> bool:
         """
         Загружает и запускает сервис из файла.
@@ -247,7 +250,8 @@ class ServiceRunner:
                     except Exception as e:
                         logger.error(f"Error in service {service_name}: {e}", exc_info=True)
                 
-                thread = threading.Thread(target=service_wrapper, daemon=False)
+                # Daemon thread: process can terminate promptly on stop/restart.
+                thread = threading.Thread(target=service_wrapper, daemon=True)
                 thread.start()
                 self.threads.append(thread)
                 
@@ -456,6 +460,7 @@ class ServiceRunner:
     def stop_all_services(self):
         """Останавливает все сервисы."""
         self.running = False
+        stop_deadline = time.time() + 4.5
 
         try:
             motor_service_status = self.manager.get_service("unitree_motor_control")
@@ -466,7 +471,10 @@ class ServiceRunner:
                     and self.services[i].get("service_name") != "unitree_motor_control"
                 ]
                 for thread in threads_to_stop:
-                    thread.join(timeout=5)
+                    remaining = stop_deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    thread.join(timeout=min(0.5, remaining))
                 # Still free ports even when motor is running —
                 # web/api ports must be released so a restart can bind them.
                 self.cleanup_ports()
@@ -475,7 +483,10 @@ class ServiceRunner:
             pass
 
         for thread in self.threads:
-            thread.join(timeout=5)
+            remaining = stop_deadline - time.time()
+            if remaining <= 0:
+                break
+            thread.join(timeout=min(0.5, remaining))
 
         self.cleanup_ports()
     
@@ -524,6 +535,25 @@ def run_services():
     try:
         runner = ServiceRunner()
         _active_runner = runner
+        
+        def _handle_stop_signal(signum, _frame):
+            global _shutdown_in_progress
+            with _signal_lock:
+                if _shutdown_in_progress:
+                    return
+                _shutdown_in_progress = True
+            logger.info(f"Received signal {signum}, stopping services...")
+            try:
+                runner.stop_all_services()
+            finally:
+                runner.running = False
+
+        try:
+            signal.signal(signal.SIGTERM, _handle_stop_signal)
+            signal.signal(signal.SIGINT, _handle_stop_signal)
+        except Exception:
+            pass
+
         runner.run_all_services()
     except Exception:
         try:

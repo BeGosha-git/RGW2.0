@@ -842,7 +842,10 @@ function RobotsPage() {
       if (result.success === true) {
         // Если ответ содержит вложенный response с результатом выполнения команды
         const commandResult = result.response || result
-        const isCommandSuccessful = commandResult.success !== false && commandResult.return_code === 0
+        const hasReturnCode = commandResult.return_code !== undefined && commandResult.return_code !== null
+        const isCommandSuccessful = hasReturnCode
+          ? (commandResult.success !== false && commandResult.return_code === 0)
+          : (commandResult.success !== false)
         
         setRobotStatuses(prev => ({
           ...prev,
@@ -937,7 +940,10 @@ function RobotsPage() {
           if (result.success === true) {
             // Если ответ содержит вложенный response с результатом выполнения команды
             const commandResult = result.response || result
-            const isCommandSuccessful = commandResult.success !== false && commandResult.return_code === 0
+            const hasReturnCode = commandResult.return_code !== undefined && commandResult.return_code !== null
+            const isCommandSuccessful = hasReturnCode
+              ? (commandResult.success !== false && commandResult.return_code === 0)
+              : (commandResult.success !== false)
             
             return {
               robotId,

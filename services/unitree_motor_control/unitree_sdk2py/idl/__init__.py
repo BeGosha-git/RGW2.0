@@ -1,6 +1,6 @@
 # Опциональный импорт default (может отсутствовать)
 try:
-from .default import *
+    from .default import *
 except ImportError:
     pass
 

@@ -181,7 +181,8 @@ class ServicesManager:
                 "status": "OFF",
                 "enabled": False,
                 "id": 1,
-                "network": "lo",
+                "network": "eth0",
+                "safety_force_hold": True,
                 "dependencies": []
             },
             "api": {

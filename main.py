@@ -8,6 +8,7 @@ import platform
 import subprocess
 import json
 import re
+import struct
 from pathlib import Path
 import faulthandler
 import services_manager
@@ -81,6 +82,47 @@ def is_windows():
         True если Windows, False иначе
     """
     return platform.system() == 'Windows'
+
+
+def _host_architecture() -> str:
+    arch = platform.machine().lower()
+    if arch in {"arm64", "aarch64"}:
+        return "aarch64"
+    if arch in {"x86_64", "amd64"}:
+        return "x86_64"
+    return arch
+
+
+def _elf_architecture(elf_path: Path) -> str:
+    try:
+        with open(elf_path, "rb") as f:
+            hdr = f.read(20)
+        if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
+            return "unknown"
+        e_machine = struct.unpack("<H", hdr[18:20])[0]
+        if e_machine == 183:
+            return "aarch64"
+        if e_machine == 62:
+            return "x86_64"
+        return f"elf-{e_machine}"
+    except Exception:
+        return "unknown"
+
+
+def _venv_cyclonedds_arch(venv_path: Path, python_version: str) -> str:
+    site_packages = venv_path / "lib" / f"python{python_version}" / "site-packages"
+    candidates = sorted((site_packages / "cyclonedds").glob("_clayer*.so"))
+    if not candidates:
+        return "missing"
+    return _elf_architecture(candidates[0])
+
+
+def _is_venv_compatible(venv_path: Path, python_version: str) -> bool:
+    host_arch = _host_architecture()
+    dds_arch = _venv_cyclonedds_arch(venv_path, python_version)
+    if dds_arch in {"missing", "unknown"}:
+        return True
+    return dds_arch == host_arch
 
 
 def _kill_process_tree(pid: int, timeout: float = 3.0) -> bool:
@@ -228,32 +270,54 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
     
     # Если venv уже готов - готово
     if venv_path.exists() and venv_ready_flag.exists() and python_path.exists():
-        print(f"Virtual environment for Python {python_version} is ready", flush=True)
-        # Обновляем пакеты если requirements.txt изменился
-        packages_updated = _update_packages_if_needed(venv_path, python_path, pip_path, python_version)
-        if not packages_updated:
-            # Critical runtime deps are missing (e.g. `requests` in offline environment).
-            # Mark venv as not ready so the code will re-extract/rebuild it from the tar archive.
+        if not _is_venv_compatible(venv_path, python_version):
+            print(
+                f"[venv-{python_version}] Incompatible transferred venv architecture "
+                f"(host={_host_architecture()}, dds={_venv_cyclonedds_arch(venv_path, python_version)}). Rebuilding...",
+                flush=True,
+            )
             try:
-                venv_ready_flag.unlink(missing_ok=True)
+                import shutil
+                shutil.rmtree(venv_path)
             except Exception:
                 pass
-            print(f"[venv-{python_version}] venv marked not-ready (critical deps missing).", flush=True)
-            return False
-        # Создаем/обновляем архив
-        venv_archive = Path(f"venv-{python_version}.tar.gz")
-        if not venv_archive.exists() or packages_updated:
-            try:
-                create_venv_archive_for_version(python_version)
-            except Exception:
-                pass
-        return True
+        else:
+            print(f"Virtual environment for Python {python_version} is ready", flush=True)
+            # Обновляем пакеты если requirements.txt изменился
+            packages_updated = _update_packages_if_needed(venv_path, python_path, pip_path, python_version)
+            if not packages_updated:
+                # Critical runtime deps are missing (e.g. `requests` in offline environment).
+                # Mark venv as not ready so the code will re-extract/rebuild it from the tar archive.
+                try:
+                    venv_ready_flag.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                print(f"[venv-{python_version}] venv marked not-ready (critical deps missing).", flush=True)
+                return False
+            # Создаем/обновляем архив
+            venv_archive = Path(f"venv-{python_version}.tar.gz")
+            if not venv_archive.exists() or packages_updated:
+                try:
+                    create_venv_archive_for_version(python_version)
+                except Exception:
+                    pass
+            return True
     
     # Проверяем наличие архива venv для этой версии
     venv_archive = Path(f"venv-{python_version}.tar.gz")
+    venv_meta = Path(f"venv-{python_version}.meta.json")
     if venv_archive.exists():
         print(f"Found venv-{python_version}.tar.gz, extracting...", flush=True)
         try:
+            if venv_meta.exists():
+                with open(venv_meta, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta_arch = str(meta.get("host_arch", "")).lower().strip()
+                if meta_arch and meta_arch != _host_architecture():
+                    raise RuntimeError(
+                        f"Archive architecture mismatch: archive={meta_arch}, host={_host_architecture()}"
+                    )
+
             import tarfile
             import shutil
             
@@ -272,6 +336,18 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
                 extracted_venv.rename(venv_path)
             
             venv_ready_flag.touch()
+            if not _is_venv_compatible(venv_path, python_version):
+                print(
+                    f"[venv-{python_version}] Extracted archive is incompatible for this CPU "
+                    f"(host={_host_architecture()}, dds={_venv_cyclonedds_arch(venv_path, python_version)}).",
+                    flush=True,
+                )
+                try:
+                    import shutil
+                    shutil.rmtree(venv_path)
+                except Exception:
+                    pass
+                raise RuntimeError("Incompatible venv archive architecture")
             print(f"Successfully extracted venv-{python_version}.tar.gz", flush=True)
 
             # Restore execute permissions on all bin/ scripts — tarfile extraction
@@ -416,7 +492,7 @@ def _update_packages_if_needed(venv_path: Path, python_path: Path, pip_path: Pat
     # required runtime dependencies (e.g. `requests` in offline environments).
     if current_hash == stored_hash:
         check = subprocess.run(
-            [str(python_path), "-c", "import flask, requests"],
+            [str(python_path), "-c", "import flask, requests, websockets, aiortc, av"],
             check=False,
             capture_output=True,
             text=True,
@@ -846,6 +922,7 @@ def create_venv_archive_for_version(python_version: str) -> bool:
         venv_name = f"venv-{python_version}"
         venv_path = Path(venv_name)
         venv_archive = Path(f"{venv_name}.tar.gz")
+        venv_meta = Path(f"{venv_name}.meta.json")
         
         if not venv_path.exists():
             return False
@@ -856,6 +933,16 @@ def create_venv_archive_for_version(python_version: str) -> bool:
         
         with tarfile.open(venv_archive, 'w:gz') as tar:
             tar.add(venv_path, arcname=venv_name, filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+        try:
+            meta = {
+                "python_version": python_version,
+                "host_arch": _host_architecture(),
+                "cyclonedds_arch": _venv_cyclonedds_arch(venv_path, python_version),
+            }
+            with open(venv_meta, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
         
         return True
     except Exception:
@@ -1046,6 +1133,19 @@ def check_sudo_permissions():
         if result.returncode == 0:
             return True
 
+        # Если без пароля не удалось, пробуем пароль из конфигурации робота
+        sudo_password = get_sudo_password_for_robot()
+        if sudo_password:
+            result = subprocess.run(
+                ["sudo", "-S", "-k", "true"],
+                input=f"{sudo_password}\n",
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True
+
         # Пробуем с паролем (интерактивно) - но не ждем ввода
         # Просто проверяем наличие sudo
         result = subprocess.run(
@@ -1057,6 +1157,79 @@ def check_sudo_permissions():
         return result.returncode == 0
     except Exception:
         return False
+
+
+def get_sudo_password_for_robot() -> str:
+    """
+    Возвращает sudo-пароль на основе типа робота из data/settings.json.
+    H1 -> Unitree0408, G1/G -> 123
+    """
+    try:
+        data_dir = Path(__file__).parent / "data"
+        settings_path = data_dir / "settings.json"
+        passwords_path = data_dir / "sudo_passwords.json"
+        if settings_path.exists():
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            robot_type = str(settings.get("RobotType", "")).upper()
+        else:
+            robot_type = ""
+    except Exception:
+        robot_type = ""
+
+    # Сначала читаем пользовательский файл маппинга паролей
+    try:
+        if passwords_path.exists():
+            with open(passwords_path, "r", encoding="utf-8") as f:
+                pwd_map = json.load(f)
+            if isinstance(pwd_map, dict):
+                configured = pwd_map.get(robot_type) or pwd_map.get(robot_type.upper())
+                if configured:
+                    return str(configured)
+    except Exception:
+        pass
+
+    if robot_type == "H1":
+        return "Unitree0408"
+    if robot_type in {"G1", "G"}:
+        return "123"
+    return ""
+
+
+def run_sudo_command(command: list, timeout: int = 120):
+    """
+    Выполняет sudo-команду без TTY, используя пароль из конфигурации при необходимости.
+    """
+    if not command:
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="Empty command")
+
+    if command[0] != "sudo":
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+    # Сначала пробуем без пароля
+    try:
+        result = subprocess.run(
+            ["sudo", "-n"] + command[1:],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        if result.returncode == 0:
+            return result
+    except Exception:
+        pass
+
+    sudo_password = get_sudo_password_for_robot()
+    if not sudo_password:
+        return subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="No sudo password configured")
+
+    return subprocess.run(
+        ["sudo", "-S", "-k"] + command[1:],
+        input=f"{sudo_password}\n",
+        capture_output=True,
+        text=True,
+        timeout=timeout
+    )
 
 
 def check_internet():
@@ -1500,10 +1673,8 @@ def install_dependencies_offline():
                     for deb_file in deb_files:
                         pkg_name = deb_file.stem
                         print(f"  Installing {pkg_name}...", flush=True)
-                        result = subprocess.run(
+                        result = run_sudo_command(
                             ["sudo", "dpkg", "-i", str(deb_file)],
-                            capture_output=True,
-                            text=True,
                             timeout=120
                         )
                         
@@ -1517,10 +1688,8 @@ def install_dependencies_offline():
                     # Исправляем зависимости если были ошибки
                     if failed_packages:
                         print("Fixing dependencies...", flush=True)
-                        fix_result = subprocess.run(
+                        fix_result = run_sudo_command(
                             ["sudo", "apt-get", "install", "-f", "-y"],
-                            capture_output=True,
-                            text=True,
                             timeout=300
                         )
                         if fix_result.returncode == 0:
@@ -1533,10 +1702,8 @@ def install_dependencies_offline():
                             # Извлекаем имя пакета без версии для apt-get
                             pkg_base = pkg.split('_')[0] if '_' in pkg else pkg.split('-')[0] if '-' in pkg else pkg
                             try:
-                                online_result = subprocess.run(
+                                online_result = run_sudo_command(
                                     ["sudo", "apt-get", "install", "-y", pkg_base],
-                                    capture_output=True,
-                                    text=True,
                                     timeout=120
                                 )
                                 if online_result.returncode == 0:
@@ -1558,10 +1725,8 @@ def install_dependencies_offline():
                         for version in ["3.8", "3.11", "3.13"]:
                             if version in available_versions:
                                 try:
-                                    subprocess.run(
-                                        [f"sudo", "apt-get", "install", "-y", f"python{version}-dev", f"python{version}-venv"],
-                                        capture_output=True,
-                                        text=True,
+                                    run_sudo_command(
+                                        ["sudo", "apt-get", "install", "-y", f"python{version}-dev", f"python{version}-venv"],
                                         timeout=120
                                     )
                                 except Exception:
@@ -1705,10 +1870,8 @@ WantedBy=multi-user.target
                 return False
         
         # Копируем сервис файл в systemd
-        copy_result = subprocess.run(
+        copy_result = run_sudo_command(
             ["sudo", "cp", str(service_file_path), f"/etc/systemd/system/{service_name}.service"],
-            capture_output=True,
-            text=True,
             timeout=10
         )
         
@@ -1717,10 +1880,8 @@ WantedBy=multi-user.target
             return False
         
         # Перезагружаем systemd
-        reload_result = subprocess.run(
+        reload_result = run_sudo_command(
             ["sudo", "systemctl", "daemon-reload"],
-            capture_output=True,
-            text=True,
             timeout=10
         )
         
@@ -1729,10 +1890,8 @@ WantedBy=multi-user.target
             return False
         
         # Включаем автозапуск
-        enable_result = subprocess.run(
+        enable_result = run_sudo_command(
             ["sudo", "systemctl", "enable", service_name],
-            capture_output=True,
-            text=True,
             timeout=10
         )
         
@@ -2197,56 +2356,21 @@ if __name__ == '__main__':
     
     def signal_handler(signum, frame):
         global _sig_received
-        
-        try:
-            manager = services_manager.get_services_manager()
-            motor_service_info = manager.get_service("unitree_motor_control")
-            motor_status = motor_service_info.get("status", "OFF") if motor_service_info else "OFF"
-        except Exception:
-            motor_status = "OFF"
-        
-        if motor_status == "OFF":
-            cleanup_ports()
-            sys.exit(0)
-        
-        if not _sig_received:
-            _sig_received = True
-            try:
-                import run
-                runner = run.ServiceRunner()
-                runner.running = False
-                
-                manager = services_manager.get_services_manager()
-                all_services = manager.discover_services()
-                critical_services = {"unitree_motor_control", "web"}
-                
-                for service_name in all_services:
-                    if service_name not in critical_services:
-                        try:
-                            service_info = manager.get_service(service_name)
-                            if service_info.get("status") == "ON":
-                                depending_services = manager.get_services_depending_on(service_name)
-                                if depending_services:
-                                    for dep in depending_services:
-                                        if dep not in critical_services:
-                                            dep_info = manager.get_service(dep)
-                                            if dep_info.get("status") == "ON":
-                                                manager.update_service_status(dep, "OFF")
-                                manager.update_service_status(service_name, "OFF")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+        if _sig_received:
             return
+        _sig_received = True
+        try:
+            cleanup_ports()
+        finally:
+            # Hard-exit to guarantee fast shutdown on systemctl stop/restart.
+            os._exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
         main(python_version, debug=args.debug)
-        import time
-        while True:
-            time.sleep(60)
+        sys.exit(0)
     except KeyboardInterrupt:
         cleanup_ports()
         sys.exit(0)

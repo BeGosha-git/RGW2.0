@@ -562,15 +562,20 @@ def get_selected_cameras() -> List[Dict]:
     Перебирает от 1 до 5 без повторений, если не получается захватить - ничего не возвращает.
     """
     all_cameras = detect_cameras()
+    # Показываем только реально доступные USB-камеры.
+    usb_cameras = [
+        cam for cam in all_cameras
+        if str(cam.get("id", "")).startswith("usb_") and bool(cam.get("available", True))
+    ]
     selected = []
     
     # Предпочитаем usb_2, но не "ломаем" список если она недоступна (например, нет прав).
-    usb_2_camera = next((cam for cam in all_cameras if cam.get("id") == "usb_2"), None)
+    usb_2_camera = next((cam for cam in usb_cameras if cam.get("id") == "usb_2"), None)
     if usb_2_camera:
         selected.append(usb_2_camera)
     else:
         # Fallback: берём первую доступную USB-камеру
-        first_usb = next((cam for cam in all_cameras if cam.get("id", "").startswith("usb_")), None)
+        first_usb = next((cam for cam in usb_cameras), None)
         if first_usb:
             selected.append(first_usb)
         else:
@@ -580,7 +585,7 @@ def get_selected_cameras() -> List[Dict]:
     candidates = [1, 3, 4, 5]  # Исключаем 2, так как уже добавили
     for idx in candidates:
         camera_id = f"usb_{idx}"
-        for cam in all_cameras:
+        for cam in usb_cameras:
             if cam.get("id") == camera_id:
                 # Проверяем, что камера не usb_2 (на случай если она уже добавлена)
                 if cam.get("id") != "usb_2":

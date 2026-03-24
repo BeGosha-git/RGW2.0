@@ -1,7 +1,9 @@
 """
-API for robot camera streams with automatic source selection.
+RGW camera API.
 """
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
+
+import api.robot as robot_api
 
 app = Flask(__name__)
 
@@ -14,83 +16,185 @@ def after_request(response):
     return response
 
 
+@app.route("/api/cameras/list", methods=["GET"])
+def get_cameras_list():
+    try:
+        from services.camera_stream.camera_stream import get_selected_cameras
+        cameras = get_selected_cameras()
+        return jsonify({"success": True, "cameras": cameras, "count": len(cameras)})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "cameras": []}), 500
+
+
 @app.route("/api/cameras/udp", methods=["GET"])
 def get_udp_streams():
     try:
-        from services.webrtc.main import ensure_robot_stream
-        from services.camera_stream.camera_stream import get_all_streams
-
-        selected = ensure_robot_stream()
-        streams = get_all_streams()
+        from services.camera_stream.camera_stream import get_selected_cameras, get_camera_stream, start_camera_stream
+        cameras = get_selected_cameras()
         udp_streams = []
-        for camera_id, stream_data in streams.items():
-            udp_port = stream_data.get("udp_port")
-            if udp_port:
+        for camera_info in cameras:
+            camera_id = camera_info.get("id")
+            if not camera_id or not camera_id.startswith("usb_"):
+                continue
+            udp_port = 5005 if camera_id == "usb_2" else 5006
+            stream = get_camera_stream(camera_id)
+            if not stream and start_camera_stream(camera_id, udp_port=udp_port):
+                stream = get_camera_stream(camera_id)
+            if stream and stream.running:
                 udp_streams.append({
                     "camera_id": camera_id,
-                    "camera_name": stream_data.get("camera_info", {}).get("name", camera_id),
+                    "camera_name": camera_info.get("name", camera_id),
                     "udp_port": udp_port,
                     "udp_host": "127.0.0.1",
                 })
-
-        return jsonify({
-            "success": True,
-            "udp_streams": udp_streams,
-            "count": len(udp_streams),
-            "selected_camera": selected.get("camera_id"),
-            "robot_type": selected.get("robot_type"),
-            "frame_ok": selected.get("frame_ok", False),
-        })
+        return jsonify({"success": True, "udp_streams": udp_streams, "count": len(udp_streams)})
     except Exception as e:
         return jsonify({"success": False, "message": str(e), "udp_streams": []}), 500
 
 
 @app.route("/api/cameras/<camera_id>/mjpeg", methods=["GET"])
 def camera_mjpeg_stream(camera_id):
-    from services.camera_stream.camera_stream import get_camera_stream, start_camera_stream
-
-    stream = get_camera_stream(camera_id)
-    if not stream:
-        udp_port = 5006 if camera_id.startswith("realsense_") else 5005
-        if not start_camera_stream(camera_id, udp_port=udp_port):
-            return jsonify({"success": False, "message": f"Camera '{camera_id}' not found or failed to start"}), 404
+    try:
+        from services.camera_stream.camera_stream import get_selected_cameras, get_camera_stream, start_camera_stream
+        selected_ids = [cam.get("id") for cam in get_selected_cameras()]
+        if camera_id not in selected_ids:
+            return jsonify({"success": False, "message": f"Camera '{camera_id}' not available"}), 404
         stream = get_camera_stream(camera_id)
         if not stream:
-            return jsonify({"success": False, "message": "Stream failed to initialize"}), 500
+            udp_port = 5005 if camera_id == "usb_2" else 5006
+            if not start_camera_stream(camera_id, udp_port=udp_port):
+                return jsonify({"success": False, "message": f"Camera '{camera_id}' not found or failed to start"}), 404
+            stream = get_camera_stream(camera_id)
+            if not stream:
+                return jsonify({"success": False, "message": "Stream failed to initialize"}), 500
 
-    def generate():
-        try:
+        def generate():
             while True:
                 frame = stream.get_latest_frame(quality=80, wait=True)
                 if frame:
-                    yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-        except GeneratorExit:
-            pass
-        except Exception:
-            pass
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
 
-    return Response(
-        generate(),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Access-Control-Allow-Origin": "*",
-            "Cross-Origin-Resource-Policy": "cross-origin",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
-
-
-@app.route("/api/webrtc/source", methods=["GET"])
-def webrtc_source():
-    try:
-        from services.webrtc.main import ensure_robot_stream
-        return jsonify({"success": True, **ensure_robot_stream()})
+        return Response(
+            generate(),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Access-Control-Allow-Origin": "*",
+                "Cross-Origin-Resource-Policy": "cross-origin",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/cameras/<camera_id>/webrtc/offer", methods=["POST", "OPTIONS"])
+def webrtc_offer(camera_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        from services.camera_stream import webrtc_handler
+        data = request.get_json(force=True) or {}
+        offer_sdp = data.get("sdp", "")
+        offer_type = data.get("type", "offer")
+        quality_mode = data.get("quality", "high")
+        if not offer_sdp:
+            return jsonify({"success": False, "message": "sdp field required"}), 400
+
+        result = webrtc_handler.handle_offer(camera_id, offer_sdp, offer_type, quality_mode=quality_mode)
+        if result.get("success"):
+            return jsonify(result), 200
+        msg = str(result.get("message", "")).lower()
+        if "aiortc" in msg or "av" in msg or "not installed" in msg:
+            return jsonify(result), 503
+        if "sdp" in msg or "not in list" in msg or "invalid" in msg:
+            return jsonify(result), 400
+        if "not found" in msg or "failed to start" in msg or "unavailable" in msg:
+            return jsonify(result), 404
+        return jsonify(result), 500
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/cameras/<camera_id>/webrtc/<conn_id>", methods=["DELETE", "OPTIONS"])
+def webrtc_close(camera_id, conn_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        from services.camera_stream import webrtc_handler
+        result = webrtc_handler.close_peer(conn_id)
+        return jsonify(result), (200 if result.get("success") else 500)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/cameras/webrtc/connections", methods=["GET"])
+def webrtc_connections():
+    try:
+        from services.camera_stream import webrtc_handler
+        return jsonify({"success": True, "connections": webrtc_handler.get_active_connections()})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/status", methods=["GET"])
+def api_status():
+    try:
+        import status
+        return jsonify(status.get_robot_status())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Error getting status: {str(e)}"}), 500
+
+
+@app.route("/api/robot/execute", methods=["POST"])
+def api_robot_execute():
+    """Выполняет команду на роботе."""
+    data = request.get_json() or {}
+    command = data.get("command")
+    args = data.get("args", [])
+    if not command:
+        return jsonify({"success": False, "message": "command required"}), 400
+    return jsonify(robot_api.RobotAPI.execute_command(command, args))
+
+
+@app.route("/api/robot/commands", methods=["GET"])
+def api_robot_commands():
+    """Возвращает команды из commands.json с фильтрацией по RobotType."""
+    return jsonify(robot_api.RobotAPI.get_commands())
+
+
+@app.route("/api/robot/g1/arm_actions", methods=["GET"])
+def api_robot_g1_arm_actions():
+    """Возвращает список доступных arm-actions для G1."""
+    return jsonify(robot_api.RobotAPI.get_g1_arm_actions())
+
+
+@app.route("/api/robot/g1/arm_actions/execute", methods=["POST"])
+def api_robot_g1_arm_actions_execute():
+    """Выполняет arm-action для G1."""
+    data = request.get_json() or {}
+    action_name = str(data.get("action", "")).strip()
+    if not action_name:
+        return jsonify({"success": False, "message": "action required"}), 400
+    result = robot_api.RobotAPI.execute_g1_arm_action(action_name)
+    return jsonify(result), (200 if result.get("success") else 400)
+
+
+@app.route("/status", methods=["GET"])
+def status_short():
+    try:
+        import status
+        return jsonify(status.get_robot_status())
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Error getting status: {str(e)}"}), 500
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "RGW API"})
 
 
 def run_api(host="0.0.0.0", port=5000, debug=False):
@@ -99,345 +203,14 @@ def run_api(host="0.0.0.0", port=5000, debug=False):
 
 def run():
     import services_manager
-
     try:
         manager = services_manager.get_services_manager()
-        params = manager.get_service_parameters("api")
-        port = params.get("port", 5000)
+        port = manager.get_service_parameters("api").get("port", 5000)
     except Exception:
         port = 5000
+    print(f"Starting API service on port {port}...", flush=True)
     run_api(host="0.0.0.0", port=port, debug=False)
 
 
 if __name__ == "__main__":
-    run()
-"""
-Минимальный API для UDP стримов камер (только usb_2 и usb_3).
-"""
-import sys
-from pathlib import Path
-
-# Ensure venv site-packages are visible for this module.
-# `services/web/web.py` already does a similar sys.path insertion, but
-# `api/api.py` is imported by the service runner independently.
-venv_path = Path(__file__).resolve().parent.parent / "venv"
-if venv_path.exists():
-    venv_lib = venv_path / "lib"
-    if venv_lib.exists():
-        python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith("python")]
-        if python_dirs:
-            python_version_dir = python_dirs[0]
-            venv_site_packages = python_version_dir / "site-packages"
-            if venv_site_packages.exists() and str(venv_site_packages) not in sys.path:
-                sys.path.insert(0, str(venv_site_packages))
-
-from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-
-@app.after_request
-def after_request(response):
-    """Добавляет CORS заголовки ко всем ответам."""
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
-
-
-@app.route('/api/cameras/list', methods=['GET'])
-def get_cameras_list():
-    """Возвращает список выбранных камер: usb_2 и еще одну из usb_1, usb_3, usb_4, usb_5."""
-    try:
-        from services.camera_stream.camera_stream import get_selected_cameras
-        
-        cameras = get_selected_cameras()
-        
-        return jsonify({
-            "success": True,
-            "cameras": cameras,
-            "count": len(cameras)
-        })
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e), "cameras": []}), 500
-
-
-@app.route('/api/cameras/udp', methods=['GET'])
-def get_udp_streams():
-    """Возвращает информацию о UDP стримах для выбранных камер. Автоматически запускает камеры."""
-    try:
-        from services.camera_stream.camera_stream import (
-            get_selected_cameras,
-            get_camera_stream, start_camera_stream
-        )
-        
-        # Получаем выбранные камеры (usb_2 + одна из 1,3,4,5)
-        cameras = get_selected_cameras()
-        
-        udp_streams = []
-        udp_ports = {5005: False, 5006: False}  # Порты для камер
-        
-        for camera_info in cameras:
-            camera_id = camera_info.get("id")
-            if not camera_id or not camera_id.startswith("usb_"):
-                continue
-            
-            # Определяем UDP порт (usb_2 -> 5005, остальные -> 5006)
-            if camera_id == "usb_2":
-                udp_port = 5005
-            else:
-                # Используем 5006 для второй камеры
-                udp_port = 5006
-            
-            # Запускаем стрим если не запущен
-            stream = get_camera_stream(camera_id)
-            if not stream:
-                if start_camera_stream(camera_id, udp_port=udp_port):
-                    stream = get_camera_stream(camera_id)
-            
-            if stream and stream.running:
-                udp_streams.append({
-                    "camera_id": camera_id,
-                    "camera_name": camera_info.get("name", camera_id),
-                    "udp_port": udp_port,
-                    "udp_host": "127.0.0.1"
-                })
-        
-        return jsonify({
-            "success": True,
-            "udp_streams": udp_streams,
-            "count": len(udp_streams)
-        })
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e), "udp_streams": []}), 500
-
-
-@app.route('/api/cameras/<camera_id>/mjpeg', methods=['GET'])
-def camera_mjpeg_stream(camera_id):
-    """MJPEG поток с камеры (для выбранных камер: usb_2 и еще одной из usb_1, usb_3, usb_4, usb_5)."""
-    try:
-        from services.camera_stream.camera_stream import get_selected_cameras
-        
-        # Проверяем, что камера в списке выбранных
-        selected_cameras = get_selected_cameras()
-        camera_ids = [cam.get("id") for cam in selected_cameras]
-        
-        if camera_id not in camera_ids:
-            return jsonify({"success": False, "message": f"Camera '{camera_id}' not available"}), 404
-    except Exception:
-        # Если не удалось получить список, разрешаем только usb_2 для совместимости
-        if camera_id != "usb_2":
-            return jsonify({"success": False, "message": f"Camera '{camera_id}' not available"}), 404
-    
-    from flask import Response
-    from services.camera_stream.camera_stream import get_camera_stream, start_camera_stream
-    
-    # Запускаем поток если ещё не запущен
-    stream = get_camera_stream(camera_id)
-    if not stream:
-        # Определяем UDP порт (usb_2 -> 5005, остальные -> 5006)
-        udp_port = 5005 if camera_id == "usb_2" else 5006
-        if not start_camera_stream(camera_id, udp_port=udp_port):
-            return jsonify({
-                "success": False,
-                "message": f"Camera '{camera_id}' not found or failed to start"
-            }), 404
-        stream = get_camera_stream(camera_id)
-        if not stream:
-            return jsonify({"success": False, "message": "Stream failed to initialize"}), 500
-
-    def generate():
-        no_frame_count = 0
-        max_no_frame = 30
-        try:
-            while True:
-                frame = stream.get_latest_frame(quality=80, wait=True)
-                if frame:
-                    no_frame_count = 0
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                else:
-                    no_frame_count += 1
-                    if no_frame_count >= max_no_frame:
-                        print(f"[API] MJPEG stream: no frames for {max_no_frame} iterations, closing connection", flush=True)
-                        break
-        except GeneratorExit:
-            pass
-        except Exception as e:
-            print(f"[API] MJPEG generator error: {e}", flush=True)
-
-    return Response(
-        generate(),
-        mimetype='multipart/x-mixed-replace; boundary=frame',
-        headers={
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0',
-            'Access-Control-Allow-Origin': '*',
-            'Cross-Origin-Resource-Policy': 'cross-origin',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive',
-        }
-    )
-
-
-@app.route('/api/cameras/<camera_id>/webrtc/offer', methods=['POST', 'OPTIONS'])
-def webrtc_offer(camera_id):
-    """
-    WebRTC signaling — принять SDP offer от браузера, вернуть SDP answer.
-
-    Body (JSON): { "sdp": "<offer SDP>", "type": "offer" }
-    Response:    { "success": true, "conn_id": "<uuid>", "sdp": "<answer SDP>", "type": "answer" }
-    """
-    if request.method == 'OPTIONS':
-        return '', 204
-
-    try:
-        from services.camera_stream import webrtc_handler
-        data = request.get_json(force=True) or {}
-        offer_sdp = data.get('sdp', '')
-        offer_type = data.get('type', 'offer')
-        quality_mode = data.get('quality', 'high')  # 'low'|'high'
-        if not offer_sdp:
-            return jsonify({'success': False, 'message': 'sdp field required'}), 400
-
-        result = webrtc_handler.handle_offer(camera_id, offer_sdp, offer_type, quality_mode=quality_mode)
-        status_code = 200 if result.get('success') else 500
-        return jsonify(result), status_code
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/cameras/<camera_id>/webrtc/<conn_id>', methods=['DELETE', 'OPTIONS'])
-def webrtc_close(camera_id, conn_id):
-    """Close a WebRTC peer connection."""
-    if request.method == 'OPTIONS':
-        return '', 204
-    try:
-        from services.camera_stream import webrtc_handler
-        result = webrtc_handler.close_peer(conn_id)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/cameras/webrtc/connections', methods=['GET'])
-def webrtc_connections():
-    """List active WebRTC peer connections (for debugging)."""
-    try:
-        from services.camera_stream import webrtc_handler
-        return jsonify({'success': True, 'connections': webrtc_handler.get_active_connections()})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/status', methods=['GET'])
-def api_status():
-    """Возвращает статус робота."""
-    try:
-        import status
-        return jsonify(status.get_robot_status())
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": f"Error getting status: {str(e)}"
-        }), 500
-
-
-@app.route('/status', methods=['GET'])
-def status_short():
-    """Короткий путь для /status (используется в network_api)."""
-    try:
-        import status
-        return jsonify(status.get_robot_status())
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": f"Error getting status: {str(e)}"
-        }), 500
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Проверка здоровья API."""
-    return jsonify({"status": "ok", "service": "RGW API"})
-
-
-def run_api(host='0.0.0.0', port=5000, debug=False):
-    """Запускает API сервер."""
-    app.run(host=host, port=port, debug=debug, threaded=True)
-
-
-def check_port_available(check_port):
-    """Проверяет, свободен ли порт."""
-    import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    try:
-        result = sock.connect_ex(('127.0.0.1', check_port))
-        sock.close()
-        return result != 0
-    except Exception:
-        sock.close()
-        return False
-
-
-def run():
-    """Функция для запуска API как сервиса из run.py."""
-    import services_manager
-    import subprocess
-    import time
-    
-    try:
-        manager = services_manager.get_services_manager()
-        params = manager.get_service_parameters("api")
-        port = params.get("port", 5000)
-    except Exception:
-        port = 5000
-    
-    # Проверяем, свободен ли порт
-    if not check_port_available(port):
-        print(f"Port {port} is in use by another program. Trying to free it...", flush=True)
-        try:
-            subprocess.run(["fuser", "-k", f"{port}/tcp"], 
-                          capture_output=True, timeout=2, stderr=subprocess.DEVNULL)
-            time.sleep(1)
-        except Exception:
-            pass
-        
-        if not check_port_available(port):
-            print(f"Port {port} is still in use. Trying alternative ports...", flush=True)
-            # Порты 5005 и 5006 зарезервированы для UDP-стримов камер, не используем их
-            for try_port in [5000, 5001, 5002, 5003, 5004, 5007, 5008]:
-                if try_port != port and check_port_available(try_port):
-                    port = try_port
-                    print(f"Port {try_port} is available. Using it instead...", flush=True)
-                    break
-            else:
-                print(f"Error: All fallback API ports are in use.", flush=True)
-                return
-
-    # Persist the actual port so other services (web proxy, remote calls) use it.
-    try:
-        manager = services_manager.get_services_manager()
-        current_port = manager.get_service_parameters("api").get("port", 5000)
-        if int(current_port) != int(port):
-            manager.update_service_parameter("api", "port", int(port))
-    except Exception:
-        pass
-    
-    print(f"Starting API service on port {port}...", flush=True)
-    import sys
-    sys.stdout.flush()
-    try:
-        run_api(host='0.0.0.0', port=port, debug=False)
-    except OSError as e:
-        error_msg = str(e)
-        if "Address already in use" in error_msg:
-            print(f"Port {port} is in use by another program.", flush=True)
-        else:
-            print(f"Error starting API server: {error_msg}", flush=True)
-
-
-if __name__ == '__main__':
     run()

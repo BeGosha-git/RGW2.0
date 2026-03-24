@@ -19,7 +19,7 @@ import math
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ def _build_fallback_jpeg(width: int, height: int) -> Optional[bytes]:
 
 
 # Cached fallback JPEGs per output resolution.
-_FALLBACK_JPEG_CACHE: dict[tuple[int, int], Optional[bytes]] = {}
+_FALLBACK_JPEG_CACHE: Dict[Tuple[int, int], Optional[bytes]] = {}
 
 
 def _get_fallback_jpeg(width: int, height: int) -> Optional[bytes]:
@@ -363,22 +363,40 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
     from . import camera_stream as cs_module  # noqa
 
     # Get or start the camera stream.
+    # If requested camera can't start, try other available cameras as fallback.
     # start_camera_stream() calls detect_cameras() which scans /dev/video0-9 — that
-    # can take 0.5–1.5 s.  Running it in an executor prevents it from blocking the
-    # asyncio event loop and stalling other active WebRTC recv() coroutines.
+    # can take 0.5–1.5 s. Running it in an executor prevents event-loop stalls.
     loop = asyncio.get_event_loop()
+    requested_camera_id = camera_id
     stream_obj = cs_module.get_camera_stream(camera_id)
     if stream_obj is None:
-        started = await loop.run_in_executor(
-            None,
-            lambda: cs_module.start_camera_stream(camera_id),
-        )
-        if not started:
-            return {'success': False, 'message': f"Camera '{camera_id}' not found or failed to start"}
-        stream_obj = cs_module.get_camera_stream(camera_id)
+        started = await loop.run_in_executor(None, lambda: cs_module.start_camera_stream(camera_id))
+        if started:
+            stream_obj = cs_module.get_camera_stream(camera_id)
 
     if stream_obj is None:
-        return {'success': False, 'message': 'Stream object unavailable after start'}
+        cameras = cs_module.detect_cameras()
+        fallback_ids = []
+        for cam in cameras:
+            cid = cam.get("id")
+            if not cid or cid == requested_camera_id:
+                continue
+            if not cam.get("available", True):
+                continue
+            fallback_ids.append(cid)
+
+        for candidate_id in fallback_ids:
+            started = await loop.run_in_executor(None, lambda cid=candidate_id: cs_module.start_camera_stream(cid))
+            if not started:
+                continue
+            stream_obj = cs_module.get_camera_stream(candidate_id)
+            if stream_obj is not None:
+                camera_id = candidate_id
+                logger.info("[WebRTC] fallback camera selected: requested=%s selected=%s", requested_camera_id, camera_id)
+                break
+
+    if stream_obj is None:
+        return {'success': False, 'message': f"Camera '{requested_camera_id}' not found or failed to start"}
 
     conn_id = str(uuid.uuid4())
     pc = RTCPeerConnection()
@@ -442,6 +460,8 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
         return {
             'success': True,
             'conn_id': conn_id,
+            'camera_id': camera_id,
+            'requested_camera_id': requested_camera_id,
             'sdp': pc.localDescription.sdp,
             'type': pc.localDescription.type,
         }

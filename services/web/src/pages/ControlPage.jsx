@@ -9,6 +9,12 @@ const defaultLayouts = {
   layouts: [{ id: 'layout-1', name: 'Раскладка 1', buttons: [] }],
 }
 
+function normalizeTargetList(button) {
+  const raw = button.targetIps ?? (button.targetIp ? [button.targetIp] : ['LOCAL'])
+  const list = Array.isArray(raw) ? raw : [raw]
+  return [...new Set(list.map((t) => String(t).trim()).filter(Boolean))]
+}
+
 function ControlPage() {
   const [layoutData, setLayoutData] = useState(defaultLayouts)
   const [layoutIndex, setLayoutIndex] = useState(0)
@@ -26,15 +32,15 @@ function ControlPage() {
   const currentCameraId = cameraIds[cameraIndex] || null
 
   const unavailableTargets = useMemo(() => {
-    const set = new Set(availableIps)
-    const localSet = new Set(localIps)
+    const set = new Set(availableIps.map((ip) => String(ip).trim()))
+    const localSet = new Set(localIps.map((ip) => String(ip).trim()))
+    const pageHost = typeof window !== 'undefined' ? String(window.location.hostname || '').replace(/^::ffff:/i, '').trim() : ''
     const missing = new Set()
     for (const button of activeLayout?.buttons || []) {
-      const targets = button.targetIps || (button.targetIp ? [button.targetIp] : ['LOCAL'])
+      const targets = normalizeTargetList(button)
       for (const target of targets) {
-        if (target && target !== 'LOCAL' && !localSet.has(target) && !set.has(target)) {
-          missing.add(target)
-        }
+        if (target === 'LOCAL' || localSet.has(target) || (pageHost && target === pageHost)) continue
+        if (!set.has(target)) missing.add(target)
       }
     }
     return Array.from(missing)
@@ -164,10 +170,23 @@ function ControlPage() {
     }
 
     try {
-      const targets = button.targetIps || (button.targetIp ? [button.targetIp] : ['LOCAL'])
-      const localSet = new Set(localIps)
-      const remoteTargets = targets.filter((target) => target !== 'LOCAL' && !localSet.has(target))
-      const hasLocal = targets.some((target) => target === 'LOCAL' || localSet.has(target))
+      const targets = normalizeTargetList(button)
+      const localSet = new Set(localIps.map((ip) => String(ip).trim()).filter(Boolean))
+      // Страница открыта с этого хоста — считаем его «локальным» роботом (важно при двух NIC:
+      // /api/status может отдать только один local_ip, а в раскладке указан другой адрес этой же машины).
+      const pageHost = String(window.location.hostname || '')
+        .replace(/^::ffff:/i, '')
+        .trim()
+
+      const isLocalTarget = (target) => {
+        if (target === 'LOCAL') return true
+        if (localSet.has(target)) return true
+        if (pageHost && (target === pageHost || target === `[${pageHost}]`)) return true
+        return false
+      }
+
+      const hasLocal = targets.some(isLocalTarget)
+      const remoteTargets = [...new Set(targets.filter((t) => !isLocalTarget(t)))]
 
       if (hasLocal) {
         const localResponse = await fetch('/api/robot/execute', {
@@ -179,27 +198,69 @@ function ControlPage() {
         if (!localResult.success) throw new Error(localResult.message || 'Локальная команда не выполнена')
       }
 
-      for (const targetIp of remoteTargets) {
-        const response = await fetch('/api/network/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            target_ip: targetIp,
-            endpoint: '/api/robot/execute',
-            data: { command: command.command, args: command.args || [] },
-          }),
-        })
-        const result = await response.json()
-        if (!result.success) {
-          throw new Error(`Ошибка сети на ${targetIp}: ${result.message || 'команда не выполнена'}`)
-        }
-        const remoteResponse = result.response
-        if (remoteResponse && typeof remoteResponse === 'object' && remoteResponse.success === false) {
-          throw new Error(`Ошибка API на ${targetIp}: ${remoteResponse.message || 'команда отклонена'}`)
-        }
+      const payload = {
+        command: command.command,
+        args: command.args || [],
       }
 
-      setInfo(`Команда отправлена: ${targets.join(', ')}`)
+      const remoteResults = await Promise.all(
+        remoteTargets.map(async (targetIp) => {
+          try {
+            const response = await fetch('/api/network/send', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                target_ip: targetIp,
+                endpoint: '/api/robot/execute',
+                data: payload,
+              }),
+            })
+            const result = await response.json()
+            if (!result.success) {
+              return { targetIp, ok: false, message: result.message || 'сеть' }
+            }
+            const remoteResponse = result.response
+            if (remoteResponse && typeof remoteResponse === 'object' && remoteResponse.success === false) {
+              return {
+                targetIp,
+                ok: false,
+                message: remoteResponse.message || 'команда отклонена',
+              }
+            }
+            const hasReturnCode =
+              remoteResponse &&
+              remoteResponse.return_code !== undefined &&
+              remoteResponse.return_code !== null
+            if (
+              hasReturnCode &&
+              (remoteResponse.success === false || remoteResponse.return_code !== 0)
+            ) {
+              return {
+                targetIp,
+                ok: false,
+                message: remoteResponse.message || remoteResponse.stderr || 'команда завершилась с ошибкой',
+              }
+            }
+            return { targetIp, ok: true, message: null }
+          } catch (err) {
+            return { targetIp, ok: false, message: err.message || 'ошибка запроса' }
+          }
+        }),
+      )
+
+      const failed = remoteResults.filter((r) => !r.ok)
+      if (failed.length) {
+        setError(
+          failed.map((f) => `${f.targetIp}: ${f.message}`).join(' · '),
+        )
+      }
+      const okLabel = [
+        ...(hasLocal ? ['LOCAL'] : []),
+        ...remoteResults.filter((r) => r.ok).map((r) => r.targetIp),
+      ]
+      if (okLabel.length) {
+        setInfo(`Отправлено: ${okLabel.join(', ')}${failed.length ? ` (ошибок: ${failed.length})` : ''}`)
+      }
     } catch (e) {
       setError(e.message || 'Ошибка выполнения команды')
     }
@@ -267,7 +328,9 @@ function ControlPage() {
         />
 
         {(info || error) && (
-          <div className={`control-toast ${error ? 'error' : 'info'}`}>{error || info}</div>
+          <div className={`control-toast ${error ? 'error' : 'info'}`}>
+            {[info, error].filter(Boolean).join(' — ')}
+          </div>
         )}
 
         <div className="control-camera-hint">Свайп в центральной половине экрана: камера</div>

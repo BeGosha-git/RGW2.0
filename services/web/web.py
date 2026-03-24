@@ -1497,6 +1497,10 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+        if self.path.split('?', 1)[0] == '/control':
+            self.path = '/control.html'
+        elif self.path.split('?', 1)[0] == '/editctl':
+            self.path = '/editctl.html'
         if self._is_camera_api():
             self._proxy_to_api_server('GET')
             return

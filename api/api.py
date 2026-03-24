@@ -179,7 +179,7 @@ def api_robot_g1_arm_actions_execute():
     action_name = str(data.get("action", "")).strip()
     if not action_name:
         return jsonify({"success": False, "message": "action required"}), 400
-    result = robot_api.RobotAPI.execute_g1_arm_action(action_name)
+    result = robot_api.RobotAPI.execute_command("g1_arm_action", [action_name])
     return jsonify(result), (200 if result.get("success") else 400)
 
 

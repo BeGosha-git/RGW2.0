@@ -135,6 +135,14 @@
   gap: 2px;
   pointer-events: auto;
   backdrop-filter: blur(2px);
+  cursor: pointer;
+}
+
+.control-action-button:disabled,
+.control-action-button.control-action-button--busy {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .button-emoji {

@@ -1,6 +1,7 @@
 """
 Модуль для связи с другими роботами и серверами через сеть.
 """
+import threading
 import requests
 import socket
 from typing import Optional, Dict, Any, List
@@ -22,11 +23,20 @@ class NetworkClient:
             timeout: Таймаут запросов в секундах (по умолчанию 5 для быстрых ответов)
         """
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            'Content-Type': 'application/json',
-            'User-Agent': 'RGW-Robot/2.0'
-        })
+        # Session не thread-safe: при параллельных /api/network/send из разных потоков веб-сервера
+        # нужна отдельная Session на поток, иначе исходящие запросы выполняются по сути последовательно.
+        self._tls = threading.local()
+
+    def _session(self) -> requests.Session:
+        s = getattr(self._tls, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update({
+                'Content-Type': 'application/json',
+                'User-Agent': 'RGW-Robot/2.0'
+            })
+            self._tls.session = s
+        return s
     
     def get(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """
@@ -40,7 +50,7 @@ class NetworkClient:
             Ответ в виде словаря или None при ошибке
         """
         try:
-            response = self.session.get(url, params=params, timeout=self.timeout)
+            response = self._session().get(url, params=params, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -59,7 +69,7 @@ class NetworkClient:
             Ответ в виде словаря или None при ошибке
         """
         try:
-            response = self.session.post(
+            response = self._session().post(
                 url, 
                 json=data, 
                 timeout=self.timeout
@@ -82,7 +92,7 @@ class NetworkClient:
             Ответ в виде bytes или None при ошибке
         """
         try:
-            response = self.session.put(url, data=data, timeout=self.timeout * 2)
+            response = self._session().put(url, data=data, timeout=self.timeout * 2)
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
@@ -101,7 +111,7 @@ class NetworkClient:
             True если успешно, False иначе
         """
         try:
-            response = self.session.get(url, stream=True, timeout=self.timeout * 2)
+            response = self._session().get(url, stream=True, timeout=self.timeout * 2)
             response.raise_for_status()
             
             with open(filepath, 'wb') as f:
@@ -126,7 +136,7 @@ class NetworkClient:
         """
         try:
             with open(filepath, 'rb') as f:
-                response = self.session.put(url, data=f, timeout=self.timeout * 2)
+                response = self._session().put(url, data=f, timeout=self.timeout * 2)
                 response.raise_for_status()
             return True
         except (requests.exceptions.RequestException, IOError) as e:

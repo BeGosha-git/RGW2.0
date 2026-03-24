@@ -15,6 +15,14 @@ function normalizeTargetList(button) {
   return [...new Set(list.map((t) => String(t).trim()).filter(Boolean))]
 }
 
+/** Одинаковое действие: команда + аргументы + набор целей (для антидребезга). */
+function makeControlActionKey(button, command) {
+  if (!command) return button.id || ''
+  const targets = normalizeTargetList(button).slice().sort().join('|')
+  const args = JSON.stringify(command.args ?? [])
+  return `${command.command}::${args}::${targets}`
+}
+
 function ControlPage() {
   const [layoutData, setLayoutData] = useState(defaultLayouts)
   const [layoutIndex, setLayoutIndex] = useState(0)
@@ -26,6 +34,8 @@ function ControlPage() {
   const [info, setInfo] = useState('')
   const [error, setError] = useState('')
   const touchStartX = useRef(null)
+  const actionInFlightRef = useRef(new Set())
+  const [inFlightKeys, setInFlightKeys] = useState(() => new Set())
 
   const layouts = layoutData.layouts?.length ? layoutData.layouts : defaultLayouts.layouts
   const activeLayout = layouts[Math.min(layoutIndex, layouts.length - 1)] || defaultLayouts.layouts[0]
@@ -161,13 +171,22 @@ function ControlPage() {
   }
 
   const runButton = async (button) => {
-    setError('')
-    setInfo('')
     const command = commandsMap[button.commandId]
     if (!command) {
       setError(`Команда ${button.commandId} не найдена`)
       return
     }
+
+    const actionKey = makeControlActionKey(button, command)
+    if (actionInFlightRef.current.has(actionKey)) {
+      setInfo('Это действие уже выполняется')
+      return
+    }
+    actionInFlightRef.current.add(actionKey)
+    setInFlightKeys(new Set(actionInFlightRef.current))
+
+    setError('')
+    setInfo('')
 
     try {
       const targets = normalizeTargetList(button)
@@ -188,65 +207,81 @@ function ControlPage() {
       const hasLocal = targets.some(isLocalTarget)
       const remoteTargets = [...new Set(targets.filter((t) => !isLocalTarget(t)))]
 
-      if (hasLocal) {
-        const localResponse = await fetch('/api/robot/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: command.command, args: command.args || [] }),
-        })
-        const localResult = await localResponse.json()
-        if (!localResult.success) throw new Error(localResult.message || 'Локальная команда не выполнена')
-      }
-
       const payload = {
         command: command.command,
         args: command.args || [],
       }
 
-      const remoteResults = await Promise.all(
-        remoteTargets.map(async (targetIp) => {
-          try {
-            const response = await fetch('/api/network/send', {
+      const parallelTasks = []
+
+      if (hasLocal) {
+        parallelTasks.push(
+          (async () => {
+            const localResponse = await fetch('/api/robot/execute', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                target_ip: targetIp,
-                endpoint: '/api/robot/execute',
-                data: payload,
-              }),
+              body: JSON.stringify({ command: payload.command, args: payload.args }),
             })
-            const result = await response.json()
-            if (!result.success) {
-              return { targetIp, ok: false, message: result.message || 'сеть' }
+            const localResult = await localResponse.json()
+            if (!localResult.success) {
+              throw new Error(localResult.message || 'Локальная команда не выполнена')
             }
-            const remoteResponse = result.response
-            if (remoteResponse && typeof remoteResponse === 'object' && remoteResponse.success === false) {
-              return {
-                targetIp,
-                ok: false,
-                message: remoteResponse.message || 'команда отклонена',
+            return { kind: 'local' }
+          })(),
+        )
+      }
+
+      parallelTasks.push(
+        ...remoteTargets.map((targetIp) =>
+          (async () => {
+            try {
+              const response = await fetch('/api/network/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  target_ip: targetIp,
+                  endpoint: '/api/robot/execute',
+                  data: payload,
+                }),
+              })
+              const result = await response.json()
+              if (!result.success) {
+                return { kind: 'remote', targetIp, ok: false, message: result.message || 'сеть' }
               }
-            }
-            const hasReturnCode =
-              remoteResponse &&
-              remoteResponse.return_code !== undefined &&
-              remoteResponse.return_code !== null
-            if (
-              hasReturnCode &&
-              (remoteResponse.success === false || remoteResponse.return_code !== 0)
-            ) {
-              return {
-                targetIp,
-                ok: false,
-                message: remoteResponse.message || remoteResponse.stderr || 'команда завершилась с ошибкой',
+              const remoteResponse = result.response
+              if (remoteResponse && typeof remoteResponse === 'object' && remoteResponse.success === false) {
+                return {
+                  kind: 'remote',
+                  targetIp,
+                  ok: false,
+                  message: remoteResponse.message || 'команда отклонена',
+                }
               }
+              const hasReturnCode =
+                remoteResponse &&
+                remoteResponse.return_code !== undefined &&
+                remoteResponse.return_code !== null
+              if (
+                hasReturnCode &&
+                (remoteResponse.success === false || remoteResponse.return_code !== 0)
+              ) {
+                return {
+                  kind: 'remote',
+                  targetIp,
+                  ok: false,
+                  message: remoteResponse.message || remoteResponse.stderr || 'команда завершилась с ошибкой',
+                }
+              }
+              return { kind: 'remote', targetIp, ok: true, message: null }
+            } catch (err) {
+              return { kind: 'remote', targetIp, ok: false, message: err.message || 'ошибка запроса' }
             }
-            return { targetIp, ok: true, message: null }
-          } catch (err) {
-            return { targetIp, ok: false, message: err.message || 'ошибка запроса' }
-          }
-        }),
+          })(),
+        ),
       )
+
+      const merged = await Promise.all(parallelTasks)
+      const remoteResults = merged.filter((x) => x.kind === 'remote')
 
       const failed = remoteResults.filter((r) => !r.ok)
       if (failed.length) {
@@ -263,6 +298,9 @@ function ControlPage() {
       }
     } catch (e) {
       setError(e.message || 'Ошибка выполнения команды')
+    } finally {
+      actionInFlightRef.current.delete(actionKey)
+      setInFlightKeys(new Set(actionInFlightRef.current))
     }
   }
 
@@ -301,16 +339,20 @@ function ControlPage() {
           {(activeLayout?.buttons || []).map((button) => {
             const command = commandsMap[button.commandId]
             const label = button.label || command?.name || button.commandId
+            const busyKey = command ? makeControlActionKey(button, command) : ''
+            const isBusy = busyKey && inFlightKeys.has(busyKey)
             return (
               <button
                 key={button.id}
-                className="control-action-button"
+                type="button"
+                className={`control-action-button${isBusy ? ' control-action-button--busy' : ''}`}
                 style={{
                   left: `${(button.x || 0.5) * 100}%`,
                   top: `${(button.y || 0.5) * 100}%`,
                   width: `${button.size || 72}px`,
                   height: `${button.size || 72}px`,
                 }}
+                disabled={isBusy}
                 onClick={() => runButton(button)}
                 title={`${label} (${(button.targetIps || [button.targetIp || 'LOCAL']).join(', ')})`}
               >

@@ -3,6 +3,7 @@ API модуль для работы с данным роботом.
 """
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import status
@@ -10,9 +11,34 @@ import status
 # Определяем корень проекта
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
+# Повторные HTTP-запросы с тем же command+args, пока выполнение не завершено — отклоняются.
+_execution_inflight: set[str] = set()
+_execution_lock = threading.Lock()
+
 
 class RobotAPI:
     """API для работы с текущим роботом."""
+
+    @staticmethod
+    def _execution_fingerprint(command: str, args: Optional[list]) -> str:
+        norm_args = list(args or [])
+        try:
+            return json.dumps({"c": str(command), "a": norm_args}, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return json.dumps({"c": str(command), "a": [str(x) for x in norm_args]}, sort_keys=True, ensure_ascii=False)
+
+    @staticmethod
+    def _execution_begin(key: str) -> bool:
+        with _execution_lock:
+            if key in _execution_inflight:
+                return False
+            _execution_inflight.add(key)
+            return True
+
+    @staticmethod
+    def _execution_end(key: str) -> None:
+        with _execution_lock:
+            _execution_inflight.discard(key)
     
     @staticmethod
     def get_robot_status() -> Dict[str, Any]:
@@ -147,72 +173,84 @@ class RobotAPI:
         Returns:
             Результат выполнения
         """
-        try:
-            if command == "g1_arm_action":
-                action_name = ""
-                if args and len(args) > 0:
-                    action_name = str(args[0]).strip()
-                if not action_name:
-                    return {
-                        "success": False,
-                        "message": "g1_arm_action requires action name in args[0]"
-                    }
-                return RobotAPI.execute_g1_arm_action(action_name)
-
-            import execute
-            
-            # Собираем stdout и stderr
-            output_lines = []
-            error_lines = []
-            
-            def log_callback(line: str):
-                """Callback для сбора вывода команды."""
-                if line.startswith("ERROR: "):
-                    error_lines.append(line[7:])  # Убираем префикс "ERROR: "
-                else:
-                    output_lines.append(line)
-            
-            executor = execute.CommandExecutor(log_callback=log_callback)
-            
-            # Определяем, нужен ли shell режим
-            # Shell нужен для команд, которые требуют интерпретации (sudo, bash, sh и т.д.)
-            # или когда есть аргументы и команда не является исполняемым файлом
-            use_shell = command in ['sudo', 'bash', 'sh', 'zsh', 'fish', 'python3', 'python']
-            
-            if use_shell and args:
-                # Объединяем команду и аргументы в одну строку для shell
-                full_command = f"{command} {' '.join(str(arg) for arg in args)}"
-                return_code = executor.execute(full_command, shell=True)
-            elif args:
-                # Если есть аргументы, но shell не нужен, передаем как список
-                return_code = executor.execute(command, args)
-            else:
-                # Команда без аргументов
-                return_code = executor.execute(command, [])
-            
-            result = {
-                "success": return_code == 0,
-                "return_code": return_code,
-                "command": command,
-                "args": args or []
-            }
-            
-            # Добавляем вывод команды
-            if output_lines:
-                result["stdout"] = "\n".join(output_lines)
-            if error_lines:
-                result["stderr"] = "\n".join(error_lines)
-                # Если есть stderr, добавляем его в message для удобства
-                if not result["success"]:
-                    result["message"] = "\n".join(error_lines)
-            
-            return result
-        except Exception as e:
+        key = RobotAPI._execution_fingerprint(command, args)
+        if not RobotAPI._execution_begin(key):
             return {
                 "success": False,
-                "message": f"Error executing command: {str(e)}",
-                "command": command
+                "message": "Такая команда уже выполняется",
+                "duplicate": True,
+                "command": command,
+                "args": args or [],
             }
+        try:
+            try:
+                if command == "g1_arm_action":
+                    action_name = ""
+                    if args and len(args) > 0:
+                        action_name = str(args[0]).strip()
+                    if not action_name:
+                        return {
+                            "success": False,
+                            "message": "g1_arm_action requires action name in args[0]"
+                        }
+                    return RobotAPI.execute_g1_arm_action(action_name)
+
+                import execute
+                
+                # Собираем stdout и stderr
+                output_lines = []
+                error_lines = []
+                
+                def log_callback(line: str):
+                    """Callback для сбора вывода команды."""
+                    if line.startswith("ERROR: "):
+                        error_lines.append(line[7:])  # Убираем префикс "ERROR: "
+                    else:
+                        output_lines.append(line)
+                
+                executor = execute.CommandExecutor(log_callback=log_callback)
+                
+                # Определяем, нужен ли shell режим
+                # Shell нужен для команд, которые требуют интерпретации (sudo, bash, sh и т.д.)
+                # или когда есть аргументы и команда не является исполняемым файлом
+                use_shell = command in ['sudo', 'bash', 'sh', 'zsh', 'fish', 'python3', 'python']
+                
+                if use_shell and args:
+                    # Объединяем команду и аргументы в одну строку для shell
+                    full_command = f"{command} {' '.join(str(arg) for arg in args)}"
+                    return_code = executor.execute(full_command, shell=True)
+                elif args:
+                    # Если есть аргументы, но shell не нужен, передаем как список
+                    return_code = executor.execute(command, args)
+                else:
+                    # Команда без аргументов
+                    return_code = executor.execute(command, [])
+                
+                result = {
+                    "success": return_code == 0,
+                    "return_code": return_code,
+                    "command": command,
+                    "args": args or []
+                }
+                
+                # Добавляем вывод команды
+                if output_lines:
+                    result["stdout"] = "\n".join(output_lines)
+                if error_lines:
+                    result["stderr"] = "\n".join(error_lines)
+                    # Если есть stderr, добавляем его в message для удобства
+                    if not result["success"]:
+                        result["message"] = "\n".join(error_lines)
+                
+                return result
+            except Exception as e:
+                return {
+                    "success": False,
+                    "message": f"Error executing command: {str(e)}",
+                    "command": command
+                }
+        finally:
+            RobotAPI._execution_end(key)
 
     @staticmethod
     def _get_robot_type() -> str:

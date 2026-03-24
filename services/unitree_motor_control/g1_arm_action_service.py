@@ -235,9 +235,15 @@ class G1ArmActionService:
 
         try:
             self.ensure_initialized(network_interface=network_interface, domain_id=domain_id)
+            reset_code: Optional[int] = None
             with self._lock:
                 if self._client is None:
                     raise RuntimeError("G1 action client is not initialized")
+                # Сброс удержания/контекста перед новым жестом (в примере Unitree первым пунктом — release arm).
+                release_id = _ACTION_MAP.get("release arm")
+                if release_id is not None and action_name != "release arm":
+                    reset_code = self._client.ExecuteAction(release_id)
+
                 result_code = self._client.ExecuteAction(action_id)
                 if result_code not in _NON_FATAL_CODES:
                     return {
@@ -247,25 +253,34 @@ class G1ArmActionService:
                         "action_id": action_id,
                         "option_id": option_id,
                         "code": result_code,
+                        **({"reset_code": reset_code} if reset_code is not None else {}),
                     }
-                # Поведение как в reference-примере: часть жестов завершаем release arm через 2 секунды.
-                if option_id in _AUTO_RELEASE_OPTION_IDS:
-                    #time.sleep(2.0) # defualt delay is 2 seconds
-                    release_id = _ACTION_MAP.get("release arm")
-                    if release_id is not None:
-                        release_code = self._client.ExecuteAction(release_id)
-                        if release_code not in _NON_FATAL_CODES:
-                            return {
-                                "success": False,
-                                "message": (
-                                    f"G1 action executed but auto-release failed "
-                                    f"(code={release_code}) after: {action_name}"
-                                ),
-                                "action": action_name,
-                                "action_id": action_id,
-                                "option_id": option_id,
-                                "code": release_code,
-                            }
+                # Как в g1_arm_action_example.py: после жеста ждём 2 с, затем release arm (для перечисленных option_id).
+                need_auto_release = (
+                    option_id in _AUTO_RELEASE_OPTION_IDS
+                    and release_id is not None
+                )
+
+            if need_auto_release:
+                #time.sleep(2.0) #defualt
+                release_code: Optional[int] = None
+                with self._lock:
+                    if self._client is None:
+                        raise RuntimeError("G1 action client is not initialized")
+                    release_code = self._client.ExecuteAction(release_id)
+                if release_code not in _NON_FATAL_CODES:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"G1 action executed but auto-release failed "
+                            f"(code={release_code}) after: {action_name}"
+                        ),
+                        "action": action_name,
+                        "action_id": action_id,
+                        "option_id": option_id,
+                        "code": release_code,
+                    }
+
             return {
                 "success": True,
                 "message": (
@@ -277,6 +292,11 @@ class G1ArmActionService:
                 "action_id": action_id,
                 "option_id": option_id,
                 "code": result_code,
+                **(
+                    {"reset_code": reset_code}
+                    if reset_code is not None and action_name != "release arm"
+                    else {}
+                ),
             }
         except Exception as e:
             self._last_error = str(e)

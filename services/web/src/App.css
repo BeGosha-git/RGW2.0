@@ -85,6 +85,10 @@
   overflow: hidden;
 }
 
+.main-content-fullscreen {
+  padding: 0;
+}
+
 /* Card и Button стили теперь в отдельных компонентах */
 
 /* Status badge */
@@ -249,6 +253,11 @@
     padding: 0.5rem 0.5rem calc(64px + env(safe-area-inset-bottom, 0px)) 0.5rem;
     overflow-y: auto;
     overflow-x: hidden;
+  }
+
+  .main-content-fullscreen {
+    padding: 0 !important;
+    overflow: hidden;
   }
 
   /* App layout: remove overflow:hidden so fixed nav works */

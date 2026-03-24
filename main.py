@@ -1634,6 +1634,37 @@ def download_dependencies():
     return True
 
 
+def _offline_pip_stamp_path(project_root: Path) -> Path:
+    return project_root / ".cache" / "rgw2_offline_pip.stamp"
+
+
+def _offline_pip_inputs_fingerprint(
+    project_root: Path, offline_dir: Path, requirements_file: Path
+) -> str:
+    """Стабильный отпечаток входа для офлайн pip: requirements + артефакты + интерпретатор."""
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(sys.executable.encode())
+    h.update(str(sys.version_info[:3]).encode())
+    if requirements_file.exists():
+        h.update(requirements_file.read_bytes())
+    else:
+        h.update(b"<no requirements.txt>")
+    combined = sorted(offline_dir.glob("*.whl"), key=lambda p: p.name) + sorted(
+        offline_dir.glob("*.tar.gz"), key=lambda p: p.name
+    )
+    for p in combined:
+        try:
+            st = p.stat()
+            h.update(p.name.encode())
+            h.update(str(st.st_size).encode())
+            h.update(str(st.st_mtime_ns).encode())
+        except OSError:
+            h.update(p.name.encode())
+    return h.hexdigest()
+
+
 def install_dependencies_offline():
     """
     Устанавливает зависимости из локальных файлов (офлайн).
@@ -1732,55 +1763,110 @@ def install_dependencies_offline():
                                 except Exception:
                                     pass
     
-    # Устанавливаем pip пакеты
+    # Устанавливаем pip пакеты (один раз при неизменных requirements и offline-колёсах см. штамп)
     if offline_dir.exists():
         pip_files = list(offline_dir.glob("*.whl")) + list(offline_dir.glob("*.tar.gz"))
         if pip_files:
-            print(f"Installing {len(pip_files)} Python packages from {offline_dir}...", flush=True)
+            stamp_path = _offline_pip_stamp_path(project_root)
+            pip_fingerprint = _offline_pip_inputs_fingerprint(
+                project_root, offline_dir, requirements_file
+            )
             try:
-                # Обновляем pip, setuptools, wheel
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
+                stamp_ok = stamp_path.read_text(encoding="utf-8").strip() == pip_fingerprint
+            except Exception:
+                stamp_ok = False
+            if stamp_ok:
+                print(
+                    f"Skipping offline pip install ({len(pip_files)} wheels unchanged, "
+                    f"see {stamp_path})",
+                    flush=True,
                 )
-                
-                # Устанавливаем из локальной директории
-                result = subprocess.run(
-                    [
-                        sys.executable, "-m", "pip", "install",
-                        "--no-index",
-                        "--find-links", str(offline_dir.resolve()),
-                        "-r", str(requirements_file)
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=600
-                )
-                
-                if result.returncode == 0:
-                    print("Python packages installed successfully", flush=True)
-                elif has_internet:
-                    print("Trying online installation...", flush=True)
-                    subprocess.run(
-                        [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
+            else:
+                print(f"Installing {len(pip_files)} Python packages from {offline_dir}...", flush=True)
+                try:
+                    # Опционально при наличии сети: обновить pip toolchain. Без сети пропускаем
+                    # (иначе долгий таймаут) и сразу ставим из offline_packages.
+                    if has_internet:
+                        try:
+                            subprocess.run(
+                                [
+                                    sys.executable,
+                                    "-m",
+                                    "pip",
+                                    "install",
+                                    "--upgrade",
+                                    "pip",
+                                    "setuptools",
+                                    "wheel",
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=300,
+                            )
+                        except subprocess.TimeoutExpired:
+                            print(
+                                "Warning: pip setuptools wheel upgrade timed out; "
+                                "continuing with offline --no-index install",
+                                flush=True,
+                            )
+
+                    # Устанавливаем из локальной директории
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pip",
+                            "install",
+                            "--no-index",
+                            "--find-links",
+                            str(offline_dir.resolve()),
+                            "-r",
+                            str(requirements_file),
+                        ],
                         capture_output=True,
                         text=True,
-                        timeout=600
+                        timeout=600,
                     )
-            except Exception as e:
-                print(f"Error installing pip packages: {e}", flush=True)
-                if has_internet:
-                    try:
-                        subprocess.run(
+
+                    if result.returncode == 0:
+                        print("Python packages installed successfully", flush=True)
+                        try:
+                            stamp_path.parent.mkdir(parents=True, exist_ok=True)
+                            stamp_path.write_text(pip_fingerprint, encoding="utf-8")
+                        except Exception:
+                            pass
+                    elif has_internet:
+                        print("Trying online installation...", flush=True)
+                        r_on = subprocess.run(
                             [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
                             capture_output=True,
                             text=True,
-                            timeout=600
+                            timeout=600,
                         )
-                    except Exception:
-                        pass
+                        if r_on.returncode == 0:
+                            try:
+                                stamp_path.parent.mkdir(parents=True, exist_ok=True)
+                                stamp_path.write_text(pip_fingerprint, encoding="utf-8")
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print(f"Error installing pip packages: {e}", flush=True)
+                    if has_internet:
+                        try:
+                            r_on = subprocess.run(
+                                [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)],
+                                capture_output=True,
+                                text=True,
+                                timeout=600,
+                            )
+                            if r_on.returncode == 0:
+                                try:
+                                    stamp_path.parent.mkdir(parents=True, exist_ok=True)
+                                    stamp_path.write_text(pip_fingerprint, encoding="utf-8")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
     
     print("=" * 60, flush=True)
     print("Installation complete!", flush=True)

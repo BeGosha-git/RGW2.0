@@ -12,6 +12,8 @@ const TerminalPage = lazy(() => import('./pages/TerminalPage'))
 const ServicesPage = lazy(() => import('./pages/ServicesPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const MotorControlPage = lazy(() => import('./pages/MotorControlPage'))
+const ControlPage = lazy(() => import('./pages/ControlPage'))
+const EditControlLayoutPage = lazy(() => import('./pages/EditControlLayoutPage'))
 
 function Navigation() {
   const location = useLocation()
@@ -70,24 +72,35 @@ function Navigation() {
 }
 
 function App() {
-  return (
-    <Router>
+  const FullscreenRoutes = () => {
+    const location = useLocation()
+    const hideNavigation = location.pathname === '/control' || location.pathname === '/editctl'
+
+    return (
       <div className="app">
-        <Navigation />
-        <main className="main-content">
+        {!hideNavigation && <Navigation />}
+        <main className={`main-content ${hideNavigation ? 'main-content-fullscreen' : ''}`}>
           <Suspense fallback={<Loading />}>
-          <Routes>
-            <Route path="/" element={<HomePage />} />
-            <Route path="/editor" element={<FileEditorPage />} />
-            <Route path="/robots" element={<RobotsPage />} />
-            <Route path="/services" element={<ServicesPage />} />
+            <Routes>
+              <Route path="/" element={<HomePage />} />
+              <Route path="/editor" element={<FileEditorPage />} />
+              <Route path="/robots" element={<RobotsPage />} />
+              <Route path="/services" element={<ServicesPage />} />
               <Route path="/motors" element={<MotorControlPage />} />
-            <Route path="/terminal" element={<TerminalPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Routes>
+              <Route path="/terminal" element={<TerminalPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/control" element={<ControlPage />} />
+              <Route path="/editctl" element={<EditControlLayoutPage />} />
+            </Routes>
           </Suspense>
         </main>
       </div>
+    )
+  }
+
+  return (
+    <Router>
+      <FullscreenRoutes />
     </Router>
   )
 }

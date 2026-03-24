@@ -36,7 +36,6 @@ import socketserver
 import json
 import threading
 import time
-import datetime
 from flask import Flask, request, jsonify
 import api.files as files_api
 import api.robot as robot_api
@@ -415,230 +414,6 @@ def register_robot_endpoints():
             print(f"[update_group] Error: {str(e)}")
             import traceback
             traceback.print_exc()
-            return jsonify({"success": False, "message": str(e)}), 500
-
-
-def register_control_endpoints():
-    """Регистрирует endpoints для экрана управления /control и редактора /editctl."""
-
-    layouts_path = Path("data/control_layouts.json")
-    commands_path = Path("data/commands.json")
-    ips_path = Path("data/ips.json")
-
-    def _ensure_layouts_file() -> None:
-        layouts_path.parent.mkdir(parents=True, exist_ok=True)
-        if layouts_path.exists():
-            return
-        default = {
-            "version": "1.0.0",
-            "lastUpdated": None,
-            "layouts": [
-                {
-                    "id": "default",
-                    "name": "Default",
-                    "buttons": []
-                }
-            ],
-            "activeLayoutId": "default"
-        }
-        with open(layouts_path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=2, ensure_ascii=False)
-
-    def _read_layouts() -> dict:
-        _ensure_layouts_file()
-        with open(layouts_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if "layouts" not in data or not isinstance(data.get("layouts"), list):
-            data["layouts"] = []
-        if "activeLayoutId" not in data:
-            data["activeLayoutId"] = data["layouts"][0]["id"] if data["layouts"] else None
-        return data
-
-    def _read_commands() -> list:
-        if not commands_path.exists():
-            return []
-        try:
-            with open(commands_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            commands = data.get("commands", [])
-            return commands if isinstance(commands, list) else []
-        except Exception:
-            return []
-
-    def _read_discovered_robot_ips() -> set:
-        if not ips_path.exists():
-            return set()
-        try:
-            with open(ips_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            raw_ips = data.get("ips", [])
-            discovered = set()
-            if isinstance(raw_ips, list):
-                for item in raw_ips:
-                    if isinstance(item, str):
-                        discovered.add(item)
-                    elif isinstance(item, dict):
-                        ip = str(item.get("ip", "")).strip()
-                        if ip:
-                            # Если есть явный флаг недоступности, не добавляем.
-                            if item.get("available") is False or item.get("reachable") is False:
-                                continue
-                            discovered.add(ip)
-            return discovered
-        except Exception:
-            return set()
-
-    @flask_app.route("/api/control/layouts", methods=["GET"])
-    def api_control_layouts_get():
-        try:
-            return jsonify({"success": True, **_read_layouts()})
-        except Exception as e:
-            return jsonify({"success": False, "message": str(e)}), 500
-
-    @flask_app.route("/api/control/layouts", methods=["POST"])
-    def api_control_layouts_save():
-        try:
-            payload = request.get_json() or {}
-            layouts = payload.get("layouts", [])
-            active_layout_id = payload.get("activeLayoutId")
-            if not isinstance(layouts, list):
-                return jsonify({"success": False, "message": "layouts must be a list"}), 400
-
-            clean_layouts = []
-            for idx, layout in enumerate(layouts):
-                if not isinstance(layout, dict):
-                    continue
-                layout_id = str(layout.get("id", f"layout_{idx+1}")).strip() or f"layout_{idx+1}"
-                name = str(layout.get("name", f"Layout {idx+1}")).strip() or f"Layout {idx+1}"
-                buttons = layout.get("buttons", [])
-                if not isinstance(buttons, list):
-                    buttons = []
-                clean_buttons = []
-                for btn_idx, btn in enumerate(buttons):
-                    if not isinstance(btn, dict):
-                        continue
-                    command_id = str(btn.get("commandId", "")).strip()
-                    if not command_id:
-                        continue
-                    clean_buttons.append({
-                        "id": str(btn.get("id", f"{layout_id}_btn_{btn_idx+1}")),
-                        "commandId": command_id,
-                        "robotIp": str(btn.get("robotIp", "")).strip(),
-                        "x": float(btn.get("x", 50.0)),
-                        "y": float(btn.get("y", 50.0)),
-                        "size": float(btn.get("size", 64.0)),
-                        "icon": str(btn.get("icon", "")).strip(),
-                        "label": str(btn.get("label", "")).strip(),
-                    })
-                clean_layouts.append({
-                    "id": layout_id,
-                    "name": name,
-                    "buttons": clean_buttons,
-                })
-
-            if clean_layouts and (not active_layout_id or not any(l["id"] == active_layout_id for l in clean_layouts)):
-                active_layout_id = clean_layouts[0]["id"]
-
-            out = {
-                "version": "1.0.0",
-                "lastUpdated": datetime.datetime.now().isoformat(),
-                "layouts": clean_layouts,
-                "activeLayoutId": active_layout_id,
-            }
-            _ensure_layouts_file()
-            with open(layouts_path, "w", encoding="utf-8") as f:
-                json.dump(out, f, indent=2, ensure_ascii=False)
-            return jsonify({"success": True, **out})
-        except Exception as e:
-            return jsonify({"success": False, "message": str(e)}), 500
-
-    @flask_app.route("/api/control/meta", methods=["GET"])
-    def api_control_meta():
-        try:
-            commands = _read_commands()
-            discovered_ips = sorted(_read_discovered_robot_ips())
-            return jsonify({
-                "success": True,
-                "commands": commands,
-                "robots": [{"ip": ip} for ip in discovered_ips],
-                "discoveredIps": discovered_ips,
-            })
-        except Exception as e:
-            return jsonify({"success": False, "message": str(e)}), 500
-
-    @flask_app.route("/api/control/layout_warnings", methods=["GET"])
-    def api_control_layout_warnings():
-        try:
-            layout_id = str(request.args.get("layoutId", "")).strip()
-            data = _read_layouts()
-            layouts = data.get("layouts", [])
-            if layout_id:
-                target_layout = next((l for l in layouts if str(l.get("id")) == layout_id), None)
-            else:
-                active_id = data.get("activeLayoutId")
-                target_layout = next((l for l in layouts if str(l.get("id")) == str(active_id)), None) or (layouts[0] if layouts else None)
-
-            if not target_layout:
-                return jsonify({"success": True, "missingRobots": []})
-
-            discovered = _read_discovered_robot_ips()
-            required_ips = set()
-            for btn in target_layout.get("buttons", []):
-                robot_ip = str(btn.get("robotIp", "")).strip()
-                if robot_ip:
-                    required_ips.add(robot_ip)
-
-            missing = sorted([ip for ip in required_ips if ip not in discovered])
-            return jsonify({"success": True, "missingRobots": missing})
-        except Exception as e:
-            return jsonify({"success": False, "message": str(e), "missingRobots": []}), 500
-
-    @flask_app.route("/api/control/execute", methods=["POST"])
-    def api_control_execute():
-        """Выполняет команду из раскладки локально или на удаленном роботе."""
-        try:
-            payload = request.get_json() or {}
-            command_id = str(payload.get("commandId", "")).strip()
-            robot_ip = str(payload.get("robotIp", "")).strip()
-            if not command_id:
-                return jsonify({"success": False, "message": "commandId required"}), 400
-
-            commands = _read_commands()
-            command_cfg = next((c for c in commands if str(c.get("id")) == command_id), None)
-            if not command_cfg:
-                return jsonify({"success": False, "message": f"Command '{command_id}' not found"}), 404
-
-            cmd = str(command_cfg.get("command", "")).strip()
-            args = command_cfg.get("args", [])
-            if not isinstance(args, list):
-                args = []
-
-            # Локальный запуск
-            if not robot_ip:
-                result = robot_api.RobotAPI.execute_command(cmd, args)
-                return jsonify(result), (200 if result.get("success") else 400)
-
-            # Удаленный запуск через API целевого робота.
-            # Используем универсальный endpoint /api/robot/execute.
-            remote_payload = {"command": cmd, "args": args}
-            remote_result = network_api.send_data(
-                robot_ip,
-                "/api/robot/execute",
-                remote_payload,
-                port=5000,
-                timeout=15,
-            )
-            if not remote_result.get("success"):
-                return jsonify(remote_result), 502
-            response = remote_result.get("response")
-            if isinstance(response, dict):
-                return jsonify(response), (200 if response.get("success") else 400)
-            return jsonify({
-                "success": True,
-                "message": "Command sent",
-                "response": response
-            })
-        except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
 
@@ -1185,7 +960,6 @@ register_files_endpoints()
 register_directory_endpoints()
 register_network_endpoints()
 register_robot_endpoints()
-register_control_endpoints()
 register_services_endpoints()
 register_unitree_motor_endpoints()
 
@@ -1497,10 +1271,6 @@ class CustomHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
-        if self.path.split('?', 1)[0] == '/control':
-            self.path = '/control.html'
-        elif self.path.split('?', 1)[0] == '/editctl':
-            self.path = '/editctl.html'
         if self._is_camera_api():
             self._proxy_to_api_server('GET')
             return

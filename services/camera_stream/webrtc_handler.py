@@ -46,14 +46,24 @@ VIDEO_CLOCK_RATE = 90000
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 
 # WebRTC tuning for:
-#  - weak connection (thumbnail matrix) without breaking FPS below ~30
-#  - fullscreen playback with better image quality and higher FPS
+#  - weak connection: prefer lowering FPS (down to RGW2_WEBRTC_FPS_MIN, default 20) before JPEG quality
+#  - fullscreen: up to RGW2_WEBRTC_FPS_MAX (default 60)
 #
 # Bitrate constraint from user: "не более 8к" → interpret as ~8 Mbps.
 MAX_BITRATE_CAP_BPS = 8_000_000
 
+# Hard FPS bounds (adaptive path stays inside this range).
+FPS_MIN = int(os.getenv("RGW2_WEBRTC_FPS_MIN", "20"))
+FPS_MAX = int(os.getenv("RGW2_WEBRTC_FPS_MAX", "60"))
+FPS_MIN = max(1, FPS_MIN)
+FPS_MAX = max(FPS_MIN, FPS_MAX)
+
+def _clamp_fps(v: int) -> int:
+    return max(FPS_MIN, min(FPS_MAX, int(v)))
+
+
 # Fullscreen / normal conditions
-TARGET_FPS_HIGH = int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", "60")))
+TARGET_FPS_HIGH = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", "60"))))
 JPEG_QUALITY_HIGH = int(os.getenv("RGW2_WEBRTC_JPEG_QUALITY_HIGH", os.getenv("RGW2_WEBRTC_JPEG_QUALITY", "70")))
 
 # Keep FPS stable; do not exceed bitrate cap.
@@ -61,6 +71,7 @@ MAX_BITRATE_BPS_HIGH = int(os.getenv("RGW2_WEBRTC_MAX_BITRATE_BPS_HIGH",
                                     os.getenv("RGW2_WEBRTC_MAX_BITRATE_BPS", str(MAX_BITRATE_CAP_BPS))))
 MAX_BITRATE_BPS_HIGH = min(MAX_BITRATE_BPS_HIGH, MAX_BITRATE_CAP_BPS)
 MAX_FRAMERATE_HIGH = float(os.getenv("RGW2_WEBRTC_MAX_FRAMERATE_HIGH", str(TARGET_FPS_HIGH)))
+MAX_FRAMERATE_HIGH = float(_clamp_fps(int(MAX_FRAMERATE_HIGH)))
 
 # Output resolution (bandwidth control).
 WEBRTC_WIDTH_HIGH = int(os.getenv("RGW2_WEBRTC_WIDTH_HIGH", os.getenv("RGW2_WEBRTC_WIDTH", "640")))
@@ -68,8 +79,8 @@ WEBRTC_HEIGHT_HIGH = int(os.getenv("RGW2_WEBRTC_HEIGHT_HIGH", os.getenv("RGW2_WE
 
 VIDEO_RESYNC_SLEEP = float(os.getenv("RGW2_WEBRTC_RESYNC_SLEEP_SEC", "0.0"))  # optional debug knob
 
-# Matrix / weak connection (quality must not drop below ~30% and FPS ~30).
-TARGET_FPS_LOW = int(os.getenv("RGW2_WEBRTC_FPS_LOW", "30"))
+# Matrix / weak connection — start lower; under load we drop FPS toward FPS_MIN before JPEG quality.
+TARGET_FPS_LOW = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_LOW", "30")))
 
 # Require JPEG quality not below 30.
 QUALITY_SCALE = 1.5
@@ -80,6 +91,7 @@ JPEG_QUALITY_LOW = int(os.getenv("RGW2_WEBRTC_JPEG_QUALITY_LOW", str(default_low
 MAX_BITRATE_BPS_LOW = int(os.getenv("RGW2_WEBRTC_MAX_BITRATE_BPS_LOW", str(MAX_BITRATE_BPS_HIGH)))
 MAX_BITRATE_BPS_LOW = min(MAX_BITRATE_BPS_LOW, MAX_BITRATE_CAP_BPS)
 MAX_FRAMERATE_LOW = float(os.getenv("RGW2_WEBRTC_MAX_FRAMERATE_LOW", str(TARGET_FPS_LOW)))
+MAX_FRAMERATE_LOW = float(_clamp_fps(int(MAX_FRAMERATE_LOW)))
 
 # Resolution scale so that bandwidth also drops with low quality.
 # width/height scale = 1/sqrt(1.5) ~= 0.816
@@ -189,6 +201,7 @@ if _aiortc_available:
             super().__init__()
             self._cam = camera_stream
             self._pts = 0
+            self._fps_floor = FPS_MIN
             if str(quality_mode).lower() == 'low':
                 self._quality_mode = 'low'
                 self._jpeg_quality = JPEG_QUALITY_LOW
@@ -197,6 +210,8 @@ if _aiortc_available:
                 self._out_h = WEBRTC_HEIGHT_LOW
                 self._target_fps = TARGET_FPS_LOW
                 self._max_bitrate_bps = MAX_BITRATE_BPS_LOW
+                # Matrix view: never auto-ramp above this FPS (saves bandwidth).
+                self._fps_ceiling = TARGET_FPS_LOW
             else:
                 self._quality_mode = 'high'
                 self._jpeg_quality = JPEG_QUALITY_HIGH
@@ -205,8 +220,12 @@ if _aiortc_available:
                 self._out_h = WEBRTC_HEIGHT_HIGH
                 self._target_fps = TARGET_FPS_HIGH
                 self._max_bitrate_bps = MAX_BITRATE_BPS_HIGH
+                self._fps_ceiling = TARGET_FPS_HIGH
 
-            self._target_fps = max(1, int(self._target_fps))
+            self._target_fps = _clamp_fps(int(self._target_fps))
+            self._fps_ceiling = _clamp_fps(int(self._fps_ceiling))
+            if self._fps_ceiling < self._target_fps:
+                self._fps_ceiling = self._target_fps
             self._frame_interval = VIDEO_CLOCK_RATE // self._target_fps
             self._no_frame_count = 0  # consecutive misses — for logging
             self._last_emit_time = None  # monotonic timestamp for pacing
@@ -217,6 +236,14 @@ if _aiortc_available:
             self._bitrate_last_ts = time.monotonic()
             self._bitrate_eval_period_s = 0.5
             self._jpeg_quality_cap = int(self._jpeg_quality)
+
+        def _apply_target_fps(self, fps: int) -> None:
+            """Update pacing + RTP clock step when adaptive FPS changes."""
+            fps = max(self._fps_floor, min(self._fps_ceiling, int(fps)))
+            if fps == self._target_fps:
+                return
+            self._target_fps = fps
+            self._frame_interval = VIDEO_CLOCK_RATE // self._target_fps
 
         async def recv(self):
             loop = asyncio.get_event_loop()
@@ -248,11 +275,22 @@ if _aiortc_available:
                         self._bytes_acc = 0
                         self._bitrate_last_ts = now
 
-                        # Hysteresis to avoid oscillations.
+                        # Hysteresis: when over cap, lower FPS first (down to FPS_MIN), then JPEG quality.
+                        # When under cap, raise FPS first (up to mode ceiling), then quality.
                         if bitrate_bps > self._max_bitrate_bps * 1.05:
-                            self._jpeg_quality = max(self._jpeg_quality_min, self._jpeg_quality - 5)
+                            if self._target_fps > self._fps_floor:
+                                self._apply_target_fps(self._target_fps - 3)
+                            else:
+                                self._jpeg_quality = max(
+                                    self._jpeg_quality_min, self._jpeg_quality - 5
+                                )
                         elif bitrate_bps < self._max_bitrate_bps * 0.70:
-                            self._jpeg_quality = min(self._jpeg_quality_cap, self._jpeg_quality + 2)
+                            if self._target_fps < self._fps_ceiling:
+                                self._apply_target_fps(self._target_fps + 2)
+                            else:
+                                self._jpeg_quality = min(
+                                    self._jpeg_quality_cap, self._jpeg_quality + 2
+                                )
                 except Exception:
                     pass
                 if av_frame is None:
@@ -287,18 +325,20 @@ if _aiortc_available:
             av_frame.time_base = VIDEO_TIME_BASE
             self._pts += self._frame_interval
 
-            # Pacing: avoid sending as fast as possible and creating bufferbloat.
-            # This also keeps end-to-end latency stable under weak connectivity.
-            next_time = None
+            # Pacing: one frame per target interval. If we are behind schedule, resync to "now"
+            # instead of bursting frames (bursting grows queues and ICE/packet loss).
             if self._last_emit_time is None:
                 self._last_emit_time = time.monotonic()
             else:
-                next_time = self._last_emit_time + (1.0 / self._target_fps)
+                interval = 1.0 / max(1, self._target_fps)
+                next_time = self._last_emit_time + interval
                 now = time.monotonic()
                 sleep_for = next_time - now
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
-                self._last_emit_time = next_time
+                    self._last_emit_time = next_time
+                else:
+                    self._last_emit_time = now
             return av_frame
 
 

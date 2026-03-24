@@ -1,0 +1,5 @@
+{
+  "python_version": "3.11",
+  "host_arch": "x86_64",
+  "cyclonedds_arch": "x86_64"
+}

@@ -1,6 +1,136 @@
 """
+API for robot camera streams with automatic source selection.
+"""
+from flask import Flask, Response, jsonify
+
+app = Flask(__name__)
+
+
+@app.after_request
+def after_request(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+    return response
+
+
+@app.route("/api/cameras/udp", methods=["GET"])
+def get_udp_streams():
+    try:
+        from services.webrtc.main import ensure_robot_stream
+        from services.camera_stream.camera_stream import get_all_streams
+
+        selected = ensure_robot_stream()
+        streams = get_all_streams()
+        udp_streams = []
+        for camera_id, stream_data in streams.items():
+            udp_port = stream_data.get("udp_port")
+            if udp_port:
+                udp_streams.append({
+                    "camera_id": camera_id,
+                    "camera_name": stream_data.get("camera_info", {}).get("name", camera_id),
+                    "udp_port": udp_port,
+                    "udp_host": "127.0.0.1",
+                })
+
+        return jsonify({
+            "success": True,
+            "udp_streams": udp_streams,
+            "count": len(udp_streams),
+            "selected_camera": selected.get("camera_id"),
+            "robot_type": selected.get("robot_type"),
+            "frame_ok": selected.get("frame_ok", False),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e), "udp_streams": []}), 500
+
+
+@app.route("/api/cameras/<camera_id>/mjpeg", methods=["GET"])
+def camera_mjpeg_stream(camera_id):
+    from services.camera_stream.camera_stream import get_camera_stream, start_camera_stream
+
+    stream = get_camera_stream(camera_id)
+    if not stream:
+        udp_port = 5006 if camera_id.startswith("realsense_") else 5005
+        if not start_camera_stream(camera_id, udp_port=udp_port):
+            return jsonify({"success": False, "message": f"Camera '{camera_id}' not found or failed to start"}), 404
+        stream = get_camera_stream(camera_id)
+        if not stream:
+            return jsonify({"success": False, "message": "Stream failed to initialize"}), 500
+
+    def generate():
+        try:
+            while True:
+                frame = stream.get_latest_frame(quality=80, wait=True)
+                if frame:
+                    yield (b"--frame\r\n" b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+        except GeneratorExit:
+            pass
+        except Exception:
+            pass
+
+    return Response(
+        generate(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Access-Control-Allow-Origin": "*",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.route("/api/webrtc/source", methods=["GET"])
+def webrtc_source():
+    try:
+        from services.webrtc.main import ensure_robot_stream
+        return jsonify({"success": True, **ensure_robot_stream()})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+def run_api(host="0.0.0.0", port=5000, debug=False):
+    app.run(host=host, port=port, debug=debug, threaded=True)
+
+
+def run():
+    import services_manager
+
+    try:
+        manager = services_manager.get_services_manager()
+        params = manager.get_service_parameters("api")
+        port = params.get("port", 5000)
+    except Exception:
+        port = 5000
+    run_api(host="0.0.0.0", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    run()
+"""
 Минимальный API для UDP стримов камер (только usb_2 и usb_3).
 """
+import sys
+from pathlib import Path
+
+# Ensure venv site-packages are visible for this module.
+# `services/web/web.py` already does a similar sys.path insertion, but
+# `api/api.py` is imported by the service runner independently.
+venv_path = Path(__file__).resolve().parent.parent / "venv"
+if venv_path.exists():
+    venv_lib = venv_path / "lib"
+    if venv_lib.exists():
+        python_dirs = [d for d in venv_lib.iterdir() if d.is_dir() and d.name.startswith("python")]
+        if python_dirs:
+            python_version_dir = python_dirs[0]
+            venv_site_packages = python_version_dir / "site-packages"
+            if venv_site_packages.exists() and str(venv_site_packages) not in sys.path:
+                sys.path.insert(0, str(venv_site_packages))
+
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)

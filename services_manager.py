@@ -189,6 +189,21 @@ class ServicesManager:
                 "enabled": True,
                 "port": 5000,
                 "dependencies": []
+            },
+            "g1_camera": {
+                "status": "ON",
+                "enabled": False,
+                "device_index": 2,
+                "capture_interval": 5,
+                "force_realsense": False,
+                "dependencies": []
+            },
+            "webrtc": {
+                "status": "ON",
+                "enabled": True,
+                "probe_interval": 5,
+                "robot_type": "",
+                "dependencies": []
             }
         }
         

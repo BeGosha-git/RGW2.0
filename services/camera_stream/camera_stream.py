@@ -1,4 +1,363 @@
 """
+Camera stream service: camera discovery + live frame streaming helpers.
+Supports RealSense and V4L2 USB cameras.
+"""
+import contextlib
+import os
+import socket
+import sys
+import threading
+import time
+from collections import deque
+from pathlib import Path
+from typing import Dict, List, Optional
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import services_manager
+import status
+
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    np = None
+
+try:
+    import pyrealsense2 as rs
+    REALSENSE_AVAILABLE = True
+except ImportError:
+    REALSENSE_AVAILABLE = False
+
+SERVICE_NAME = "camera_stream"
+REALSENSE_UDP_PORT = 5006
+
+_camera_streams: Dict[str, Dict] = {}
+_streams_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        old_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        os.close(devnull_fd)
+        try:
+            yield
+        finally:
+            os.dup2(old_stderr_fd, 2)
+            os.close(old_stderr_fd)
+    except Exception:
+        yield
+
+
+def get_service_name() -> str:
+    return SERVICE_NAME
+
+
+def _try_open_camera(camera_idx: int):
+    if not CV2_AVAILABLE:
+        return None
+    for backend in (cv2.CAP_V4L2, cv2.CAP_ANY, cv2.CAP_V4L):
+        cap = None
+        try:
+            with _suppress_stderr():
+                cap = cv2.VideoCapture(camera_idx, backend)
+            if not cap or not cap.isOpened():
+                if cap:
+                    cap.release()
+                continue
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return cap
+            cap.release()
+        except Exception:
+            if cap:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+    return None
+
+
+def detect_cameras() -> List[Dict]:
+    cameras: List[Dict] = []
+    if CV2_AVAILABLE:
+        for i in range(10):
+            cap = _try_open_camera(i)
+            if cap is None:
+                continue
+            try:
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                cameras.append({
+                    "id": f"usb_{i}",
+                    "type": "usb",
+                    "name": f"USB Camera {i}",
+                    "device_path": f"/dev/video{i}",
+                    "index": i,
+                    "width": width,
+                    "height": height,
+                    "fps": fps,
+                    "available": True,
+                })
+            finally:
+                cap.release()
+
+    if REALSENSE_AVAILABLE:
+        try:
+            ctx = rs.context()
+            for idx, dev in enumerate(ctx.query_devices()):
+                cameras.append({
+                    "id": f"realsense_{idx}",
+                    "type": "realsense",
+                    "name": f"RealSense {dev.get_info(rs.camera_info.name)}",
+                    "serial": dev.get_info(rs.camera_info.serial_number),
+                    "index": idx,
+                    "available": True,
+                })
+        except Exception:
+            pass
+    return cameras
+
+
+def _find_camera(camera_id: str, cameras: List[Dict]) -> Optional[Dict]:
+    for cam in cameras:
+        if cam.get("id") == camera_id:
+            return cam
+    return None
+
+
+class CameraStream:
+    def __init__(self, camera_info: Dict, udp_port: int = None, width: int = 640, height: int = 480, fps: int = 30):
+        self.camera_info = camera_info
+        self.udp_port = udp_port
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.running = False
+        self.cap = None
+        self.pipeline = None
+        self.thread = None
+        self.frame_queue = deque(maxlen=1)
+        self.frame_event = threading.Event()
+        self.stop_event = threading.Event()
+        self.udp_socket = None
+
+    def _start_realsense(self) -> bool:
+        if not REALSENSE_AVAILABLE:
+            return False
+        try:
+            self.pipeline = rs.pipeline()
+            config = rs.config()
+            serial = self.camera_info.get("serial")
+            if serial:
+                config.enable_device(serial)
+            config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+            self.pipeline.start(config)
+            frames = self.pipeline.wait_for_frames(timeout_ms=2000)
+            return bool(frames and frames.get_color_frame())
+        except Exception:
+            return False
+
+    def _start_usb(self) -> bool:
+        self.cap = _try_open_camera(self.camera_info.get("index", 0))
+        if not self.cap:
+            return False
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        ok, frame = self.cap.read()
+        return bool(ok and frame is not None)
+
+    def start(self) -> bool:
+        if self.running:
+            return True
+        if self.camera_info.get("type") == "realsense":
+            if not self._start_realsense():
+                return False
+        else:
+            if not self._start_usb():
+                return False
+        self.running = True
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return True
+
+    def _loop(self):
+        if self.udp_port:
+            try:
+                self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            except Exception:
+                self.udp_socket = None
+
+        while self.running and not self.stop_event.is_set():
+            frame = None
+            try:
+                if self.camera_info.get("type") == "realsense" and self.pipeline:
+                    frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+                    color = frames.get_color_frame() if frames else None
+                    if color is not None:
+                        frame = np.asanyarray(color.get_data())
+                elif self.cap:
+                    ok, frame = self.cap.read()
+                    if not ok:
+                        frame = None
+                if frame is not None:
+                    self.frame_queue.clear()
+                    self.frame_queue.append(frame.copy())
+                    self.frame_event.set()
+            except Exception:
+                pass
+            time.sleep(max(0.01, 1.0 / max(1, self.fps)))
+        self._cleanup()
+
+    def get_latest_frame(self, quality: int = 80, wait: bool = True) -> Optional[bytes]:
+        if not CV2_AVAILABLE:
+            return None
+        if wait:
+            self.frame_event.wait(timeout=0.5)
+            self.frame_event.clear()
+        if not self.frame_queue:
+            return None
+        try:
+            frame = self.frame_queue[-1]
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            if ok and buf is not None:
+                return buf.tobytes()
+        except Exception:
+            return None
+        return None
+
+    def stop(self):
+        self.running = False
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+        self._cleanup()
+
+    def _cleanup(self):
+        if self.cap:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        if self.pipeline:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            self.pipeline = None
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except Exception:
+                pass
+            self.udp_socket = None
+
+
+def get_camera_stream(camera_id: str) -> Optional[CameraStream]:
+    with _streams_lock:
+        return _camera_streams.get(camera_id, {}).get("stream")
+
+
+def start_camera_stream(camera_id: str, udp_port: int = None, width: int = None, height: int = None) -> bool:
+    cameras = detect_cameras()
+    info = _find_camera(camera_id, cameras)
+    if not info:
+        return False
+    with _streams_lock:
+        if camera_id in _camera_streams:
+            return True
+        if info["type"] == "realsense":
+            udp_port = REALSENSE_UDP_PORT if udp_port is None else udp_port
+            width = 1024 if width is None else width
+            height = 576 if height is None else height
+        else:
+            idx = info.get("index", 0)
+            if udp_port is None and idx < 3:
+                udp_port = 5005 + idx
+            width = 1024 if width is None and udp_port else (640 if width is None else width)
+            height = 576 if height is None and udp_port else (480 if height is None else height)
+        stream = CameraStream(info, udp_port=udp_port, width=width, height=height, fps=30)
+        if not stream.start():
+            return False
+        _camera_streams[camera_id] = {
+            "stream": stream,
+            "camera_info": info,
+            "started_at": time.time(),
+            "udp_port": udp_port,
+        }
+        return True
+
+
+def stop_camera_stream(camera_id: str) -> bool:
+    with _streams_lock:
+        if camera_id not in _camera_streams:
+            return False
+        _camera_streams[camera_id]["stream"].stop()
+        del _camera_streams[camera_id]
+        return True
+
+
+def get_all_streams() -> Dict:
+    with _streams_lock:
+        return {
+            cid: {
+                "camera_info": data["camera_info"],
+                "started_at": data["started_at"],
+                "running": data["stream"].running,
+                "udp_port": data.get("udp_port"),
+            }
+            for cid, data in _camera_streams.items()
+        }
+
+
+def run_service_loop():
+    manager = services_manager.get_services_manager()
+    status.register_service_data(SERVICE_NAME, {"status": "running", "started_at": time.time()})
+    while True:
+        try:
+            service = manager.get_service(SERVICE_NAME)
+            st = service.get("status", "ON")
+            if st == "OFF":
+                for cid in list(_camera_streams.keys()):
+                    stop_camera_stream(cid)
+                status.unregister_service_data(SERVICE_NAME)
+                break
+            if st == "SLEEP":
+                time.sleep(1)
+                continue
+            cameras = detect_cameras()
+            status.register_service_data(SERVICE_NAME, {
+                "status": "running",
+                "cameras_detected": len(cameras),
+                "streams_active": len(_camera_streams),
+                "cameras": cameras,
+                "realsense_udp_port": REALSENSE_UDP_PORT,
+            })
+            time.sleep(5)
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            time.sleep(1)
+
+
+def run():
+    run_service_loop()
+
+
+if __name__ == "__main__":
+    run()
+"""
 Сервис для захвата видео с камер и трансляции через UDP и HTTP MJPEG.
 Поддерживает RealSense и обычные USB камеры с улучшенной стабильностью.
 """

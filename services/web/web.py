@@ -61,6 +61,24 @@ files = files_api.FilesAPI()
 robot = robot_api.RobotAPI()
 network_api = network_api_module.NetworkAPI()
 
+# Absolute path to repo root (RGW2.0)
+REPO_ROOT = Path(__file__).parent.parent.parent.resolve()
+
+def _resolve_repo_path(user_path: str) -> str:
+    """
+    Resolve a user-provided path to an absolute path under repo root.
+    Prevents escaping the repository via '..' or absolute paths outside root.
+    """
+    if user_path is None:
+        raise ValueError("path is required")
+    p = str(user_path)
+    raw = Path(p)
+    candidate = raw if raw.is_absolute() else (REPO_ROOT / raw)
+    resolved = candidate.resolve()
+    if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
+        return str(resolved)
+    raise ValueError("path is outside repo")
+
 @flask_app.after_request
 def after_request(response):
     """Добавляет CORS заголовки ко всем ответам."""
@@ -115,8 +133,11 @@ def register_files_endpoints():
     @flask_app.route('/api/files/list', methods=['GET'])
     def api_files_list():
         """Список файлов в директории."""
-        dirpath = request.args.get('dirpath', '.')
-        return jsonify(files.list_directory(dirpath))
+        try:
+            dirpath = request.args.get('dirpath', '.')
+            return jsonify(files.list_directory(_resolve_repo_path(dirpath)))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/read', methods=['GET'])
     def api_files_read():
@@ -124,7 +145,10 @@ def register_files_endpoints():
         filepath = request.args.get('filepath')
         if not filepath:
             return jsonify({"success": False, "message": "filepath parameter required"}), 400
-        return jsonify(files.read_file(filepath))
+        try:
+            return jsonify(files.read_file(_resolve_repo_path(filepath)))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/write', methods=['POST'])
     def api_files_write():
@@ -134,7 +158,10 @@ def register_files_endpoints():
         content = data.get('content', '')
         if not filepath:
             return jsonify({"success": False, "message": "filepath required"}), 400
-        return jsonify(files.write_file(filepath, content))
+        try:
+            return jsonify(files.write_file(_resolve_repo_path(filepath), content))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/create', methods=['POST'])
     def api_files_create():
@@ -144,7 +171,10 @@ def register_files_endpoints():
         content = data.get('content', '')
         if not filepath:
             return jsonify({"success": False, "message": "filepath required"}), 400
-        return jsonify(files.create_file(filepath, content))
+        try:
+            return jsonify(files.create_file(_resolve_repo_path(filepath), content))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/delete', methods=['POST'])
     def api_files_delete():
@@ -153,7 +183,10 @@ def register_files_endpoints():
         filepath = data.get('filepath')
         if not filepath:
             return jsonify({"success": False, "message": "filepath required"}), 400
-        return jsonify(files.delete_file(filepath))
+        try:
+            return jsonify(files.delete_file(_resolve_repo_path(filepath)))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/rename', methods=['POST'])
     def api_files_rename():
@@ -163,7 +196,10 @@ def register_files_endpoints():
         new_path = data.get('new_path')
         if not old_path or not new_path:
             return jsonify({"success": False, "message": "old_path and new_path required"}), 400
-        return jsonify(files.rename_file(old_path, new_path))
+        try:
+            return jsonify(files.rename_file(_resolve_repo_path(old_path), _resolve_repo_path(new_path)))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
     
     @flask_app.route('/api/files/info', methods=['GET'])
     def api_files_info():
@@ -171,7 +207,10 @@ def register_files_endpoints():
         filepath = request.args.get('filepath')
         if not filepath:
             return jsonify({"success": False, "message": "filepath parameter required"}), 400
-        return jsonify(files.get_file_info(filepath))
+        try:
+            return jsonify(files.get_file_info(_resolve_repo_path(filepath)))
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
 
 
 def register_directory_endpoints():
@@ -337,6 +376,103 @@ def register_robot_endpoints():
         if not command:
             return jsonify({"success": False, "message": "command required"}), 400
         return jsonify(robot_api.RobotAPI.execute_command(command, args))
+
+    @flask_app.route('/api/robot/run_scenario', methods=['POST'])
+    def api_robot_run_scenario():
+        """
+        Запускает сценарий кнопки как фоновой job.
+        Клиент не должен оставаться подключенным: выполнение продолжится на сервере.
+        """
+        data = request.get_json() or {}
+        button = data.get("button")
+        page_host = data.get("pageHost")
+        local_ips = data.get("localIps")
+        scenario_key = data.get("scenarioKey") or (isinstance(button, dict) and button.get("id"))
+
+        if not button or not isinstance(button, dict):
+            return jsonify({"success": False, "message": "button payload required"}), 400
+
+        from services.web.scenario_runner import start_scenario_job
+
+        res = start_scenario_job(
+            button=button,
+            page_host=page_host,
+            local_ips=local_ips if isinstance(local_ips, list) else None,
+            scenario_key=scenario_key,
+        )
+        if not res.get("success"):
+            return jsonify(res), 409
+        return jsonify(res), 200
+
+    # -------- distributed scenario endpoints (run on every robot) --------
+    @flask_app.route('/api/robot/scenario/load', methods=['POST'])
+    def api_robot_scenario_load():
+        """
+        Загружает список шагов сценария в локальный ScenarioAgent.
+        Ожидаемый payload:
+          scenarioId: str
+          steps: list
+          peers: list[str]  (ip адреса остальных участников)
+          selfId: str       (ip этого робота или 'LOCAL')
+        """
+        data = request.get_json() or {}
+        scenario_id = str(data.get("scenarioId") or "").strip()
+        steps = data.get("steps") or []
+        peers = data.get("peers") or []
+        self_id = str(data.get("selfId") or "LOCAL").strip() or "LOCAL"
+        if not scenario_id:
+            return jsonify({"success": False, "message": "scenarioId required"}), 400
+        if not isinstance(steps, list):
+            return jsonify({"success": False, "message": "steps must be list"}), 400
+        from services.web.scenario_agent import get_agent
+        res = get_agent().load(scenario_id=scenario_id, steps=steps, peers=peers if isinstance(peers, list) else [], self_id=self_id)
+        return jsonify(res), 200
+
+    @flask_app.route('/api/robot/scenario/start', methods=['POST'])
+    def api_robot_scenario_start():
+        from services.web.scenario_agent import get_agent
+        res = get_agent().start()
+        return jsonify(res), (200 if res.get("success") else 409)
+
+    @flask_app.route('/api/robot/scenario/stop', methods=['POST'])
+    def api_robot_scenario_stop():
+        from services.web.scenario_agent import get_agent
+        return jsonify(get_agent().stop()), 200
+
+    @flask_app.route('/api/robot/scenario/continue', methods=['POST'])
+    def api_robot_scenario_continue():
+        from services.web.scenario_agent import get_agent
+        return jsonify(get_agent().cont()), 200
+
+    @flask_app.route('/api/robot/scenario/abort', methods=['POST'])
+    def api_robot_scenario_abort():
+        from services.web.scenario_agent import get_agent
+        return jsonify(get_agent().abort()), 200
+
+    @flask_app.route('/api/robot/scenario/ready', methods=['POST'])
+    def api_robot_scenario_ready():
+        data = request.get_json() or {}
+        scenario_id = data.get("scenarioId")
+        step_index = data.get("stepIndex", -1)
+        from_ip = data.get("fromIp", "")
+        from services.web.scenario_agent import get_agent
+        res = get_agent().mark_ready(scenario_id=scenario_id, step_index=step_index, from_ip=from_ip)
+        return jsonify(res), (200 if res.get("success") else 400)
+
+    @flask_app.route('/api/robot/scenario/state', methods=['GET'])
+    def api_robot_scenario_state():
+        from services.web.scenario_agent import get_agent
+        return jsonify(get_agent().state()), 200
+
+    @flask_app.route('/api/robot/scenario/<job_id>', methods=['GET'])
+    def api_robot_scenario_job(job_id: str):
+        """Возвращает статус фонового job сценария."""
+        from services.web.scenario_runner import get_scenario_job
+
+        res = get_scenario_job(job_id)
+        if not res.get("success"):
+            return jsonify(res), 404
+        return jsonify(res), 200
     
     @flask_app.route('/api/robot/commands', methods=['GET'])
     def api_robot_commands():

@@ -1,15 +1,12 @@
 import React from 'react'
 
-function ButtonPropertiesPanel({ selectedButton, targetIps, onPatchButton, onDeleteButton }) {
+function ButtonPropertiesPanel({ selectedButton, commands, targetIps, onPatchButton, onDeleteButton }) {
   const selected = selectedButton?.targetIps || (selectedButton?.targetIp ? [selectedButton.targetIp] : ['LOCAL'])
 
   const toggleTargetIp = (ip) => {
     const set = new Set(selected)
-    if (set.has(ip)) {
-      set.delete(ip)
-    } else {
-      set.add(ip)
-    }
+    if (set.has(ip)) set.delete(ip)
+    else set.add(ip)
     const next = Array.from(set)
     onPatchButton({ targetIps: next.length ? next : ['LOCAL'] })
   }
@@ -20,10 +17,7 @@ function ButtonPropertiesPanel({ selectedButton, targetIps, onPatchButton, onDel
       {selectedButton ? (
         <>
           <label>Подпись</label>
-          <input
-            value={selectedButton.label || ''}
-            onChange={(e) => onPatchButton({ label: e.target.value })}
-          />
+          <input value={selectedButton.label || ''} onChange={(e) => onPatchButton({ label: e.target.value })} />
 
           <label>Иконка</label>
           <input
@@ -31,7 +25,10 @@ function ButtonPropertiesPanel({ selectedButton, targetIps, onPatchButton, onDel
             onChange={(e) => onPatchButton({ icon: e.target.value.slice(0, 2) })}
           />
 
-          <label>Роботы (multi)</label>
+          <label>Роботы по умолчанию</label>
+          <p className="panel-hint program-hint">
+            Используются шагами без «Свои роботы». Параллельный блок может направить разные команды на разные IP.
+          </p>
           <div className="targets-checklist">
             {targetIps.map((ip) => (
               <label key={ip} className="target-item">
@@ -49,7 +46,9 @@ function ButtonPropertiesPanel({ selectedButton, targetIps, onPatchButton, onDel
             value={selectedButton.size || 64}
             onChange={(e) => onPatchButton({ size: Number(e.target.value) })}
           />
-          <button className="danger-btn" onClick={onDeleteButton}>Удалить кнопку</button>
+          <button className="danger-btn danger-btn--filled" onClick={onDeleteButton}>
+            Удалить кнопку
+          </button>
         </>
       ) : (
         <p className="panel-hint">Выбери кнопку на поле, чтобы изменить свойства.</p>

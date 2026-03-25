@@ -1,12 +1,16 @@
 """
 Сервис для автоматического подключения к Wi-Fi сети BeRobots.
-Проверяет подключение при запуске, подключается если необходимо, затем уходит в sleep.
+Логика совпадает с connect_wifi.sh: Managed mode, nmcli rescan + delete + connect ifname,
+при неудаче — wpa_supplicant + dhclient.
 """
 import os
+import re
 import sys
 import time
+import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 # Добавляем корневую директорию в путь для импорта модулей проекта
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -21,9 +25,38 @@ def get_service_name() -> str:
     """Возвращает имя сервиса."""
     return SERVICE_NAME
 
-# Параметры Wi-Fi сети
+# Параметры Wi-Fi сети (как в connect_wifi.sh)
 WIFI_SSID = "BeRobots"
 WIFI_PASSWORD = "Unitree0408"
+# Интерфейс по умолчанию — wlan0 (как в скрипте); иначе RGW2_WIFI_IFACE=wlp2s0
+WIFI_IFACE = os.environ.get("RGW2_WIFI_IFACE", "wlan0")
+
+
+def _nmcli_env():
+    env = os.environ.copy()
+    env.setdefault("LANG", "C")
+    env.setdefault("LC_ALL", "C")
+    return env
+
+
+def _with_sudo(argv):
+    """Те же команды, что в .sh с sudo; под root sudo не добавляем."""
+    if os.geteuid() == 0:
+        return argv
+    return ["sudo", *argv]
+
+
+def _run(argv, timeout=120, input_text=None, capture=True, check=False):
+    kw = {
+        "timeout": timeout,
+        "env": _nmcli_env(),
+    }
+    if capture:
+        kw["capture_output"] = True
+        kw["text"] = True
+    if input_text is not None:
+        kw["input"] = input_text
+    return subprocess.run(_with_sudo(argv), **kw)
 
 
 def check_internet():
@@ -37,13 +70,14 @@ def check_internet():
 
 
 def get_wifi_device():
-    """Получает имя Wi-Fi устройства."""
+    """Первое Wi-Fi устройство из nmcli (fallback, если заданный интерфейс недоступен)."""
     try:
         result = subprocess.run(
             ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=_nmcli_env(),
         )
         if result.returncode == 0:
             for line in result.stdout.strip().split('\n'):
@@ -54,6 +88,116 @@ def get_wifi_device():
     except Exception as e:
         print(f"[WiFiAutoConnect] Error getting WiFi device: {e}", flush=True)
     return None
+
+
+def iface_exists(iface: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["ip", "link", "show", iface],
+            capture_output=True,
+            timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve_wifi_iface() -> Optional[str]:
+    """Как connect_wifi.sh: предпочитаем wlan0 (или RGW2_WIFI_IFACE), иначе первое wifi из nmcli."""
+    if iface_exists(WIFI_IFACE):
+        return WIFI_IFACE
+    fallback = get_wifi_device()
+    if fallback:
+        print(
+            f"[WiFiAutoConnect] {WIFI_IFACE} not found, using nmcli device {fallback}",
+            flush=True,
+        )
+        return fallback
+    print(
+        f"[WiFiAutoConnect] No WiFi interface ({WIFI_IFACE} missing and nmcli empty)",
+        flush=True,
+    )
+    return None
+
+
+def ensure_managed_mode(iface: str) -> None:
+    """Шаг 1 из connect_wifi.sh: Mode Managed через iwconfig/iw."""
+    mode = "unknown"
+    try:
+        r = subprocess.run(
+            ["iwconfig", iface],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and r.stdout:
+            m = re.search(r"Mode:([^\s]+)", r.stdout)
+            if m:
+                mode = m.group(1)
+    except FileNotFoundError:
+        pass
+    if mode == "Managed":
+        print(f"[WiFiAutoConnect] {iface} already in Managed mode", flush=True)
+        return
+    print(f"[WiFiAutoConnect] Switching {iface} to Managed mode...", flush=True)
+    _run(["ip", "link", "set", iface, "down"], timeout=15)
+    _run(["iwconfig", iface, "mode", "managed"], timeout=15)
+    _run(["iw", "dev", iface, "set", "type", "managed"], timeout=15)
+    _run(["ip", "link", "set", iface, "up"], timeout=15)
+    time.sleep(2)
+
+
+def has_ipv4_on_iface(iface: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show", iface],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return r.returncode == 0 and "inet " in r.stdout
+    except Exception:
+        return False
+
+
+def iw_link_ssid(iface: str) -> Optional[str]:
+    """Текущая SSID с интерфейса (iw dev … link), нужна после wpa_supplicant без NM."""
+    try:
+        r = subprocess.run(
+            ["iw", "dev", iface, "link"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return None
+        m = re.search(r"SSID:\s*(\S+)", r.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def nmcli_wifi_connected(iface: str) -> bool:
+    """wlan0 + connected, как grep в connect_wifi.sh."""
+    try:
+        r = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,STATE", "device", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_nmcli_env(),
+        )
+        if r.returncode != 0:
+            return False
+        for line in r.stdout.strip().split("\n"):
+            if not line.startswith(f"{iface}:"):
+                continue
+            parts = line.split(":")
+            if len(parts) >= 2 and parts[1].lower() == "connected":
+                return True
+    except Exception as e:
+        print(f"[WiFiAutoConnect] nmcli_wifi_connected error: {e}", flush=True)
+    return False
 
 
 def unblock_wifi():
@@ -159,96 +303,173 @@ def unblock_wifi():
 
 
 def is_connected_to_ssid(ssid: str):
-    """Проверяет, подключен ли к указанной SSID."""
+    """Проверяет, подключен ли нужный интерфейс к указанной SSID (учёт имени профиля NM ≠ SSID)."""
+    iface = resolve_wifi_iface()
+    if not iface:
+        return False
+    linked = iw_link_ssid(iface)
+    if linked == ssid and has_ipv4_on_iface(iface):
+        return True
+    if has_ipv4_on_iface(iface) and not shutil.which("nmcli"):
+        return linked == ssid if linked else False
     try:
-        # Проверяем активные Wi-Fi соединения через device status
         result = subprocess.run(
-            ["nmcli", "-t", "-f", "DEVICE,TYPE,CONNECTION", "device", "status"],
+            ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=_nmcli_env(),
         )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
-                if line and ':wifi:' in line:
-                    parts = line.split(':')
-                    if len(parts) >= 3:
-                        connection_name = parts[2]
-                        # Проверяем, совпадает ли имя соединения с SSID
-                        if connection_name == ssid:
-                            return True
-                        # Также проверяем через активное соединение
-                        if connection_name and connection_name != '--':
-                            # Получаем SSID активного соединения
-                            conn_result = subprocess.run(
-                                ["nmcli", "-t", "-f", "802-11-wireless.ssid", "connection", "show", connection_name],
-                                capture_output=True,
-                                text=True,
-                                timeout=5
-                            )
-                            if conn_result.returncode == 0:
-                                active_ssid = conn_result.stdout.strip()
-                                if active_ssid == ssid:
-                                    return True
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.strip().split("\n"):
+            if not line.startswith(f"{iface}:"):
+                continue
+            parts = line.split(":")
+            if len(parts) < 4:
+                continue
+            dev, typ, state, conn = parts[0], parts[1], parts[2], ":".join(parts[3:])
+            if typ != "wifi" or state.lower() != "connected":
+                continue
+            if conn == ssid:
+                return True
+            if conn and conn != "--":
+                conn_result = subprocess.run(
+                    [
+                        "nmcli",
+                        "-t",
+                        "-f",
+                        "802-11-wireless.ssid",
+                        "connection",
+                        "show",
+                        conn,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=_nmcli_env(),
+                )
+                if conn_result.returncode == 0 and conn_result.stdout.strip() == ssid:
+                    return True
     except Exception as e:
         print(f"[WiFiAutoConnect] Error checking connection: {e}", flush=True)
     return False
 
 
-def connect_to_wifi(ssid: str, password: str):
-    """Подключается к Wi-Fi сети."""
-    # Сначала проверяем и разблокируем Wi-Fi адаптер если необходимо
-    if not unblock_wifi():
-        print(f"[WiFiAutoConnect] Warning: Could not unblock WiFi adapter, but continuing...", flush=True)
-    
-    wifi_device = get_wifi_device()
-    if not wifi_device:
-        print(f"[WiFiAutoConnect] No WiFi device found", flush=True)
+def _connect_via_nmcli(ssid: str, password: str, iface: str) -> bool:
+    """Шаги 3 connect_wifi.sh: rescan, delete профиля, wifi connect … ifname."""
+    print("[WiFiAutoConnect] Using NetworkManager (nmcli)...", flush=True)
+    _run(["nmcli", "device", "wifi", "rescan"], timeout=30)
+    time.sleep(3)
+    _run(["nmcli", "connection", "delete", ssid], timeout=30)
+    r = _run(
+        [
+            "nmcli",
+            "device",
+            "wifi",
+            "connect",
+            ssid,
+            "password",
+            password,
+            "ifname",
+            iface,
+        ],
+        timeout=120,
+    )
+    time.sleep(5)
+    if r.returncode == 0 and nmcli_wifi_connected(iface):
+        print(f"[WiFiAutoConnect] Connected to {ssid} via nmcli on {iface}", flush=True)
+        return True
+    err = (r.stderr or r.stdout or "")[:300]
+    if err:
+        print(f"[WiFiAutoConnect] nmcli connect issue: {err}", flush=True)
+    return nmcli_wifi_connected(iface)
+
+
+def _connect_via_wpa_supplicant(ssid: str, password: str, iface: str, stop_nm: bool) -> bool:
+    """Fallback из connect_wifi.sh: managed no, wpa_passphrase, wpa_supplicant, dhclient."""
+    print("[WiFiAutoConnect] Trying wpa_supplicant fallback...", flush=True)
+    if stop_nm and shutil.which("systemctl"):
+        _run(["systemctl", "stop", "NetworkManager"], timeout=60)
+    else:
+        _run(["nmcli", "device", "set", iface, "managed", "no"], timeout=30)
+    wpa_cfg = f"/tmp/wpa_supplicant_{ssid}.conf"
+    pr = subprocess.run(
+        ["wpa_passphrase", ssid, password],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if pr.returncode != 0 or not pr.stdout:
+        print("[WiFiAutoConnect] wpa_passphrase failed", flush=True)
         return False
-    
-    print(f"[WiFiAutoConnect] Connecting to {ssid}...", flush=True)
-    
-    try:
-        # Проверяем, существует ли уже профиль для этой сети
-        result = subprocess.run(
-            ["nmcli", "connection", "show", ssid],
-            capture_output=True,
-            text=True,
-            timeout=5
+    tee = subprocess.run(
+        _with_sudo(["tee", wpa_cfg]),
+        input=pr.stdout,
+        text=True,
+        timeout=10,
+        capture_output=True,
+        env=_nmcli_env(),
+    )
+    if tee.returncode != 0:
+        print("[WiFiAutoConnect] Could not write wpa config", flush=True)
+        return False
+    _run(["killall", "wpa_supplicant"], timeout=15)
+    time.sleep(1)
+    r = _run(
+        [
+            "wpa_supplicant",
+            "-B",
+            "-i",
+            iface,
+            "-c",
+            wpa_cfg,
+            "-D",
+            "nl80211,wext",
+        ],
+        timeout=30,
+    )
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "")[:200]
+        print(f"[WiFiAutoConnect] wpa_supplicant failed: {msg}", flush=True)
+    time.sleep(5)
+    _run(["dhclient", "-v", iface], timeout=60)
+    if has_ipv4_on_iface(iface):
+        print(f"[WiFiAutoConnect] Connected via wpa_supplicant on {iface}", flush=True)
+        return True
+    return False
+
+
+def connect_to_wifi(ssid: str, password: str):
+    """Подключение как в connect_wifi.sh: managed → nmcli (rescan, delete, connect ifname) → wpa."""
+    if not unblock_wifi():
+        print(
+            "[WiFiAutoConnect] Warning: Could not unblock WiFi adapter, but continuing...",
+            flush=True,
         )
-        
-        if result.returncode == 0:
-            # Профиль существует, активируем его
-            print(f"[WiFiAutoConnect] Activating existing connection {ssid}...", flush=True)
-            result = subprocess.run(
-                ["nmcli", "connection", "up", ssid],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        else:
-            # Профиль не существует, создаем новый
-            print(f"[WiFiAutoConnect] Creating new connection {ssid}...", flush=True)
-            result = subprocess.run(
-                [
-                    "nmcli", "device", "wifi", "connect", ssid,
-                    "password", password
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-        
-        if result.returncode == 0:
-            print(f"[WiFiAutoConnect] Successfully connected to {ssid}", flush=True)
-            # Ждем немного для установления соединения
-            time.sleep(3)
-            return True
-        else:
-            error_msg = result.stderr if result.stderr else result.stdout
-            print(f"[WiFiAutoConnect] Failed to connect: {error_msg[:200]}", flush=True)
+
+    iface = resolve_wifi_iface()
+    if not iface:
+        return False
+
+    print(f"[WiFiAutoConnect] Connecting to {ssid} on {iface}...", flush=True)
+
+    try:
+        ensure_managed_mode(iface)
+
+        if shutil.which("nmcli"):
+            if _connect_via_nmcli(ssid, password, iface):
+                return True
+            if _connect_via_wpa_supplicant(ssid, password, iface, stop_nm=False):
+                return True
             return False
-            
+
+        print(
+            "[WiFiAutoConnect] nmcli not found, using wpa_supplicant only (stopping NM)...",
+            flush=True,
+        )
+        return _connect_via_wpa_supplicant(ssid, password, iface, stop_nm=True)
+
     except subprocess.TimeoutExpired:
         print(f"[WiFiAutoConnect] Timeout while connecting to {ssid}", flush=True)
         return False

@@ -414,6 +414,10 @@ _streams_lock = threading.RLock()
 # UDP порт для RealSense стрима (отдельный стабильный порт)
 REALSENSE_UDP_PORT = 5006
 
+# Быстрое завершение: короткий poll RealSense, быстрый join после release устройства
+_STREAM_JOIN_TIMEOUT_SEC = float(os.environ.get("RGW2_CAMERA_JOIN_TIMEOUT", "0.85"))
+_RS_LOOP_POLL_MS = int(os.environ.get("RGW2_CAMERA_RS_POLL_MS", "350"))
+
 
 @contextlib.contextmanager
 def _suppress_stderr():
@@ -891,7 +895,7 @@ class CameraStream:
                     
                     try:
                         with _suppress_stderr():
-                            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+                            frames = self.pipeline.wait_for_frames(timeout_ms=_RS_LOOP_POLL_MS)
                             if frames:
                                 cf = frames.get_color_frame()
                                 if cf:
@@ -1007,65 +1011,26 @@ class CameraStream:
                             pass
                         finally:
                             self.pipeline = None
+                    if self.stop_event.is_set() or not self.running:
+                        break
                     try:
                         if self._restart_camera():
                             self.consecutive_errors = 0
                     except Exception as restart_error:
                         print(f"[CameraStream] Failed to restart camera {self.camera_id}: {restart_error}", flush=True)
-                time.sleep(0.5)
+                self.stop_event.wait(timeout=0.5)
                 continue
 
-            # Выдерживаем FPS (минимальная задержка для стабильности)
+            # Выдерживаем FPS; wait прерывается по stop_event (быстрая остановка сервиса)
             elapsed = time.time() - t0
             sleep_t = interval - elapsed
-            if sleep_t > 0.001:  # Только если нужно больше 1мс
-                time.sleep(sleep_t)
-            # Иначе не спим вообще для минимальной задержки
+            if sleep_t > 0.001:
+                self.stop_event.wait(timeout=min(sleep_t, 0.25))
         
         self._cleanup()
-    
-    def _cleanup(self):
-        """Очистка ресурсов с защитой от segfault."""
-        # Освобождаем USB камеру
-        if self.cap is not None:
-            try:
-                # Проверяем, что камера еще открыта перед освобождением
-                if hasattr(self.cap, 'isOpened') and self.cap.isOpened():
-                    with _suppress_stderr():
-                        self.cap.release()
-                elif hasattr(self.cap, 'release'):
-                    # Если isOpened недоступен, пытаемся освободить напрямую
-                    with _suppress_stderr():
-                        try:
-                            self.cap.release()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            finally:
-                self.cap = None
-        
-        # Освобождаем RealSense pipeline
-        if self.pipeline is not None:
-            try:
-                # RealSense требует особой осторожности
-                with _suppress_stderr():
-                    try:
-                        # Проверяем, что pipeline еще активен
-                        if hasattr(self.pipeline, 'stop'):
-                            self.pipeline.stop()
-                    except (RuntimeError, AttributeError, Exception):
-                        # Игнорируем ошибки при остановке
-                        pass
-            except Exception:
-                pass
-            finally:
-                # Гарантированно очищаем ссылку
-                self.pipeline = None
-                # Даем время системе освободить ресурсы
-                time.sleep(0.1)
-        
-        # Освобождаем UDP сокет
+
+    def _release_hardware_unlocked(self) -> None:
+        """Закрыть cap / pipeline / UDP до join — разблокирует cap.read() и wait_for_frames()."""
         if self.udp_socket is not None:
             try:
                 self.udp_socket.close()
@@ -1073,16 +1038,47 @@ class CameraStream:
                 pass
             finally:
                 self.udp_socket = None
-    
+
+        if self.cap is not None:
+            try:
+                if hasattr(self.cap, 'isOpened') and self.cap.isOpened():
+                    with _suppress_stderr():
+                        self.cap.release()
+                elif hasattr(self.cap, 'release'):
+                    with _suppress_stderr():
+                        self.cap.release()
+            except Exception:
+                pass
+            finally:
+                self.cap = None
+
+        if self.pipeline is not None:
+            try:
+                with _suppress_stderr():
+                    if hasattr(self.pipeline, 'stop'):
+                        self.pipeline.stop()
+            except Exception:
+                pass
+            finally:
+                self.pipeline = None
+
+    def _cleanup(self):
+        """Идемпотентная очистка (cap/pipeline/UDP уже могли быть закрыты в stop())."""
+        self._release_hardware_unlocked()
+
     def stop(self):
-        """Остановка потока камеры."""
+        """Остановка: закрываем железо до join, чтобы read()/wait_for_frames() не висели."""
         with self.lock:
             if not self.running:
                 return
             self.running = False
             self.stop_event.set()
-            if self.thread and self.thread.is_alive():
-                self.thread.join(timeout=3.0)
+            thr = self.thread
+        self._release_hardware_unlocked()
+        if thr and thr.is_alive():
+            thr.join(timeout=_STREAM_JOIN_TIMEOUT_SEC)
+        with self.lock:
+            self.thread = None
         self._cleanup()
     
     def get_latest_frame(self, width: int = None, height: int = None,
@@ -1187,11 +1183,14 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
 
 
 def stop_camera_stream(camera_id: str) -> bool:
+    stream = None
     with _streams_lock:
-        if camera_id in _camera_streams:
-            _camera_streams[camera_id]["stream"].stop()
-            del _camera_streams[camera_id]
-            return True
+        entry = _camera_streams.pop(camera_id, None)
+        if entry is not None:
+            stream = entry.get("stream")
+    if stream is not None:
+        stream.stop()
+        return True
     return False
 
 
@@ -1213,13 +1212,15 @@ def get_all_streams() -> Dict:
 def _cleanup_all_streams():
     """Безопасная очистка всех потоков камер при завершении."""
     print("[CameraStream] Cleaning up all camera streams...", flush=True)
+    snapshots = []
     with _streams_lock:
-        stream_ids = list(_camera_streams.keys())
-        for cid in stream_ids:
-            try:
-                stop_camera_stream(cid)
-            except Exception as e:
-                print(f"[CameraStream] Error stopping stream {cid}: {e}", flush=True)
+        snapshots = [(cid, data["stream"]) for cid, data in list(_camera_streams.items())]
+        _camera_streams.clear()
+    for cid, stream in snapshots:
+        try:
+            stream.stop()
+        except Exception as e:
+            print(f"[CameraStream] Error stopping stream {cid}: {e}", flush=True)
     print("[CameraStream] All streams cleaned up", flush=True)
 
 

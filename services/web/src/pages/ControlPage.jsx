@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import {
+  normalizeProgramFromButton,
+  collectAllTargetsFromButton,
+  derivePrimaryCommandId,
+  normalizeTargetList,
+  validateProgram,
+} from '../utils/controlProgram'
+import { executeButtonScenario } from '../utils/controlScenarioExecution'
 import './ControlPage.css'
 
 const LAYOUT_FILEPATH = 'data/control_layouts.json'
@@ -7,20 +15,6 @@ const LAYOUT_FILEPATH = 'data/control_layouts.json'
 const defaultLayouts = {
   version: '1.0.0',
   layouts: [{ id: 'layout-1', name: 'Раскладка 1', buttons: [] }],
-}
-
-function normalizeTargetList(button) {
-  const raw = button.targetIps ?? (button.targetIp ? [button.targetIp] : ['LOCAL'])
-  const list = Array.isArray(raw) ? raw : [raw]
-  return [...new Set(list.map((t) => String(t).trim()).filter(Boolean))]
-}
-
-/** Одинаковое действие: команда + аргументы + набор целей (для антидребезга). */
-function makeControlActionKey(button, command) {
-  if (!command) return button.id || ''
-  const targets = normalizeTargetList(button).slice().sort().join('|')
-  const args = JSON.stringify(command.args ?? [])
-  return `${command.command}::${args}::${targets}`
 }
 
 function ControlPage() {
@@ -36,6 +30,7 @@ function ControlPage() {
   const touchStartX = useRef(null)
   const actionInFlightRef = useRef(new Set())
   const [inFlightKeys, setInFlightKeys] = useState(() => new Set())
+  const mountedRef = useRef(true)
 
   const layouts = layoutData.layouts?.length ? layoutData.layouts : defaultLayouts.layouts
   const activeLayout = layouts[Math.min(layoutIndex, layouts.length - 1)] || defaultLayouts.layouts[0]
@@ -47,7 +42,7 @@ function ControlPage() {
     const pageHost = typeof window !== 'undefined' ? String(window.location.hostname || '').replace(/^::ffff:/i, '').trim() : ''
     const missing = new Set()
     for (const button of activeLayout?.buttons || []) {
-      const targets = normalizeTargetList(button)
+      const targets = collectAllTargetsFromButton(button)
       for (const target of targets) {
         if (target === 'LOCAL' || localSet.has(target) || (pageHost && target === pageHost)) continue
         if (!set.has(target)) missing.add(target)
@@ -117,6 +112,12 @@ function ControlPage() {
   }, [])
 
   useEffect(() => {
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
     setLayoutIndex((idx) => Math.min(idx, Math.max(layouts.length - 1, 0)))
   }, [layouts.length])
 
@@ -171,136 +172,44 @@ function ControlPage() {
   }
 
   const runButton = async (button) => {
-    const command = commandsMap[button.commandId]
-    if (!command) {
-      setError(`Команда ${button.commandId} не найдена`)
-      return
-    }
-
-    const actionKey = makeControlActionKey(button, command)
+    const actionKey = button.id
     if (actionInFlightRef.current.has(actionKey)) {
-      setInfo('Это действие уже выполняется')
+      if (mountedRef.current) setInfo('Это действие уже выполняется')
       return
     }
-    actionInFlightRef.current.add(actionKey)
-    setInFlightKeys(new Set(actionInFlightRef.current))
 
-    setError('')
-    setInfo('')
+    const program = normalizeProgramFromButton(button)
+    const v = validateProgram(program, commandsMap)
+    if (!v.ok) {
+      if (mountedRef.current) setError(v.errors.join(' · '))
+      return
+    }
+
+    actionInFlightRef.current.add(actionKey)
+    if (mountedRef.current) setInFlightKeys(new Set(actionInFlightRef.current))
+
+    if (mountedRef.current) setError('')
+    if (mountedRef.current) setInfo('Запуск сценария…')
+
+    const pageHost = String(window.location.hostname || '')
+      .replace(/^::ffff:/i, '')
+      .trim()
 
     try {
-      const targets = normalizeTargetList(button)
-      const localSet = new Set(localIps.map((ip) => String(ip).trim()).filter(Boolean))
-      // Страница открыта с этого хоста — считаем его «локальным» роботом (важно при двух NIC:
-      // /api/status может отдать только один local_ip, а в раскладке указан другой адрес этой же машины).
-      const pageHost = String(window.location.hostname || '')
-        .replace(/^::ffff:/i, '')
-        .trim()
-
-      const isLocalTarget = (target) => {
-        if (target === 'LOCAL') return true
-        if (localSet.has(target)) return true
-        if (pageHost && (target === pageHost || target === `[${pageHost}]`)) return true
-        return false
-      }
-
-      const hasLocal = targets.some(isLocalTarget)
-      const remoteTargets = [...new Set(targets.filter((t) => !isLocalTarget(t)))]
-
-      const payload = {
-        command: command.command,
-        args: command.args || [],
-      }
-
-      const parallelTasks = []
-
-      if (hasLocal) {
-        parallelTasks.push(
-          (async () => {
-            const localResponse = await fetch('/api/robot/execute', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ command: payload.command, args: payload.args }),
-            })
-            const localResult = await localResponse.json()
-            if (!localResult.success) {
-              throw new Error(localResult.message || 'Локальная команда не выполнена')
-            }
-            return { kind: 'local' }
-          })(),
-        )
-      }
-
-      parallelTasks.push(
-        ...remoteTargets.map((targetIp) =>
-          (async () => {
-            try {
-              const response = await fetch('/api/network/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  target_ip: targetIp,
-                  endpoint: '/api/robot/execute',
-                  data: payload,
-                }),
-              })
-              const result = await response.json()
-              if (!result.success) {
-                return { kind: 'remote', targetIp, ok: false, message: result.message || 'сеть' }
-              }
-              const remoteResponse = result.response
-              if (remoteResponse && typeof remoteResponse === 'object' && remoteResponse.success === false) {
-                return {
-                  kind: 'remote',
-                  targetIp,
-                  ok: false,
-                  message: remoteResponse.message || 'команда отклонена',
-                }
-              }
-              const hasReturnCode =
-                remoteResponse &&
-                remoteResponse.return_code !== undefined &&
-                remoteResponse.return_code !== null
-              if (
-                hasReturnCode &&
-                (remoteResponse.success === false || remoteResponse.return_code !== 0)
-              ) {
-                return {
-                  kind: 'remote',
-                  targetIp,
-                  ok: false,
-                  message: remoteResponse.message || remoteResponse.stderr || 'команда завершилась с ошибкой',
-                }
-              }
-              return { kind: 'remote', targetIp, ok: true, message: null }
-            } catch (err) {
-              return { kind: 'remote', targetIp, ok: false, message: err.message || 'ошибка запроса' }
-            }
-          })(),
-        ),
-      )
-
-      const merged = await Promise.all(parallelTasks)
-      const remoteResults = merged.filter((x) => x.kind === 'remote')
-
-      const failed = remoteResults.filter((r) => !r.ok)
-      if (failed.length) {
-        setError(
-          failed.map((f) => `${f.targetIp}: ${f.message}`).join(' · '),
-        )
-      }
-      const okLabel = [
-        ...(hasLocal ? ['LOCAL'] : []),
-        ...remoteResults.filter((r) => r.ok).map((r) => r.targetIp),
-      ]
-      if (okLabel.length) {
-        setInfo(`Отправлено: ${okLabel.join(', ')}${failed.length ? ` (ошибок: ${failed.length})` : ''}`)
-      }
+      await executeButtonScenario({
+        button,
+        commandsMap,
+        localIps,
+        pageHost,
+        onProgress: ({ message }) => {
+          if (message && mountedRef.current) setInfo(message)
+        },
+      })
     } catch (e) {
-      setError(e.message || 'Ошибка выполнения команды')
+      if (mountedRef.current) setError(e.message || 'Ошибка сценария')
     } finally {
       actionInFlightRef.current.delete(actionKey)
-      setInFlightKeys(new Set(actionInFlightRef.current))
+      if (mountedRef.current) setInFlightKeys(new Set(actionInFlightRef.current))
     }
   }
 
@@ -337,10 +246,13 @@ function ControlPage() {
 
         <div className="control-buttons-layer">
           {(activeLayout?.buttons || []).map((button) => {
-            const command = commandsMap[button.commandId]
-            const label = button.label || command?.name || button.commandId
-            const busyKey = command ? makeControlActionKey(button, command) : ''
-            const isBusy = busyKey && inFlightKeys.has(busyKey)
+            const prog = normalizeProgramFromButton(button)
+            const primaryId = derivePrimaryCommandId(prog)
+            const command = commandsMap[primaryId] || commandsMap[button.commandId]
+            const label = button.label || command?.name || primaryId || button.commandId
+            const isBusy = inFlightKeys.has(button.id)
+            const hasParallel = prog.some((b) => b.type === 'parallel')
+            const scenarioHint = hasParallel ? `${prog.length} бл. · ‖` : `${prog.length} бл.`
             return (
               <button
                 key={button.id}
@@ -354,7 +266,7 @@ function ControlPage() {
                 }}
                 disabled={isBusy}
                 onClick={() => runButton(button)}
-                title={`${label} (${(button.targetIps || [button.targetIp || 'LOCAL']).join(', ')})`}
+                title={`${label} · ${scenarioHint} · цели: ${normalizeTargetList(button).join(', ')}`}
               >
                 <span className="button-emoji">{button.icon || '●'}</span>
                 <span className="button-label">{label}</span>

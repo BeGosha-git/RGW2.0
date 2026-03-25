@@ -1,0 +1,86 @@
+.custom-select {
+  position: relative;
+  width: 100%;
+  font-size: 0.88rem;
+}
+
+.custom-select__trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  cursor: pointer;
+  text-align: left;
+  min-height: 38px;
+}
+
+.custom-select__trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.custom-select__value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select__chev {
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid rgba(255, 255, 255, 0.65);
+  flex-shrink: 0;
+}
+
+.custom-select--open .custom-select__chev {
+  transform: rotate(180deg);
+}
+
+.custom-select__menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: #1a1d24;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.custom-select__option {
+  width: 100%;
+  display: block;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #e8eaed;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+.custom-select__option:hover,
+.custom-select__option:focus-visible {
+  background: rgba(33, 150, 243, 0.25);
+  outline: none;
+}
+
+.custom-select__option.is-active {
+  background: rgba(33, 150, 243, 0.35);
+}

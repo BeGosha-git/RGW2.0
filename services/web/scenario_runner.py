@@ -91,7 +91,19 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
             commands_map = {}
 
         steps = _build_distributed_steps(program, commands_map)
-        participants = [str(t).strip() for t in targets if str(t).strip()]
+        # Filter out unreachable robots: if a robot doesn't answer /health quickly, do NOT wait for it.
+        raw_participants = [str(t).strip() for t in targets if str(t).strip()]
+        participants: List[str] = []
+        for t in raw_participants:
+            if t == "LOCAL":
+                participants.append(t)
+                continue
+            try:
+                ping = _network_api.send_data(t, "/health", {}, timeout=2)
+                if isinstance(ping, dict) and ping.get("success"):
+                    participants.append(t)
+            except Exception:
+                continue
         scenario_id = str(job_key or button.get("id") or job_id)
         self_id = _self_id_for_remote(page_host)
 

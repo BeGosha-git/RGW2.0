@@ -77,6 +77,7 @@ function TargetsEditor({ allTargets, valueTargets, onPatchTargets, targetMeta })
             const meta = targetMeta?.[ip]
             const bg = meta?.bg
             const fg = meta?.fg
+            const name = String(meta?.name || '').trim()
             return (
           <label
             key={ip}
@@ -93,7 +94,15 @@ function TargetsEditor({ allTargets, valueTargets, onPatchTargets, targetMeta })
               onMouseDown={(e) => e.stopPropagation()}
               onChange={() => toggle(ip)}
             />
-            <span>{ip}</span>
+            <span title={ip}>
+              {name ? (
+                <>
+                  <b>{name}</b> <span style={{ opacity: 0.8 }}>{ip}</span>
+                </>
+              ) : (
+                ip
+              )}
+            </span>
           </label>
             )
           })()
@@ -110,7 +119,14 @@ function StartNode() {
       <div className="node__body">
         <div className="node__note">Отсюда начинается сценарий. Соедини с первым блоком.</div>
       </div>
-      <Handle type="source" position={Position.Bottom} className="node-handle node-handle--out" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="node-handle node-handle--out"
+        title="Выход"
+        data-hint="OUT"
+        data-dir="down"
+      />
     </div>
   )
 }
@@ -118,12 +134,26 @@ function StartNode() {
 function SimpleSignalNode({ title, className, hint }) {
   return (
     <div className={`node ${className || ''}`}>
-      <Handle type="target" position={Position.Top} className="node-handle node-handle--in" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="node-handle node-handle--in"
+        title="Вход"
+        data-hint="IN"
+        data-dir="down"
+      />
       <div className="node__head">{title}</div>
       <div className="node__body">
         <div className="node__note">{hint}</div>
       </div>
-      <Handle type="source" position={Position.Bottom} className="node-handle node-handle--out" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="node-handle node-handle--out"
+        title="Выход"
+        data-hint="OUT"
+        data-dir="down"
+      />
     </div>
   )
 }
@@ -142,7 +172,25 @@ function CommandNode({ id, data }) {
 
   return (
     <div className="node node--command">
-      <Handle type="target" position={Position.Top} className="node-handle node-handle--in" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="node-handle node-handle--in"
+        id="in"
+        title="Вход (зависимость)"
+        data-hint="IN"
+        data-dir="down"
+      />
+      {/* Вход сигнала НАЧАТЬ/ПРОДОЛЖИТЬ (используется только если подключено ребро) */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="node-handle node-handle--sig"
+        id="go"
+        title="Вход GO (начать этап по сигналу)"
+        data-hint="GO IN"
+        data-dir="right"
+      />
       <div className="node__head">
         Команда
         {scenarioUi?.active ? (
@@ -175,19 +223,26 @@ function CommandNode({ id, data }) {
           onPatchTargets={(v) => onPatch(id, { targetIps: v })}
           targetMeta={targetMeta}
         />
-
-        <label className="node__wait-continue" onPointerDown={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
-          <input
-            type="checkbox"
-            checked={!!value.waitContinue}
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => e.stopPropagation()}
-            onChange={(e) => onPatch(id, { waitContinue: !!e.target.checked })}
-          />
-          <span>Ждать «ПРОДОЛЖИТЬ» + готовность всех</span>
-        </label>
       </div>
-      <Handle type="source" position={Position.Bottom} className="node-handle node-handle--out" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="node-handle node-handle--out"
+        id="out"
+        title="Выход (дальше по сценарию)"
+        data-hint="OUT"
+        data-dir="down"
+      />
+      {/* Выход READY (сигнал “готов”) */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="node-handle node-handle--sig"
+        id="ready"
+        title="Выход READY (готов к этапу)"
+        data-hint="READY"
+        data-dir="right"
+      />
     </div>
   )
 }
@@ -196,7 +251,15 @@ function DelayNode({ id, data }) {
   const { value, onPatch } = data
   return (
     <div className="node node--delay">
-      <Handle type="target" position={Position.Top} className="node-handle node-handle--in" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="node-handle node-handle--in"
+        id="in"
+        title="Вход"
+        data-hint="IN"
+        data-dir="down"
+      />
       <div className="node__head">Задержка</div>
       <div className="node__body">
         <label className="node__single">
@@ -204,17 +267,52 @@ function DelayNode({ id, data }) {
           <IntField value={value.ms ?? 0} ariaLabel="delay ms" onChange={(n) => onPatch(id, { ms: clampMs(n) })} />
         </label>
       </div>
-      <Handle type="source" position={Position.Bottom} className="node-handle node-handle--out" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="node-handle node-handle--out"
+        id="out"
+        title="Выход"
+        data-hint="OUT"
+        data-dir="down"
+      />
     </div>
   )
+}
+
+function AndNode() {
+  return <SimpleSignalNode title="И" className="node--and" hint="Ждёт ВСЕ входы, затем идёт дальше." />
+}
+
+function OrNode() {
+  return <SimpleSignalNode title="ИЛИ" className="node--or" hint="Ждёт ЛЮБОЙ вход, затем идёт дальше." />
 }
 
 const nodeTypes = {
   start: StartNode,
   command: CommandNode,
   delay: DelayNode,
-  stop: () => <SimpleSignalNode title="СТОП" className="node--stop" hint="Пауза: все ждут «ПРОДОЛЖИТЬ»." />,
-  continue: () => <SimpleSignalNode title="ПРОДОЛЖИТЬ" className="node--continue" hint="Снимает паузу и разрешает ожидания." />,
+  and: AndNode,
+  or: OrNode,
+  stop: () => <SimpleSignalNode title="СТОП" className="node--stop" hint="Пауза: все ждут внешнюю команду «ПРОДОЛЖИТЬ»." />,
+  // Внешняя команда: НЕТ входа, есть только выход
+  continue: () => (
+    <div className="node node--continue">
+      <div className="node__head">ПРОДОЛЖИТЬ</div>
+      <div className="node__body">
+        <div className="node__note">Внешний сигнал. Может запускать/разрешать следующие действия.</div>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="node-handle node-handle--out"
+        id="out"
+        title="Выход"
+        data-hint="OUT"
+        data-dir="down"
+      />
+    </div>
+  ),
   abort: () => <SimpleSignalNode title="ПРЕРВАТЬ" className="node--abort" hint="Прерывает сценарий и очищает список." />,
 }
 
@@ -235,7 +333,16 @@ function programToGraph(program, commandOptions) {
 
   for (let i = 0; i < (program || []).length; i++) {
     const b = program[i]
-    if (!b || (b.type !== 'command' && b.type !== 'delay' && b.type !== 'stop' && b.type !== 'continue' && b.type !== 'abort'))
+    if (
+      !b ||
+      (b.type !== 'command' &&
+        b.type !== 'delay' &&
+        b.type !== 'stop' &&
+        b.type !== 'continue' &&
+        b.type !== 'abort' &&
+        b.type !== 'and' &&
+        b.type !== 'or')
+    )
       continue
 
     const id = b.id || uid(b.type === 'delay' ? 'd' : 'c')
@@ -298,32 +405,61 @@ function graphToProgram(nodes, edges) {
     outgoing.get(e.source).push(e)
   }
 
-  // Одноцепочечный граф (как большинство простых flow): максимум 1 вход и 1 выход у узла.
-  for (const n of nodes) {
-    const inc = incoming.get(n.id) || []
-    const out = outgoing.get(n.id) || []
-    if (inc.length > 1) throw new Error('У узла может быть только одно входящее соединение')
-    if (out.length > 1) throw new Error('У узла может быть только одно исходящее соединение')
-  }
-
   const start = byId.get('start') || null
   if (!start) return []
 
-  const ordered = []
-  const seen = new Set()
-  let cur = start
-  while (cur && !seen.has(cur.id)) {
-    seen.add(cur.id)
-    ordered.push(cur)
-    const out = outgoing.get(cur.id) || []
-    if (!out.length) break
-    cur = byId.get(out[0].target) || null
+  const allowedMultiIn = new Set(['and', 'or'])
+  // Входящие: по умолчанию 1, у AND/OR может быть много, у CONTINUE входов быть не должно.
+  for (const n of nodes) {
+    const inc = incoming.get(n.id) || []
+    if (n.id === 'start') continue
+    if (n.type === 'continue' && inc.length > 0) throw new Error('У ноды «ПРОДОЛЖИТЬ» не должно быть входящих соединений')
+    if (!allowedMultiIn.has(n.type) && inc.length > 1) throw new Error('У ноды может быть только одно входящее соединение (используй И/ИЛИ)')
+  }
+  // Исходящих может быть сколько угодно. У AND/OR и STOP/ABORT/DELAY/COMMAND также допускается несколько выходов.
+
+  // Проверяем достижимость от START (иначе ноды “потеряются”)
+  const reachable = new Set()
+  const stack = ['start']
+  while (stack.length) {
+    const curId = stack.pop()
+    if (!curId || reachable.has(curId)) continue
+    reachable.add(curId)
+    const outs = outgoing.get(curId) || []
+    for (const e of outs) stack.push(e.target)
+  }
+  if (reachable.size !== nodes.length) {
+    throw new Error('Есть недостижимые ноды (не связаны со START).')
   }
 
-  // Если есть несвязанные узлы — считаем ошибкой (иначе “потеряются”).
-  if (seen.size !== nodes.length) {
-    throw new Error('Есть несвязанные ноды. Соедини все блоки в одну цепочку.')
+  // Топологическая сортировка (чтобы ветвления/объединения не ломали сохранение)
+  const indeg = new Map()
+  for (const n of nodes) indeg.set(n.id, 0)
+  for (const e of edges) {
+    if (!indeg.has(e.target) || !indeg.has(e.source)) continue
+    indeg.set(e.target, (indeg.get(e.target) || 0) + 1)
   }
+  const q = []
+  for (const [id, d] of indeg.entries()) if (d === 0) q.push(id)
+  // стабилизируем порядок: START всегда первым
+  q.sort((a, b) => (a === 'start' ? -1 : b === 'start' ? 1 : String(a).localeCompare(String(b))))
+  const orderedIds = []
+  while (q.length) {
+    const id = q.shift()
+    orderedIds.push(id)
+    const outs = outgoing.get(id) || []
+    for (const e of outs) {
+      const tgt = e.target
+      indeg.set(tgt, (indeg.get(tgt) || 0) - 1)
+      if (indeg.get(tgt) === 0) q.push(tgt)
+    }
+    q.sort((a, b) => (a === 'start' ? -1 : b === 'start' ? 1 : String(a).localeCompare(String(b))))
+  }
+  if (orderedIds.length !== nodes.length) {
+    throw new Error('В графе есть цикл (замкнутая зависимость).')
+  }
+
+  const ordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
 
   const program = ordered
     .filter((n) => n.id !== 'start')
@@ -345,6 +481,14 @@ function graphToProgram(nodes, edges) {
         y: round2(n.position?.y),
       }
     }
+    if (n.type === 'and' || n.type === 'or') {
+      return {
+        type: n.type,
+        id: n.id,
+        x: round2(n.position?.x),
+        y: round2(n.position?.y),
+      }
+    }
     return {
       type: 'command',
       id: n.id,
@@ -352,7 +496,9 @@ function graphToProgram(nodes, edges) {
       delayBeforeMs: clampMs(n.data?.value?.delayBeforeMs),
       delayAfterMs: clampMs(n.data?.value?.delayAfterMs),
       targetIps: n.data?.value?.targetIps ?? null,
-      waitContinue: !!n.data?.value?.waitContinue,
+      // ВСЕГДА ждём выбранных роботов (barrier).
+      // А вот ожидание внешнего сигнала используем только если реально подключён вход go.
+      waitContinue: (incoming.get(n.id) || []).some((e) => String(e.targetHandle || '') === 'go'),
       x: round2(n.position?.x),
       y: round2(n.position?.y),
     }
@@ -490,9 +636,17 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
         const src = String(params.source || '')
         const tgt = String(params.target || '')
         if (!src || !tgt) return eds
+        const sh = String(params.sourceHandle || '')
+        const th = String(params.targetHandle || '')
 
         // Toggle: повторное соединение тех же нод удаляет ребро
-        const existsIdx = eds.findIndex((e) => String(e.source) === src && String(e.target) === tgt)
+        const existsIdx = eds.findIndex(
+          (e) =>
+            String(e.source) === src &&
+            String(e.target) === tgt &&
+            String(e.sourceHandle || '') === sh &&
+            String(e.targetHandle || '') === th,
+        )
         if (existsIdx >= 0) {
           return eds.filter((_, i) => i !== existsIdx)
         }
@@ -573,6 +727,20 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
     setNodes((prev) => [...prev, next])
   }
 
+  const addAnd = () => {
+    const id = uid('and')
+    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
+    const next = { id, type: 'and', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
+    setNodes((prev) => [...prev, next])
+  }
+
+  const addOr = () => {
+    const id = uid('or')
+    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
+    const next = { id, type: 'or', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
+    setNodes((prev) => [...prev, next])
+  }
+
   const addDelay = () => {
     const id = uid('d')
     const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
@@ -622,6 +790,12 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
         </button>
         <button type="button" className="node-editor__btn" onClick={addContinue} title="Разрешить продолжение">
           + ПРОДОЛЖИТЬ
+        </button>
+        <button type="button" className="node-editor__btn" onClick={addAnd} title="Объединение входов: И">
+          + И
+        </button>
+        <button type="button" className="node-editor__btn" onClick={addOr} title="Объединение входов: ИЛИ">
+          + ИЛИ
         </button>
         <button type="button" className="node-editor__btn node-editor__btn--danger" onClick={addAbort} title="Прервать сценарий">
           + ПРЕРВАТЬ

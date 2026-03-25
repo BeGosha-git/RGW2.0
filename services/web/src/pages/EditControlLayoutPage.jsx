@@ -156,6 +156,14 @@ function EditControlLayoutPage() {
               const ip = String(item?.ip || '').trim()
               if (!ip) continue
               const info = item?.info || {}
+              const nameRaw =
+                info?.robot?.name ??
+                info?.robot?.robot_name ??
+                info?.robot?.robotName ??
+                info?.network?.hostname ??
+                info?.network?.host ??
+                info?.settings?.RobotName ??
+                info?.settings?.robot_name
               const groupRaw =
                 info?.robot?.robot_group ??
                 info?.robot?.robotGroup ??
@@ -167,6 +175,7 @@ function EditControlLayoutPage() {
                 bg: base,
                 fg: pickFg(base),
                 group,
+                name: String(nameRaw || '').trim() || null,
               }
             }
             setIpMeta(nextMeta)

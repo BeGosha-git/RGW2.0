@@ -320,19 +320,7 @@
   box-sizing: border-box;
 }
 
-.node__wait-continue {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.78rem;
-  color: rgba(255, 255, 255, 0.78);
-  margin-top: 6px;
-}
-
-.node__wait-continue input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
-}
+/* removed: checkbox "wait continue" (now wiring decides) */
 
 .node--stop {
   border-color: rgba(255, 193, 7, 0.55);
@@ -344,6 +332,21 @@
 
 .node--abort {
   border-color: rgba(244, 67, 54, 0.55);
+}
+
+.node--and {
+  border-color: rgba(156, 39, 176, 0.55);
+}
+
+.node--or {
+  border-color: rgba(33, 150, 243, 0.55);
+}
+
+.node-handle--sig {
+  width: 12px !important;
+  height: 12px !important;
+  border: 2px solid rgba(255, 255, 255, 0.9) !important;
+  background: rgba(0, 0, 0, 0.9) !important;
 }
 
 .node .custom-select {
@@ -435,6 +438,55 @@
   height: 10px !important;
   border: 2px solid rgba(255, 255, 255, 0.9) !important;
   background: rgba(0, 0, 0, 0.9) !important;
+  position: relative;
+}
+
+/* Hover hint bubble */
+.node-handle[data-hint]:hover::before {
+  content: attr(data-hint);
+  position: absolute;
+  left: 50%;
+  top: -10px;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Direction arrow near handle */
+.node-handle[data-dir]:hover::after {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.node-handle[data-dir='right']:hover::after {
+  left: calc(100% + 4px);
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid rgba(255, 255, 255, 0.85);
+}
+
+.node-handle[data-dir='down']:hover::after {
+  left: 50%;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 7px solid rgba(255, 255, 255, 0.85);
 }
 
 .node-handle--in {

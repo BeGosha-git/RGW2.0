@@ -78,7 +78,13 @@ export function validateProgram(program, commandsMap) {
     } else if (block.type === 'delay') {
       const ms = Number(block.ms)
       if (!Number.isFinite(ms) || ms < 0) errors.push(`Шаг ${n}: задержка должна быть >= 0 мс`)
-    } else if (block.type === 'stop' || block.type === 'continue' || block.type === 'abort') {
+    } else if (
+      block.type === 'stop' ||
+      block.type === 'continue' ||
+      block.type === 'abort' ||
+      block.type === 'and' ||
+      block.type === 'or'
+    ) {
       // ok
     } else if (block.type === 'parallel') {
       const items = block.items || []

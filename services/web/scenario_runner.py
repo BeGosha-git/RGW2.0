@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Callable, Tuple, Set
 import api.robot as robot_api
 import api.network_api as network_api_module
 import status as status_module
+import services_manager
 
 
 _scenario_jobs: Dict[str, Dict[str, Any]] = {}
@@ -15,6 +16,11 @@ _scenario_inflight_keys: Set[str] = set()
 _scenario_inflight_lock = threading.Lock()
 
 _network_api = network_api_module.NetworkAPI()
+
+try:
+    _WEB_PORT = services_manager.get_web_port()
+except Exception:
+    _WEB_PORT = 8080
 
 def _self_id_for_remote(page_host: Optional[str]) -> str:
     try:
@@ -32,7 +38,7 @@ def _flatten_program(program: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(b, dict):
             continue
         t = str(b.get("type") or "").strip()
-        if t in ("command", "delay", "stop", "continue", "abort"):
+        if t in ("command", "delay", "stop", "continue", "abort", "and", "or"):
             out.append(b)
         elif t == "parallel" and isinstance(b.get("items"), list):
             # минимальная совместимость: разворачиваем параллель в последовательность
@@ -44,14 +50,18 @@ def _flatten_program(program: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _build_distributed_steps(program: List[Dict[str, Any]], commands_map: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_distributed_steps(
+    program: List[Dict[str, Any]],
+    commands_map: Dict[str, Any],
+    local_ips_norm: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     steps: List[Dict[str, Any]] = []
     for b in _flatten_program(program):
         t = str(b.get("type") or "").strip()
         if t == "delay":
             steps.append({"type": "delay", "ms": int(b.get("ms") or 0)})
             continue
-        if t in ("stop", "continue", "abort"):
+        if t in ("stop", "continue", "abort", "and", "or"):
             steps.append({"type": t})
             continue
         if t == "command":
@@ -59,6 +69,28 @@ def _build_distributed_steps(program: List[Dict[str, Any]], commands_map: Dict[s
             cmd_entry = commands_map.get(cmd_id) if cmd_id else None
             cmd = (cmd_entry.get("command") if isinstance(cmd_entry, dict) else None) or cmd_id or str(b.get("command") or "").strip()
             args = (cmd_entry.get("args") if isinstance(cmd_entry, dict) else None) or b.get("args") or []
+            raw_target_ips = b.get("targetIps", None)
+            target_ips: Optional[List[str]] = None
+            if raw_target_ips is None:
+                target_ips = None
+            else:
+                if isinstance(raw_target_ips, list):
+                    items = [str(x).strip() for x in raw_target_ips if str(x).strip()]
+                else:
+                    items = [str(raw_target_ips).strip()]
+
+                # Если пришёл алиас LOCAL, разворачиваем в реальные IP диспетчера.
+                if "LOCAL" in items:
+                    replace_with = list(local_ips_norm) if local_ips_norm else []
+                    items = [x for x in items if x != "LOCAL"] + replace_with
+                # Дедупликация: IP мог уже присутствовать до замены LOCAL
+                seen_ips: set = set()
+                deduped: List[str] = []
+                for ip in items:
+                    if ip not in seen_ips:
+                        seen_ips.add(ip)
+                        deduped.append(ip)
+                target_ips = deduped
             steps.append(
                 {
                     "type": "command",
@@ -67,8 +99,9 @@ def _build_distributed_steps(program: List[Dict[str, Any]], commands_map: Dict[s
                     "args": args if isinstance(args, list) else [args],
                     "delayBeforeMs": int(b.get("delayBeforeMs") or 0),
                     "delayAfterMs": int(b.get("delayAfterMs") or 0),
-                    "targetIps": b.get("targetIps", None),
+                    "targetIps": target_ips,
                     "waitContinue": bool(b.get("waitContinue") or False),
+                    "useGo": bool(b.get("useGo") or False),
                 }
             )
             continue
@@ -78,7 +111,35 @@ def _build_distributed_steps(program: List[Dict[str, Any]], commands_map: Dict[s
 def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: Dict[str, Any], page_host: Optional[str], local_ips: Optional[List[str]]) -> None:
     try:
         program = _normalize_program_from_button(button)
-        targets = _normalize_target_list(button)
+        raw_targets = _normalize_target_list(button)
+        local_ips_norm = [str(x).strip() for x in (local_ips or []) if str(x).strip()]
+
+        # LOCAL → заменяем на реальные IP (local_ips_norm или self_id).
+        # LOCAL больше не используется как псевдоним для локального агента — только реальные IP.
+        should_load_local_agent = False
+        self_id = _self_id_for_remote(page_host)
+        _local_expand = local_ips_norm if local_ips_norm else ([self_id] if self_id and self_id != "LOCAL" else [])
+        if "LOCAL" in raw_targets:
+            _raw = [t for t in raw_targets if t != "LOCAL"] + _local_expand
+        else:
+            _raw = list(raw_targets)
+        # Дедупликация targets (сохраняем порядок), убираем оставшиеся LOCAL
+        _seen_t: set = set()
+        targets: List[str] = []
+        for _t in _raw:
+            _t = str(_t).strip()
+            if not _t or _t == "LOCAL" or _t in _seen_t:
+                continue
+            _seen_t.add(_t)
+            targets.append(_t)
+
+        try:
+            print(
+                f"[SCENARIO_RUNNER] job={job_id} raw_targets={raw_targets} local_ips={local_ips_norm} targets={targets} load_local={should_load_local_agent}",
+                flush=True,
+            )
+        except Exception:
+            pass
 
         _set_job_patch(job_id, {"status": "running"})
         _set_job_progress(job_id, {"phase": "dispatch", "message": "Рассылка сценария роботам..."})
@@ -90,51 +151,104 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         except Exception:
             commands_map = {}
 
-        steps = _build_distributed_steps(program, commands_map)
-        # Filter out unreachable robots: if a robot doesn't answer /health quickly, do NOT wait for it.
-        raw_participants = [str(t).strip() for t in targets if str(t).strip()]
-        participants: List[str] = []
-        for t in raw_participants:
-            if t == "LOCAL":
-                participants.append(t)
-                continue
-            try:
-                ping = _network_api.send_data(t, "/health", {}, timeout=2)
-                if isinstance(ping, dict) and ping.get("success"):
-                    participants.append(t)
-            except Exception:
-                continue
+        steps = _build_distributed_steps(program, commands_map, local_ips_norm=local_ips_norm)
         scenario_id = str(job_key or button.get("id") or job_id)
-        self_id = _self_id_for_remote(page_host)
 
-        # remote load
-        for t in participants:
-            if t == "LOCAL":
-                continue
-            peers = [x for x in participants if x not in (t, "LOCAL")]
-            payload = {"scenarioId": scenario_id, "steps": steps, "peers": peers, "selfId": t}
-            _network_api.send_data(t, "/api/robot/scenario/load", payload, timeout=15)
+        # Собираем всех участников: button.targetIps + все IP из шагов программы.
+        # Шаги могут содержать отдельные IP которых нет в button.targetIps.
+        _step_ips: set = set()
+        for _s in steps:
+            for _ip in (_s.get("targetIps") or []):
+                _ip = str(_ip).strip()
+                if _ip and _ip != "LOCAL":
+                    _step_ips.add(_ip)
 
-        # local load
+        _all_candidates_seen: set = set()
+        _all_candidates: List[str] = []
+        for _t in list(targets) + list(_step_ips):
+            _t = str(_t).strip()
+            if _t and _t != "LOCAL" and _t not in _all_candidates_seen:
+                _all_candidates_seen.add(_t)
+                _all_candidates.append(_t)
+
+        remote_candidates: List[str] = _all_candidates
+        local_requested = should_load_local_agent
+
         try:
-            from services.web.scenario_agent import get_agent
-            local_peers = [x for x in participants if x not in ("LOCAL", self_id)]
-            get_agent().load(scenario_id=scenario_id, steps=steps, peers=local_peers, self_id=self_id or "LOCAL")
+            if _step_ips - set(targets):
+                print(f"[SCENARIO_RUNNER] extra step IPs added to candidates: {_step_ips - set(targets)}", flush=True)
         except Exception:
             pass
+
+        # load (1-й проход): узнаём кто доступен
+        reachable: List[str] = []
+        load_errors: List[str] = []
+        for t in remote_candidates:
+            payload = {"scenarioId": scenario_id, "steps": steps, "peers": [], "selfId": t}
+            res = _network_api.send_data(t, "/api/robot/scenario/load", payload, timeout=15, port=_WEB_PORT)
+            ok = bool(res and res.get("success"))
+            remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
+            if ok and remote_ok:
+                reachable.append(t)
+            else:
+                load_errors.append(f"{t}: {str((res or {}).get('message') or (res or {}).get('response') or 'load failed')}")
+            try:
+                print(f"[SCENARIO_RUNNER] load to {t}: ok={ok} remote_ok={remote_ok} res={res}", flush=True)
+            except Exception:
+                pass
+
+        # load (2-й проход): теперь знаем полный список участников → передаём корректные peers
+        loaded_remote: List[str] = []
+        for t in reachable:
+            peers = [x for x in reachable if x != t]
+            payload = {"scenarioId": scenario_id, "steps": steps, "peers": peers, "selfId": t}
+            res = _network_api.send_data(t, "/api/robot/scenario/load", payload, timeout=15, port=_WEB_PORT)
+            ok = bool(res and res.get("success"))
+            remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
+            if ok and remote_ok:
+                loaded_remote.append(t)
+            else:
+                load_errors.append(f"{t} (2nd pass): {str((res or {}).get('message') or 'load failed')}")
+            try:
+                print(f"[SCENARIO_RUNNER] load(2nd pass) to {t}: ok={ok} remote_ok={remote_ok} res={res}", flush=True)
+            except Exception:
+                pass
 
         # start
-        for t in participants:
-            if t == "LOCAL":
-                continue
-            _network_api.send_data(t, "/api/robot/scenario/start", {"scenarioId": scenario_id}, timeout=8)
-        try:
-            from services.web.scenario_agent import get_agent
-            get_agent().start()
-        except Exception:
-            pass
+        started_remote: List[str] = []
+        start_errors: List[str] = []
+        for t in loaded_remote:
+            res = _network_api.send_data(
+                t, "/api/robot/scenario/start", {"scenarioId": scenario_id}, timeout=8, port=_WEB_PORT
+            )
+            ok = bool(res and res.get("success"))
+            remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
+            try:
+                print(f"[SCENARIO_RUNNER] start to {t}: ok={ok} remote_ok={remote_ok} res={res}", flush=True)
+            except Exception:
+                pass
+            if ok and remote_ok:
+                started_remote.append(t)
+            else:
+                start_errors.append(f"{t}: {str((res or {}).get('message') or (res or {}).get('response') or 'start failed')}")
 
-        _set_job_progress(job_id, {"phase": "dispatch", "message": "Сценарий отправлен. Выполнение идёт на роботах."})
+        started_count = len(started_remote)
+        total_candidates = len(remote_candidates)
+        if started_count <= 0:
+            unreachable = [e.split(":")[0].strip() for e in load_errors if "No response" in e or "load failed" in e]
+            if unreachable and not [e for e in load_errors if "No response" not in e and "load failed" not in e]:
+                raise RuntimeError(
+                    f"Роботы недоступны: {', '.join(unreachable)}. "
+                    f"Проверь IP-адреса в настройках кнопки — возможно они устарели."
+                )
+            details = "; ".join(load_errors + start_errors)[:1200]
+            raise RuntimeError(f"Ни один исполнитель сценария не запущен. {details}")
+
+        skipped = max(0, total_candidates - started_count)
+        msg = f"Сценарий запущен на {started_count} исполнителях"
+        if skipped:
+            msg += f" (пропущено: {skipped})"
+        _set_job_progress(job_id, {"phase": "dispatch", "message": msg, "started": started_count, "skipped": skipped})
         _set_job_patch(job_id, {"status": "done", "finished_at": time.time()})
     except Exception as e:
         _set_job_patch(job_id, {"status": "error", "finished_at": time.time(), "error": str(e)})

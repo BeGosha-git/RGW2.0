@@ -178,9 +178,9 @@ class ServicesManager:
                 "dependencies": []
             },
             "unitree_motor_control": {
-                "status": "OFF",
+                "status": "ON",
                 "enabled": False,
-                "id": 1,
+                "id": 0,
                 "network": "eth0",
                 "safety_force_hold": True,
                 "dependencies": []

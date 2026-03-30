@@ -155,29 +155,40 @@ _ACTION_MAP: Dict[str, int] = {
 }
 
 # Логика опций как в официальном примере Unitree (id 0..15).
+# duration_ms — примерное время физического выполнения движения (RPC fire-and-forget).
+# Агент сценария будет ждать это время после получения ответа SDK, чтобы не запускать
+# следующую команду пока робот ещё двигается.
 _OPTION_LIST = [
-    ("release arm", 0),
-    ("shake hand", 1),
-    ("high five", 2),
-    ("hug", 3),
-    ("high wave", 4),
-    ("clap", 5),
-    ("face wave", 6),
-    ("left kiss", 7),
-    ("heart", 8),
-    ("right heart", 9),
-    ("hands up", 10),
-    ("x-ray", 11),
-    ("right hand up", 12),
-    ("reject", 13),
-    ("right kiss", 14),
-    ("two-hand kiss", 15),
+    # (name, option_id, duration_ms)
+    ("release arm",    0,  2000),
+    ("shake hand",     1,  4000),
+    ("high five",      2,  4000),
+    ("hug",            3,  5000),
+    ("high wave",      4,  4000),
+    ("clap",           5,  4000),
+    ("face wave",      6,  4000),
+    ("left kiss",      7,  4000),
+    ("heart",          8,  5000),
+    ("right heart",    9,  5000),
+    ("hands up",      10,  4000),
+    ("x-ray",         11,  5000),
+    ("right hand up", 12,  3000),
+    ("reject",        13,  4000),
+    ("right kiss",    14,  4000),
+    ("two-hand kiss", 15,  5000),
 ]
-_OPTION_ID_BY_NAME: Dict[str, int] = {name: idx for name, idx in _OPTION_LIST}
+_OPTION_ID_BY_NAME: Dict[str, int] = {name: idx for name, _, idx in _OPTION_LIST}  # type: ignore[misc]
+_OPTION_ID_BY_NAME = {name: opt_id for name, opt_id, _ in _OPTION_LIST}
+_DURATION_MS_BY_NAME: Dict[str, int] = {name: dur for name, _, dur in _OPTION_LIST}
 # Для этих опций в примере выполняется auto-release через 2 секунды.
 _AUTO_RELEASE_OPTION_IDS = {1, 2, 3, 8, 9, 10, 11, 12, 13}
 # Нефатальные коды ответа SDK (3104 считается валидным по факту поведения робота).
+# 31 = занято/не готово (временное состояние), обрабатываем через retry.
 _NON_FATAL_CODES = {0, 3104}
+# Коды при которых имеет смысл повтор (SDK временно занят или ещё не готов).
+# 31   = SDK занят/не готов
+# 3102 = RPC_ERR_CLIENT_SEND (ошибка отправки — может быть временной при инициализации DDS)
+_RETRY_CODES = {31, 3102}
 
 
 class G1ArmActionService:
@@ -226,25 +237,39 @@ class G1ArmActionService:
     def execute(self, action_name: str, network_interface: str = "eth0", domain_id: int = 0) -> Dict[str, Any]:
         option_id = _OPTION_ID_BY_NAME.get(action_name)
         action_id = _ACTION_MAP.get(action_name)
+        duration_ms = _DURATION_MS_BY_NAME.get(action_name, 3000)
         if action_id is None or option_id is None:
             return {
                 "success": False,
                 "message": f"Unknown G1 action: {action_name}",
-                "available_actions": [name for name, _ in _OPTION_LIST],
+                "available_actions": [name for name, _, _ in _OPTION_LIST],
             }
 
         try:
             self.ensure_initialized(network_interface=network_interface, domain_id=domain_id)
             reset_code: Optional[int] = None
+            result_code: Optional[int] = None
+            max_retries = 5
+            retry_delay = 1.0  # секунды между попытками
+
             with self._lock:
                 if self._client is None:
                     raise RuntimeError("G1 action client is not initialized")
                 # Сброс удержания/контекста перед новым жестом (в примере Unitree первым пунктом — release arm).
                 release_id = _ACTION_MAP.get("release arm")
                 if release_id is not None and action_name != "release arm":
-                    reset_code = self._client.ExecuteAction(release_id)
+                    for _attempt in range(max_retries):
+                        reset_code = self._client.ExecuteAction(release_id)
+                        if reset_code in _NON_FATAL_CODES or reset_code not in _RETRY_CODES:
+                            break
+                        time.sleep(retry_delay)
 
-                result_code = self._client.ExecuteAction(action_id)
+                for _attempt in range(max_retries):
+                    result_code = self._client.ExecuteAction(action_id)
+                    if result_code in _NON_FATAL_CODES or result_code not in _RETRY_CODES:
+                        break
+                    time.sleep(retry_delay)
+
                 if result_code not in _NON_FATAL_CODES:
                     return {
                         "success": False,
@@ -255,14 +280,17 @@ class G1ArmActionService:
                         "code": result_code,
                         **({"reset_code": reset_code} if reset_code is not None else {}),
                     }
-                # Как в g1_arm_action_example.py: после жеста ждём 2 с, затем release arm (для перечисленных option_id).
+                # Ждём физического выполнения движения (RPC fire-and-forget — SDK возвращается сразу).
+                # duration_ms — примерное время анимации, чтобы следующая команда не запустилась раньше.
+                time.sleep(duration_ms / 1000.0)
+
+                # Как в g1_arm_action_example.py: после жеста release arm (для перечисленных option_id).
                 need_auto_release = (
                     option_id in _AUTO_RELEASE_OPTION_IDS
                     and release_id is not None
                 )
 
             if need_auto_release:
-                #time.sleep(2.0) #defualt
                 release_code: Optional[int] = None
                 with self._lock:
                     if self._client is None:
@@ -279,6 +307,7 @@ class G1ArmActionService:
                         "action_id": action_id,
                         "option_id": option_id,
                         "code": release_code,
+                        "duration_ms": duration_ms,
                     }
 
             return {
@@ -292,6 +321,7 @@ class G1ArmActionService:
                 "action_id": action_id,
                 "option_id": option_id,
                 "code": result_code,
+                "duration_ms": duration_ms,
                 **(
                     {"reset_code": reset_code}
                     if reset_code is not None and action_name != "release arm"

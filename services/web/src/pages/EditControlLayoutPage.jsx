@@ -28,6 +28,10 @@ function EditControlLayoutPage() {
   const [scenarioBusy, setScenarioBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(null) // { id }
   const [ipMeta, setIpMeta] = useState({})
+  const [localIps, setLocalIps] = useState([])
+  const pageHost = typeof window !== 'undefined'
+    ? String(window.location.hostname || '').replace(/^::ffff:/i, '').trim()
+    : ''
   const splitWrapRef = useRef(null)
   const loadedOnceRef = useRef(false)
   const nodesWidthPctRef = useRef(33)
@@ -65,14 +69,16 @@ function EditControlLayoutPage() {
       try {
         setError('')
         // Не блокируем загрузку раскладок медленными сетевыми запросами (find_robots может быть долгим)
-        const [layoutsResp, commandsResp, ipsResp] = await Promise.all([
+        const [layoutsResp, commandsResp, ipsResp, statusResp] = await Promise.all([
           fetch(`/api/files/read?filepath=${encodeURIComponent(LAYOUT_FILEPATH)}`),
           fetch('/api/robot/commands'),
           fetch('/api/network/scanned_ips'),
+          fetch('/api/status'),
         ])
         const layoutsJson = await layoutsResp.json()
         const commandsJson = await commandsResp.json()
         const ipsJson = await ipsResp.json()
+        const statusJson = await statusResp.json().catch(() => ({}))
 
         // layouts file can come as string or already-parsed object (tolerate both)
         let loadedLayouts = null
@@ -125,8 +131,27 @@ function EditControlLayoutPage() {
           setCommands(commandsJson.commands)
         }
 
+        // localIps: IP этой машины — используем вместо LOCAL
+        const detectedLocalIps = []
+        {
+          const ipA = statusJson?.network?.local_ip
+          const ipB = statusJson?.network?.interface_ip
+          if (ipA) detectedLocalIps.push(String(ipA).trim())
+          if (ipB && String(ipB).trim() !== String(ipA).trim()) detectedLocalIps.push(String(ipB).trim())
+          if (detectedLocalIps.length) setLocalIps(detectedLocalIps)
+        }
+
         if (ipsJson.success && Array.isArray(ipsJson.ips)) {
-          setTargetIps(['LOCAL', ...ipsJson.ips])
+          // LOCAL заменяем на реальный IP этой машины (первый из detectedLocalIps)
+          // Если IP этой машины уже есть в списке — не дублируем
+          const scanned = ipsJson.ips.map((x) => String(x).trim()).filter(Boolean)
+          const selfIp = detectedLocalIps[0] || null
+          const all = selfIp
+            ? [selfIp, ...scanned.filter((ip) => ip !== selfIp)]
+            : scanned
+          setTargetIps(all.length ? all : (selfIp ? [selfIp] : ['LOCAL']))
+        } else if (detectedLocalIps.length) {
+          setTargetIps(detectedLocalIps)
         }
 
         // meta: ip -> color by group (как на RobotsPage) — грузим отдельно, чтобы не тормозить раскладки
@@ -150,7 +175,11 @@ function EditControlLayoutPage() {
               const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
               return lum > 0.62 ? '#111' : '#fff'
             }
-            const nextMeta = { LOCAL: { bg: 'rgba(255,255,255,0.10)', fg: '#fff' } }
+            const nextMeta = {}
+            // Помечаем IP этой машины как "Этот робот"
+            for (const selfIp of detectedLocalIps) {
+              nextMeta[selfIp] = { bg: 'rgba(255,255,255,0.15)', fg: '#fff', name: 'Этот робот' }
+            }
             const robots = Array.isArray(robotsJson?.robots) ? robotsJson.robots : []
             for (const item of robots) {
               const ip = String(item?.ip || '').trim()
@@ -229,7 +258,7 @@ function EditControlLayoutPage() {
       x,
       y,
       size: 64,
-      targetIps: ['LOCAL'],
+      targetIps: localIps.length ? [localIps[0]] : [],
       program: [
         {
           type: 'command',
@@ -237,7 +266,7 @@ function EditControlLayoutPage() {
           commandId: defaultCommandId,
           delayBeforeMs: 0,
           delayAfterMs: 0,
-          targetIps: null,
+          targetIps: localIps.length ? [localIps[0]] : [],
         },
       ],
     }
@@ -352,7 +381,7 @@ function EditControlLayoutPage() {
       const startResp = await fetch('/api/robot/run_scenario', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ button: selectedButton, scenarioKey: selectedButton.id }),
+        body: JSON.stringify({ button: selectedButton, scenarioKey: selectedButton.id, pageHost, localIps }),
       })
       const startJson = await startResp.json()
       if (!startJson?.success) throw new Error(startJson?.message || 'Не удалось запустить')
@@ -495,21 +524,23 @@ function EditControlLayoutPage() {
                 ▶
               </button>
             </div>
-            <span className="editctl-nodes__sub">START → … (перетаскивание и зависимости точками)</span>
+            <span className="editctl-nodes__sub"></span>
           </div>
 
           {selectedButton ? (
             <NodeProgramEditor
               program={normalizeProgramFromButton(selectedButton)}
+              programEdges={selectedButton.programEdges || null}
               commands={commands}
               targetIps={targetIps}
               targetMeta={ipMeta}
               scenarioKey={selectedButton.id}
               onError={(msg) => setError(String(msg || 'Ошибка графа'))}
-              onChangeProgram={(program) =>
+              onChangeProgram={(steps, edges) =>
                 updateSelectedButton({
-                  program,
-                  commandId: derivePrimaryCommandId(program) || selectedButton.commandId || '',
+                  program: steps,
+                  programEdges: edges,
+                  commandId: derivePrimaryCommandId(steps) || selectedButton.commandId || '',
                 })
               }
             />

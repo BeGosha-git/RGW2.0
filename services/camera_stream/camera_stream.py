@@ -735,7 +735,7 @@ class CameraStream:
                     # Ошибка при получении кадров, закрываем pipeline
                     raise frame_error
         except Exception as e:
-            print(f"[CameraStream] RealSense start error ({self.camera_id}): {e}", flush=True)
+            #print(f"[CameraStream] RealSense start error ({self.camera_id}): {e}", flush=True)
             # Гарантированно закрываем pipeline (с защитой от segfault)
             if self.pipeline is not None:
                 try:
@@ -763,7 +763,7 @@ class CameraStream:
             with _suppress_stderr():
                 self.cap = _try_open_camera(idx)
             if not self.cap or not self.cap.isOpened():
-                print(f"[CameraStream] USB open failed ({self.camera_id}) idx={idx} path={self.camera_info.get('device_path')}", flush=True)
+                #print(f"[CameraStream] USB open failed ({self.camera_id}) idx={idx} path={self.camera_info.get('device_path')}", flush=True)
                 return False
             with _suppress_stderr():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
@@ -790,12 +790,12 @@ class CameraStream:
             if ret and frame is not None:
                 return True
             else:
-                print(f"[CameraStream] USB read failed ({self.camera_id}) idx={idx}", flush=True)
+                #print(f"[CameraStream] USB read failed ({self.camera_id}) idx={idx}", flush=True)
                 self.cap.release()
                 self.cap = None
                 return False
         except Exception as e:
-            print(f"[CameraStream] USB start error ({self.camera_id}): {e}", flush=True)
+            #print(f"[CameraStream] USB start error ({self.camera_id}): {e}", flush=True)
             if self.cap:
                 try:
                     self.cap.release()
@@ -845,7 +845,7 @@ class CameraStream:
                 return self._start_usb()
                 
         except Exception as e:
-            print(f"[CameraStream] Error restarting camera {self.camera_id}: {e}", flush=True)
+            #print(f"[CameraStream] Error restarting camera {self.camera_id}: {e}", flush=True)
             # Гарантируем очистку при ошибке (с защитой от segfault)
             if self.pipeline is not None:
                 try:
@@ -884,7 +884,7 @@ class CameraStream:
                 # Проверяем доступность камеры
                 if self.camera_info["type"] == "realsense":
                     if self.pipeline is None or not self.pipeline:
-                        print(f"[CameraStream] RealSense pipeline unavailable, restarting...", flush=True)
+                        #print(f"[CameraStream] RealSense pipeline unavailable, restarting...", flush=True)
                         self.consecutive_errors += 1
                         if self.consecutive_errors >= self.max_consecutive_errors:
                             if self._restart_camera():
@@ -909,7 +909,7 @@ class CameraStream:
                         # Генератор закончился, перезапускаем камеру
                         self.consecutive_errors += 1
                         self.error_count += 1
-                        print(f"[CameraStream] RealSense generator stopped, restarting camera {self.camera_id}", flush=True)
+                        #print(f"[CameraStream] RealSense generator stopped, restarting camera {self.camera_id}", flush=True)
                         if self.consecutive_errors >= self.max_consecutive_errors:
                             if self._restart_camera():
                                 self.consecutive_errors = 0
@@ -919,7 +919,7 @@ class CameraStream:
                         self.consecutive_errors += 1
                         self.error_count += 1
                         if self.consecutive_errors >= self.max_consecutive_errors:
-                            print(f"[CameraStream] RealSense error, restarting camera {self.camera_id}: {e}", flush=True)
+                            #print(f"[CameraStream] RealSense error, restarting camera {self.camera_id}: {e}", flush=True)
                             if self._restart_camera():
                                 self.consecutive_errors = 0
                         time.sleep(0.1)
@@ -927,7 +927,7 @@ class CameraStream:
                         
                 elif self.cap:
                     if not self.cap.isOpened():
-                        print(f"[CameraStream] USB camera not opened, restarting...", flush=True)
+                        #print(f"[CameraStream] USB camera not opened, restarting...", flush=True)
                         self.consecutive_errors += 1
                         if self.consecutive_errors >= self.max_consecutive_errors:
                             if self._restart_camera():
@@ -942,7 +942,7 @@ class CameraStream:
                         if not ret or frame is None:
                             self.consecutive_errors += 1
                             if self.consecutive_errors >= self.max_consecutive_errors:
-                                print(f"[CameraStream] USB camera read error, restarting...", flush=True)
+                                #print(f"[CameraStream] USB camera read error, restarting...", flush=True)
                                 if self._restart_camera():
                                     self.consecutive_errors = 0
                             time.sleep(0.1)
@@ -953,7 +953,7 @@ class CameraStream:
                         self.consecutive_errors += 1
                         self.error_count += 1
                         if self.consecutive_errors >= self.max_consecutive_errors:
-                            print(f"[CameraStream] USB camera error, restarting {self.camera_id}: {e}", flush=True)
+                            #print(f"[CameraStream] USB camera error, restarting {self.camera_id}: {e}", flush=True)
                             if self._restart_camera():
                                 self.consecutive_errors = 0
                         time.sleep(0.1)
@@ -1001,7 +1001,7 @@ class CameraStream:
                 self.error_count += 1
                 self.consecutive_errors += 1
                 if self.consecutive_errors >= self.max_consecutive_errors:
-                    print(f"[CameraStream] Critical error in stream loop {self.camera_id}: {e}", flush=True)
+                    #print(f"[CameraStream] Critical error in stream loop {self.camera_id}: {e}", flush=True)
                     # При критической ошибке закрываем pipeline перед перезапуском
                     if self.pipeline:
                         try:
@@ -1128,7 +1128,7 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
     camera_info = _find_camera(camera_id, cameras)
     
     if not camera_info:
-        print(f"[CameraStream] Camera '{camera_id}' not found. Available: {[c['id'] for c in cameras]}", flush=True)
+        #print(f"[CameraStream] Camera '{camera_id}' not found. Available: {[c['id'] for c in cameras]}", flush=True)
         return False
     
     with _streams_lock:
@@ -1163,7 +1163,7 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
     # Инициализация стрима выполняется вне лока — может занимать 0.5–1.5 сек
     stream = CameraStream(camera_info, udp_port=udp_port, width=width, height=height, fps=fps)
     if not stream.start():
-        print(f"[CameraStream] Failed to start stream for {camera_id}", flush=True)
+        #print(f"[CameraStream] Failed to start stream for {camera_id}", flush=True)
         return False
 
     with _streams_lock:
@@ -1177,7 +1177,7 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
             "started_at": time.time(),
             "udp_port": udp_port
         }
-        print(f"[CameraStream] Started camera {camera_id} with UDP port {udp_port}", flush=True)
+        #print(f"[CameraStream] Started camera {camera_id} with UDP port {udp_port}", flush=True)
 
     return True
 

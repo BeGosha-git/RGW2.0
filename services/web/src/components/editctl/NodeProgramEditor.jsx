@@ -72,41 +72,39 @@ function TargetsEditor({ allTargets, valueTargets, onPatchTargets, targetMeta })
   return (
     <div className="node-targets">
       <div className="node-targets__list">
-        {(allTargets || []).map((ip) => (
-          (() => {
-            const meta = targetMeta?.[ip]
-            const bg = meta?.bg
-            const fg = meta?.fg
-            const name = String(meta?.name || '').trim()
-            return (
-          <label
-            key={ip}
-            className={`node-targets__chip ${set.has(ip) ? 'on' : ''}`}
-            style={bg ? { backgroundColor: bg, color: fg || undefined, borderColor: 'rgba(255,255,255,0.14)' } : undefined}
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <input
-              type="checkbox"
-              checked={set.has(ip)}
+        {(allTargets || []).map((ip) => {
+          const meta = targetMeta?.[ip]
+          const bg = meta?.bg
+          const fg = meta?.fg
+          const name = String(meta?.name || '').trim()
+          return (
+            <label
+              key={ip}
+              className={`node-targets__chip ${set.has(ip) ? 'on' : ''}`}
+              style={bg ? { backgroundColor: bg, color: fg || undefined, borderColor: 'rgba(255,255,255,0.14)' } : undefined}
               onPointerDown={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
-              onChange={() => toggle(ip)}
-            />
-            <span title={ip}>
-              {name ? (
-                <>
-                  <b>{name}</b> <span style={{ opacity: 0.8 }}>{ip}</span>
-                </>
-              ) : (
-                ip
-              )}
-            </span>
-          </label>
-            )
-          })()
-        ))}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                checked={set.has(ip)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onChange={() => toggle(ip)}
+              />
+              <span title={ip}>
+                {name ? (
+                  <>
+                    <b>{name}</b> <span style={{ opacity: 0.8 }}>{ip}</span>
+                  </>
+                ) : (
+                  ip
+                )}
+              </span>
+            </label>
+          )
+        })}
       </div>
     </div>
   )
@@ -117,13 +115,13 @@ function StartNode() {
     <div className="node node--start">
       <div className="node__head">START</div>
       <div className="node__body">
-        <div className="node__note">Отсюда начинается сценарий. Соедини с первым блоком.</div>
+        <div className="node__note">Отсюда начинается сценарий.</div>
       </div>
       <Handle
         type="source"
         position={Position.Bottom}
         className="node-handle node-handle--out"
-        title="Выход"
+        title="Выход → IN следующего блока"
         data-hint="OUT"
         data-dir="down"
       />
@@ -131,26 +129,93 @@ function StartNode() {
   )
 }
 
-function SimpleSignalNode({ title, className, hint }) {
+function SimpleSignalNode({ title, className, hint, noIn, noOut }) {
   return (
     <div className={`node ${className || ''}`}>
-      <Handle
-        type="target"
-        position={Position.Top}
-        className="node-handle node-handle--in"
-        title="Вход"
-        data-hint="IN"
-        data-dir="down"
-      />
+      {!noIn && (
+        <Handle
+          type="target"
+          position={Position.Top}
+          id="in"
+          className="node-handle node-handle--in"
+          title="Вход ← OUT предыдущего блока"
+          data-hint="IN"
+          data-dir="down"
+        />
+      )}
       <div className="node__head">{title}</div>
       <div className="node__body">
         <div className="node__note">{hint}</div>
       </div>
+      {!noOut && (
+        <Handle
+          type="source"
+          position={Position.Bottom}
+          id="out"
+          className="node-handle node-handle--out"
+          title="Выход → IN следующего блока"
+          data-hint="OUT"
+          data-dir="down"
+        />
+      )}
+    </div>
+  )
+}
+
+// AND/OR: принимают несколько входов (isConnectable не ограничен)
+function AndNode() {
+  return (
+    <div className="node node--and">
+      <Handle
+        type="target"
+        position={Position.Top}
+        id="in"
+        className="node-handle node-handle--in"
+        title="Вход (несколько) ← OUT предыдущих блоков"
+        data-hint="IN (×∞)"
+        data-dir="down"
+        isConnectable
+      />
+      <div className="node__head">И</div>
+      <div className="node__body">
+        <div className="node__note">Ждёт ВСЕ входы, затем идёт дальше.</div>
+      </div>
       <Handle
         type="source"
         position={Position.Bottom}
+        id="out"
         className="node-handle node-handle--out"
-        title="Выход"
+        title="Выход → IN следующего блока"
+        data-hint="OUT"
+        data-dir="down"
+      />
+    </div>
+  )
+}
+
+function OrNode() {
+  return (
+    <div className="node node--or">
+      <Handle
+        type="target"
+        position={Position.Top}
+        id="in"
+        className="node-handle node-handle--in"
+        title="Вход (несколько) ← OUT предыдущих блоков"
+        data-hint="IN (×∞)"
+        data-dir="down"
+        isConnectable
+      />
+      <div className="node__head">ИЛИ</div>
+      <div className="node__body">
+        <div className="node__note">Ждёт ЛЮБОЙ вход, затем идёт дальше.</div>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="out"
+        className="node-handle node-handle--out"
+        title="Выход → IN следующего блока"
         data-hint="OUT"
         data-dir="down"
       />
@@ -165,37 +230,38 @@ function CommandNode({ id, data }) {
   const readyByStep = scenarioUi?.readyByStep || null
   const paused = !!scenarioUi?.paused
   const continueSet = !!scenarioUi?.continueSet
-  const isWait = !!value.waitContinue
+  const useGo = !!value.useGo
   const readySet = stepIndex != null && readyByStep ? new Set(readyByStep[String(stepIndex)] || readyByStep[stepIndex] || []) : null
   const readyCount = readySet && participants ? participants.filter((p) => readySet.has(p)).length : null
   const totalCount = participants ? participants.length : null
 
   return (
     <div className="node node--command">
+      {/* Основной вход — принимает OUT от предыдущего блока */}
       <Handle
         type="target"
         position={Position.Top}
-        className="node-handle node-handle--in"
         id="in"
-        title="Вход (зависимость)"
+        className="node-handle node-handle--in"
+        title="Вход ← OUT предыдущего блока"
         data-hint="IN"
         data-dir="down"
       />
-      {/* Вход сигнала НАЧАТЬ/ПРОДОЛЖИТЬ (используется только если подключено ребро) */}
+      {/* Вход GO — принимает READY от другого командного блока */}
       <Handle
         type="target"
         position={Position.Left}
-        className="node-handle node-handle--sig"
         id="go"
-        title="Вход GO (начать этап по сигналу)"
-        data-hint="GO IN"
+        className="node-handle node-handle--sig"
+        title="GO ← READY другого блока (запустить по сигналу)"
+        data-hint="GO"
         data-dir="right"
       />
       <div className="node__head">
         Команда
         {scenarioUi?.active ? (
           <span className="node__status">
-            {paused ? 'PAUSE' : isWait && !continueSet ? 'Ждём ПРОДОЛЖИТЬ' : ''}
+            {paused ? 'PAUSE' : useGo && !continueSet ? 'Ждём GO' : ''}
             {readyCount != null && totalCount != null ? ` ${readyCount}/${totalCount}` : ''}
           </span>
         ) : null}
@@ -218,28 +284,29 @@ function CommandNode({ id, data }) {
         </div>
 
         <TargetsEditor
-          allTargets={allTargets || ['LOCAL']}
+          allTargets={allTargets || []}
           valueTargets={value.targetIps ?? null}
           onPatchTargets={(v) => onPatch(id, { targetIps: v })}
           targetMeta={targetMeta}
         />
       </div>
+      {/* Основной выход → IN следующего блока */}
       <Handle
         type="source"
         position={Position.Bottom}
-        className="node-handle node-handle--out"
         id="out"
-        title="Выход (дальше по сценарию)"
+        className="node-handle node-handle--out"
+        title="Выход → IN следующего блока"
         data-hint="OUT"
         data-dir="down"
       />
-      {/* Выход READY (сигнал “готов”) */}
+      {/* Выход READY → GO другого блока */}
       <Handle
         type="source"
         position={Position.Right}
-        className="node-handle node-handle--sig"
         id="ready"
-        title="Выход READY (готов к этапу)"
+        className="node-handle node-handle--sig"
+        title="READY → GO другого блока (сигнал готовности)"
         data-hint="READY"
         data-dir="right"
       />
@@ -254,9 +321,9 @@ function DelayNode({ id, data }) {
       <Handle
         type="target"
         position={Position.Top}
-        className="node-handle node-handle--in"
         id="in"
-        title="Вход"
+        className="node-handle node-handle--in"
+        title="Вход ← OUT предыдущего блока"
         data-hint="IN"
         data-dir="down"
       />
@@ -270,22 +337,14 @@ function DelayNode({ id, data }) {
       <Handle
         type="source"
         position={Position.Bottom}
-        className="node-handle node-handle--out"
         id="out"
-        title="Выход"
+        className="node-handle node-handle--out"
+        title="Выход → IN следующего блока"
         data-hint="OUT"
         data-dir="down"
       />
     </div>
   )
-}
-
-function AndNode() {
-  return <SimpleSignalNode title="И" className="node--and" hint="Ждёт ВСЕ входы, затем идёт дальше." />
-}
-
-function OrNode() {
-  return <SimpleSignalNode title="ИЛИ" className="node--or" hint="Ждёт ЛЮБОЙ вход, затем идёт дальше." />
 }
 
 const nodeTypes = {
@@ -295,28 +354,46 @@ const nodeTypes = {
   and: AndNode,
   or: OrNode,
   stop: () => <SimpleSignalNode title="СТОП" className="node--stop" hint="Пауза: все ждут внешнюю команду «ПРОДОЛЖИТЬ»." />,
-  // Внешняя команда: НЕТ входа, есть только выход
   continue: () => (
     <div className="node node--continue">
       <div className="node__head">ПРОДОЛЖИТЬ</div>
       <div className="node__body">
-        <div className="node__note">Внешний сигнал. Может запускать/разрешать следующие действия.</div>
+        <div className="node__note">Внешний сигнал. Разрешает следующие действия.</div>
       </div>
       <Handle
         type="source"
         position={Position.Bottom}
-        className="node-handle node-handle--out"
         id="out"
-        title="Выход"
+        className="node-handle node-handle--out"
+        title="Выход → IN следующего блока"
         data-hint="OUT"
         data-dir="down"
       />
     </div>
   ),
-  abort: () => <SimpleSignalNode title="ПРЕРВАТЬ" className="node--abort" hint="Прерывает сценарий и очищает список." />,
+  abort: () => <SimpleSignalNode title="ПРЕРВАТЬ" className="node--abort" hint="Прерывает сценарий." noOut />,
 }
 
-function programToGraph(program, commandOptions) {
+// Правила допустимых соединений [sourceHandle → targetHandle]:
+//   OUT (id="out" или "") → IN (id="in" или "")   — основной поток
+//   READY (id="ready")    → GO (id="go")           — сигнальное ребро
+const VALID_CONNECTIONS = [
+  ['out', 'in'],
+  ['out', ''],
+  ['', 'in'],
+  ['', ''],
+  ['ready', 'go'],
+]
+
+function isValidConnection(params) {
+  const sh = String(params.sourceHandle || '')
+  const th = String(params.targetHandle || '')
+  // Запрет самосоединения
+  if (params.source === params.target) return false
+  return VALID_CONNECTIONS.some(([s, t]) => s === sh && t === th)
+}
+
+function programToGraph(program, programEdges, commandOptions) {
   const nodes = [
     {
       id: 'start',
@@ -325,11 +402,11 @@ function programToGraph(program, commandOptions) {
       data: { value: {} },
     },
   ]
-  const edges = []
 
   const baseX = 0
   let y = 140
   const gapY = 140
+  const nodeIds = new Set(['start'])
 
   for (let i = 0; i < (program || []).length; i++) {
     const b = program[i]
@@ -346,6 +423,7 @@ function programToGraph(program, commandOptions) {
       continue
 
     const id = b.id || uid(b.type === 'delay' ? 'd' : 'c')
+    nodeIds.add(id)
     const posX = Number.isFinite(Number(b.x)) ? Number(b.x) : baseX
     const posY = Number.isFinite(Number(b.y)) ? Number(b.y) : y
     const node = {
@@ -361,6 +439,7 @@ function programToGraph(program, commandOptions) {
                 delayAfterMs: b.delayAfterMs ?? 0,
                 targetIps: b.targetIps ?? null,
                 waitContinue: !!b.waitContinue,
+                useGo: !!b.useGo,
               }
             : b.type === 'delay'
               ? { ms: b.ms ?? 0 }
@@ -368,18 +447,47 @@ function programToGraph(program, commandOptions) {
       },
     }
     nodes.push(node)
-    // if positions are from file, keep a stable auto-layout gap for next nodes
     y = posY + gapY
   }
 
-  for (let i = 0; i < nodes.length - 1; i++) {
-    edges.push({
-      id: `e-${nodes[i].id}-${nodes[i + 1].id}`,
-      source: nodes[i].id,
-      target: nodes[i + 1].id,
-      type: 'smoothstep',
-      animated: false,
-    })
+  // Восстанавливаем сохранённые рёбра (из отдельного поля programEdges)
+  const savedEdges = Array.isArray(programEdges) ? programEdges : []
+  const edges = []
+  const edgeIds = new Set()
+
+  if (savedEdges.length > 0) {
+    for (const e of savedEdges) {
+      if (!e.source || !e.target) continue
+      if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) continue
+      const eid = e.id || `e-${e.source}-${e.target}-${e.sourceHandle || ''}-${e.targetHandle || ''}`
+      if (edgeIds.has(eid)) continue
+      edgeIds.add(eid)
+      edges.push({
+        id: eid,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle || null,
+        targetHandle: e.targetHandle || null,
+        type: 'smoothstep',
+        animated: false,
+      })
+    }
+  } else {
+    // Fallback: авто-соединение по порядку (для старых данных без рёбер)
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const src = nodes[i]
+      const tgt = nodes[i + 1]
+      const eid = `e-${src.id}-${tgt.id}`
+      edges.push({
+        id: eid,
+        source: src.id,
+        target: tgt.id,
+        sourceHandle: src.type === 'start' ? null : 'out',
+        targetHandle: tgt.type === 'command' || tgt.type === 'delay' || tgt.type === 'and' || tgt.type === 'or' || tgt.type === 'stop' || tgt.type === 'abort' ? 'in' : null,
+        type: 'smoothstep',
+        animated: false,
+      })
+    }
   }
 
   return { nodes, edges }
@@ -408,31 +516,49 @@ function graphToProgram(nodes, edges) {
   const start = byId.get('start') || null
   if (!start) return []
 
-  const allowedMultiIn = new Set(['and', 'or'])
-  // Входящие: по умолчанию 1, у AND/OR может быть много, у CONTINUE входов быть не должно.
+  // Ограничение: 1 ребро на 1 handle (кроме AND/OR — у них несколько IN)
+  const multiInTypes = new Set(['and', 'or'])
   for (const n of nodes) {
     const inc = incoming.get(n.id) || []
     if (n.id === 'start') continue
-    if (n.type === 'continue' && inc.length > 0) throw new Error('У ноды «ПРОДОЛЖИТЬ» не должно быть входящих соединений')
-    if (!allowedMultiIn.has(n.type) && inc.length > 1) throw new Error('У ноды может быть только одно входящее соединение (используй И/ИЛИ)')
+    if (n.type === 'continue' && inc.length > 0) {
+      throw new Error('У ноды «ПРОДОЛЖИТЬ» не должно быть входящих соединений')
+    }
+    if (!multiInTypes.has(n.type)) {
+      const byHandle = new Map()
+      for (const e of inc) {
+        const key = String(e.targetHandle || '')
+        byHandle.set(key, (byHandle.get(key) || 0) + 1)
+      }
+      for (const [, count] of byHandle.entries()) {
+        if (count > 1) throw new Error('У ноды может быть только одно соединение на каждый входной контакт')
+      }
+    }
   }
-  // Исходящих может быть сколько угодно. У AND/OR и STOP/ABORT/DELAY/COMMAND также допускается несколько выходов.
 
-  // Проверяем достижимость от START (иначе ноды “потеряются”)
+  // Достижимость только по основному потоку (OUT→IN), сигнальные READY→GO не блокируют
+  const mainOut = new Map()
+  for (const n of nodes) mainOut.set(n.id, [])
+  for (const e of edges) {
+    const sh = String(e.sourceHandle || '')
+    if (sh === 'ready') continue
+    if (mainOut.has(e.source)) mainOut.get(e.source).push(e)
+  }
+
   const reachable = new Set()
   const stack = ['start']
   while (stack.length) {
     const curId = stack.pop()
     if (!curId || reachable.has(curId)) continue
     reachable.add(curId)
-    const outs = outgoing.get(curId) || []
-    for (const e of outs) stack.push(e.target)
+    for (const e of mainOut.get(curId) || []) stack.push(e.target)
   }
-  if (reachable.size !== nodes.length) {
-    throw new Error('Есть недостижимые ноды (не связаны со START).')
+  const unreachable = nodes.filter((n) => !reachable.has(n.id))
+  if (unreachable.length > 0) {
+    throw new Error(`Ноды не связаны со START: ${unreachable.map((n) => n.type || n.id).join(', ')}`)
   }
 
-  // Топологическая сортировка (чтобы ветвления/объединения не ломали сохранение)
+  // Топологическая сортировка по всем рёбрам
   const indeg = new Map()
   for (const n of nodes) indeg.set(n.id, 0)
   for (const e of edges) {
@@ -441,7 +567,6 @@ function graphToProgram(nodes, edges) {
   }
   const q = []
   for (const [id, d] of indeg.entries()) if (d === 0) q.push(id)
-  // стабилизируем порядок: START всегда первым
   q.sort((a, b) => (a === 'start' ? -1 : b === 'start' ? 1 : String(a).localeCompare(String(b))))
   const orderedIds = []
   while (q.length) {
@@ -461,58 +586,50 @@ function graphToProgram(nodes, edges) {
 
   const ordered = orderedIds.map((id) => byId.get(id)).filter(Boolean)
 
-  const program = ordered
+  const steps = ordered
     .filter((n) => n.id !== 'start')
     .map((n) => {
-    if (n.type === 'delay') {
+      if (n.type === 'delay') {
+        return { type: 'delay', id: n.id, ms: clampMs(n.data?.value?.ms), x: round2(n.position?.x), y: round2(n.position?.y) }
+      }
+      if (n.type === 'stop' || n.type === 'continue' || n.type === 'abort') {
+        return { type: n.type, id: n.id, x: round2(n.position?.x), y: round2(n.position?.y) }
+      }
+      if (n.type === 'and' || n.type === 'or') {
+        return { type: n.type, id: n.id, x: round2(n.position?.x), y: round2(n.position?.y) }
+      }
       return {
-        type: 'delay',
+        type: 'command',
         id: n.id,
-        ms: clampMs(n.data?.value?.ms),
+        commandId: n.data?.value?.commandId || '',
+        delayBeforeMs: clampMs(n.data?.value?.delayBeforeMs),
+        delayAfterMs: clampMs(n.data?.value?.delayAfterMs),
+        targetIps: n.data?.value?.targetIps ?? null,
+        waitContinue: true,
+        useGo: (incoming.get(n.id) || []).some((e) => String(e.targetHandle || '') === 'go'),
         x: round2(n.position?.x),
         y: round2(n.position?.y),
       }
-    }
-    if (n.type === 'stop' || n.type === 'continue' || n.type === 'abort') {
-      return {
-        type: n.type,
-        id: n.id,
-        x: round2(n.position?.x),
-        y: round2(n.position?.y),
-      }
-    }
-    if (n.type === 'and' || n.type === 'or') {
-      return {
-        type: n.type,
-        id: n.id,
-        x: round2(n.position?.x),
-        y: round2(n.position?.y),
-      }
-    }
-    return {
-      type: 'command',
-      id: n.id,
-      commandId: n.data?.value?.commandId || '',
-      delayBeforeMs: clampMs(n.data?.value?.delayBeforeMs),
-      delayAfterMs: clampMs(n.data?.value?.delayAfterMs),
-      targetIps: n.data?.value?.targetIps ?? null,
-      // ВСЕГДА ждём выбранных роботов (barrier).
-      // А вот ожидание внешнего сигнала используем только если реально подключён вход go.
-      waitContinue: (incoming.get(n.id) || []).some((e) => String(e.targetHandle || '') === 'go'),
-      x: round2(n.position?.x),
-      y: round2(n.position?.y),
-    }
-  })
+    })
 
-  return program
+  // Сохраняем рёбра для восстановления графа при загрузке
+  const savedEdges = edges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: e.sourceHandle || null,
+    targetHandle: e.targetHandle || null,
+  }))
+
+  return { steps, edges: savedEdges }
 }
 
-export default function NodeProgramEditor({ program, commands, targetIps, targetMeta, scenarioKey, onChangeProgram, onError }) {
+export default function NodeProgramEditor({ program, programEdges, commands, targetIps, targetMeta, scenarioKey, onChangeProgram, onError }) {
   const commandOptions = useMemo(
     () => (commands || []).map((c) => ({ value: c.id, label: c.name || c.id })),
     [commands],
   )
-  const allTargets = useMemo(() => (Array.isArray(targetIps) && targetIps.length ? targetIps : ['LOCAL']), [targetIps])
+  const allTargets = useMemo(() => (Array.isArray(targetIps) && targetIps.length ? targetIps : []), [targetIps])
 
   const patchNode = useCallback((nodeId, patch) => {
     setNodes((prev) =>
@@ -523,9 +640,9 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
   }, [])
 
   const { nodes: initialNodes, edges: initialEdges } = useMemo(
-    () => programToGraph(program, commandOptions),
+    () => programToGraph(program, programEdges, commandOptions),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(program || []), JSON.stringify(commandOptions || [])],
+    [JSON.stringify(program || []), JSON.stringify(programEdges || []), JSON.stringify(commandOptions || [])],
   )
 
   const [nodes, setNodes, onNodesChange] = useNodesState(
@@ -549,13 +666,12 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
     setEdges(initialEdges)
   }, [initialNodes, initialEdges, commandOptions, allTargets, targetMeta, patchNode, setNodes, setEdges])
 
-  // --- scenario state polling (for "готов/ждём") ---
+  // --- scenario state polling ---
   const [scenarioUi, setScenarioUi] = useState({ active: false })
 
   const stepIndexByNodeId = useMemo(() => {
-    // index according to current ordered program (start excluded)
     try {
-      const orderedProgram = graphToProgram(nodes, edges)
+      const { steps: orderedProgram } = graphToProgram(nodes, edges)
       const map = {}
       for (let i = 0; i < orderedProgram.length; i++) {
         const id = orderedProgram[i]?.id
@@ -624,14 +740,17 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
       if (now - lastEmitRef.current < 120) return
       lastEmitRef.current = now
 
-      const nextProgram = graphToProgram(nextNodes, nextEdges)
-      onChangeProgram(nextProgram)
+      const result = graphToProgram(nextNodes, nextEdges)
+      onChangeProgram(result.steps, result.edges)
     },
     [onChangeProgram],
   )
 
   const onConnect = useCallback(
     (params) => {
+      // Проверяем допустимость соединения
+      if (!isValidConnection(params)) return
+
       setEdges((eds) => {
         const src = String(params.source || '')
         const tgt = String(params.target || '')
@@ -639,7 +758,7 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
         const sh = String(params.sourceHandle || '')
         const th = String(params.targetHandle || '')
 
-        // Toggle: повторное соединение тех же нод удаляет ребро
+        // Toggle: повторное соединение тех же нод/handles удаляет ребро
         const existsIdx = eds.findIndex(
           (e) =>
             String(e.source) === src &&
@@ -671,7 +790,6 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return
-      // не ломаем ввод в полях
       const tag = String(e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
       deleteSelected()
@@ -680,88 +798,36 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
     return () => window.removeEventListener('keydown', onKey)
   }, [deleteSelected])
 
-  const addCommand = () => {
-    const id = uid('c')
+  const addNode = (type, extraData = {}) => {
+    const id = uid(type === 'delay' ? 'd' : type === 'and' ? 'and' : type === 'or' ? 'or' : type[0])
     const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
     const next = {
       id,
-      type: 'command',
+      type,
       position: { x: 0, y: maxY + 120 },
       data: {
-        value: { commandId: commandOptions[0]?.value || '', delayBeforeMs: 0, delayAfterMs: 0, targetIps: null },
+        value: type === 'command'
+          ? { commandId: commandOptions[0]?.value || '', delayBeforeMs: 0, delayAfterMs: 0, targetIps: null }
+          : type === 'delay'
+            ? { ms: 500 }
+            : {},
         commandOptions,
         allTargets,
         onPatch: patchNode,
+        ...extraData,
       },
     }
     setNodes((prev) => [...prev, next])
-    if (nodes.length) {
+
+    // Авто-соединяем с последней нодой только для основного потока
+    if (type !== 'continue') {
       const last = [...nodes].sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0)).at(-1)
-      if (last) {
+      if (last && last.type !== 'abort') {
+        const sh = last.type === 'start' ? null : 'out'
+        const th = type === 'command' || type === 'delay' || type === 'and' || type === 'or' || type === 'stop' || type === 'abort' ? 'in' : null
         setEdges((prev) => [
           ...prev,
-          { id: `e-${last.id}-${id}`, source: last.id, target: id, type: 'smoothstep' },
-        ])
-      }
-    }
-  }
-
-  const addStop = () => {
-    const id = uid('s')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = { id, type: 'stop', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
-    setNodes((prev) => [...prev, next])
-  }
-
-  const addContinue = () => {
-    const id = uid('k')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = { id, type: 'continue', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
-    setNodes((prev) => [...prev, next])
-  }
-
-  const addAbort = () => {
-    const id = uid('a')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = { id, type: 'abort', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
-    setNodes((prev) => [...prev, next])
-  }
-
-  const addAnd = () => {
-    const id = uid('and')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = { id, type: 'and', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
-    setNodes((prev) => [...prev, next])
-  }
-
-  const addOr = () => {
-    const id = uid('or')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = { id, type: 'or', position: { x: 0, y: maxY + 120 }, data: { value: {} } }
-    setNodes((prev) => [...prev, next])
-  }
-
-  const addDelay = () => {
-    const id = uid('d')
-    const maxY = Math.max(0, ...nodes.map((n) => n.position?.y ?? 0))
-    const next = {
-      id,
-      type: 'delay',
-      position: { x: 0, y: maxY + 120 },
-      data: {
-        value: { ms: 500 },
-        commandOptions,
-        allTargets,
-        onPatch: patchNode,
-      },
-    }
-    setNodes((prev) => [...prev, next])
-    if (nodes.length) {
-      const last = [...nodes].sort((a, b) => (a.position?.y ?? 0) - (b.position?.y ?? 0)).at(-1)
-      if (last) {
-        setEdges((prev) => [
-          ...prev,
-          { id: `e-${last.id}-${id}`, source: last.id, target: id, type: 'smoothstep' },
+          { id: `e-${last.id}-${id}`, source: last.id, target: id, sourceHandle: sh, targetHandle: th, type: 'smoothstep' },
         ])
       }
     }
@@ -779,25 +845,25 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
   return (
     <div className="node-editor">
       <div className="node-editor__bar">
-        <button type="button" className="node-editor__btn" onClick={addCommand}>
+        <button type="button" className="node-editor__btn" onClick={() => addNode('command')}>
           + Команда
         </button>
-        <button type="button" className="node-editor__btn node-editor__btn--accent" onClick={addDelay}>
+        <button type="button" className="node-editor__btn node-editor__btn--accent" onClick={() => addNode('delay')}>
           + Задержка
         </button>
-        <button type="button" className="node-editor__btn" onClick={addStop} title="Пауза (ждём ПРОДОЛЖИТЬ)">
+        <button type="button" className="node-editor__btn" onClick={() => addNode('stop')} title="Пауза (ждём ПРОДОЛЖИТЬ)">
           + СТОП
         </button>
-        <button type="button" className="node-editor__btn" onClick={addContinue} title="Разрешить продолжение">
+        <button type="button" className="node-editor__btn" onClick={() => addNode('continue')} title="Разрешить продолжение">
           + ПРОДОЛЖИТЬ
         </button>
-        <button type="button" className="node-editor__btn" onClick={addAnd} title="Объединение входов: И">
+        <button type="button" className="node-editor__btn" onClick={() => addNode('and')} title="Объединение входов: И (все)">
           + И
         </button>
-        <button type="button" className="node-editor__btn" onClick={addOr} title="Объединение входов: ИЛИ">
+        <button type="button" className="node-editor__btn" onClick={() => addNode('or')} title="Объединение входов: ИЛИ (любой)">
           + ИЛИ
         </button>
-        <button type="button" className="node-editor__btn node-editor__btn--danger" onClick={addAbort} title="Прервать сценарий">
+        <button type="button" className="node-editor__btn node-editor__btn--danger" onClick={() => addNode('abort')} title="Прервать сценарий">
           + ПРЕРВАТЬ
         </button>
         <button
@@ -809,7 +875,7 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
         >
           Удалить
         </button>
-        <span className="node-editor__hint">Перетаскивай блоки и соединяй их. Сейчас поддерживается одна цепочка.</span>
+        <span className="node-editor__hint">OUT→IN основной поток · READY→GO сигнал · И/ИЛИ принимают несколько входов</span>
       </div>
 
       <div className="node-editor__canvas">
@@ -819,6 +885,7 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          isValidConnection={isValidConnection}
           nodeTypes={nodeTypes}
           fitView
           proOptions={{ hideAttribution: false }}
@@ -831,4 +898,3 @@ export default function NodeProgramEditor({ program, commands, targetIps, target
     </div>
   )
 }
-

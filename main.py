@@ -1919,6 +1919,7 @@ After=network.target
 Type=simple
 User={real_user}
 WorkingDirectory={script_dir}
+ExecStartPre=/bin/sleep 10
 ExecStart={python_executable} {script_path}
 Restart=always
 RestartSec=10

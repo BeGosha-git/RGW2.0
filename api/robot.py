@@ -5,14 +5,14 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 import status
 
 # Определяем корень проекта
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
 # Повторные HTTP-запросы с тем же command+args, пока выполнение не завершено — отклоняются.
-_execution_inflight: set[str] = set()
+_execution_inflight: Set[str] = set()
 _execution_lock = threading.Lock()
 
 
@@ -299,6 +299,9 @@ class RobotAPI:
 
     @staticmethod
     def execute_g1_arm_action(action_name: str) -> Dict[str, Any]:
+        import subprocess
+        import json as _json
+
         robot_type = RobotAPI._get_robot_type()
         if robot_type != "G1":
             return {
@@ -306,25 +309,52 @@ class RobotAPI:
                 "message": f"G1 arm actions are available only for RobotType=G1 (current: {robot_type or 'UNKNOWN'})",
             }
 
+        network_interface = "eth0"
+        domain_id = 0
         try:
-            from services.unitree_motor_control.g1_arm_action_service import get_g1_arm_action_service
-            network_interface = "lo"
-            domain_id = 0
-            try:
-                import services_manager
-                manager = services_manager.get_services_manager()
-                params = manager.get_service_parameters("unitree_motor_control")
-                network_interface = params.get("network", "lo")
-                domain_id = int(params.get("id", 0))
-            except Exception:
-                pass
+            import services_manager
+            manager = services_manager.get_services_manager()
+            params = manager.get_service_parameters("unitree_motor_control")
+            network_interface = params.get("network", "eth0")
+            domain_id = int(params.get("id", 0))
+        except Exception:
+            pass
 
-            service = get_g1_arm_action_service()
-            return service.execute(
-                action_name=action_name,
-                network_interface=network_interface,
-                domain_id=domain_id,
+        # Запускаем SDK в отдельном процессе чтобы нативный краш не убивал основной сервис.
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.unitree_motor_control.g1_arm_action_service import get_g1_arm_action_service\n"
+            "svc = get_g1_arm_action_service()\n"
+            "result = svc.execute(action_name=sys.argv[2], network_interface=sys.argv[3], domain_id=int(sys.argv[4]))\n"
+            "print(json.dumps(result))\n"
+        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(PROJECT_ROOT), action_name, network_interface, str(domain_id)],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
+            stdout = proc.stdout.strip()
+            if stdout:
+                # Берём последнюю строку (может быть вывод SDK перед JSON)
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        return _json.loads(line)
+            stderr = proc.stderr.strip()
+            return {
+                "success": False,
+                "message": f"G1 arm action subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}",
+                "action": action_name,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "message": f"G1 arm action timed out (30s): {action_name}",
+                "action": action_name,
+            }
         except Exception as e:
             return {
                 "success": False,

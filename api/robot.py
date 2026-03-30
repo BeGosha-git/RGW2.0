@@ -3,6 +3,7 @@ API модуль для работы с данным роботом.
 """
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set

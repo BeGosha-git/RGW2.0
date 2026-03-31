@@ -499,6 +499,50 @@ def register_robot_endpoints():
             return jsonify({"success": False, "message": "action required"}), 400
         result = robot_api.RobotAPI.execute_command("g1_arm_action", [action_name])
         return jsonify(result), (200 if result.get("success") else 400)
+
+    @flask_app.route('/api/robot/g1/loco/modes', methods=['GET'])
+    def api_robot_g1_loco_modes():
+        """Список режимов/команд для G1 loco (FSM)."""
+        return jsonify(robot_api.RobotAPI.get_g1_loco_modes())
+
+    @flask_app.route('/api/robot/g1/loco/execute', methods=['POST'])
+    def api_robot_g1_loco_execute():
+        """Выполняет режим/команду G1 loco (FSM)."""
+        data = request.get_json() or {}
+        mode = str(data.get('mode', '')).strip()
+        args = data.get('args', [])
+        if not mode:
+            return jsonify({"success": False, "message": "mode required"}), 400
+        # reuse execute_command routing
+        result = robot_api.RobotAPI.execute_command("g1_loco", [mode] + (args if isinstance(args, list) else [args]))
+        return jsonify(result), (200 if result.get("success") else 400)
+
+    @flask_app.route('/api/robot/g1/loco/set_fsm', methods=['POST'])
+    def api_robot_g1_loco_set_fsm():
+        data = request.get_json() or {}
+        fsm_id = data.get('fsm_id', None)
+        if fsm_id is None:
+            return jsonify({"success": False, "message": "fsm_id required"}), 400
+        result = robot_api.RobotAPI.execute_g1_loco_op("set_fsm", {"fsm_id": fsm_id})
+        return jsonify(result), (200 if result.get("success") else 400)
+
+    @flask_app.route('/api/robot/g1/loco/set_balance_mode', methods=['POST'])
+    def api_robot_g1_loco_set_balance_mode():
+        data = request.get_json() or {}
+        balance_mode = data.get('balance_mode', None)
+        if balance_mode is None:
+            return jsonify({"success": False, "message": "balance_mode required"}), 400
+        result = robot_api.RobotAPI.execute_g1_loco_op("set_balance_mode", {"balance_mode": balance_mode})
+        return jsonify(result), (200 if result.get("success") else 400)
+
+    @flask_app.route('/api/robot/g1/loco/set_stand_height', methods=['POST'])
+    def api_robot_g1_loco_set_stand_height():
+        data = request.get_json() or {}
+        stand_height = data.get('stand_height', None)
+        if stand_height is None:
+            return jsonify({"success": False, "message": "stand_height required"}), 400
+        result = robot_api.RobotAPI.execute_g1_loco_op("set_stand_height", {"stand_height": stand_height})
+        return jsonify(result), (200 if result.get("success") else 400)
     
     @flask_app.route('/api/settings', methods=['GET'])
     def api_settings_get():

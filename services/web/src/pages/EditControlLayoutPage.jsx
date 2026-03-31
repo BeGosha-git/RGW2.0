@@ -29,6 +29,7 @@ function EditControlLayoutPage() {
   const [confirmDelete, setConfirmDelete] = useState(null) // { id }
   const [ipMeta, setIpMeta] = useState({})
   const [localIps, setLocalIps] = useState([])
+  const [placingButton, setPlacingButton] = useState(false)
   const pageHost = typeof window !== 'undefined'
     ? String(window.location.hostname || '').replace(/^::ffff:/i, '').trim()
     : ''
@@ -239,6 +240,7 @@ function EditControlLayoutPage() {
   }
 
   const clickWorkspace = (event) => {
+    if (!placingButton) return
     const defaultCommandId = commands[0]?.id || ''
     if (!defaultCommandId) {
       setError('Нет команд для создания кнопки')
@@ -276,6 +278,7 @@ function EditControlLayoutPage() {
       buttons: [...(layout.buttons || []), nextButton],
     }))
     setSelectedButtonId(nextButton.id)
+    setPlacingButton(false)
     setMessage('Кнопка добавлена')
     setError('')
   }
@@ -452,6 +455,14 @@ function EditControlLayoutPage() {
         onActiveLayoutNameChange={(name) => updateActiveLayout((layout) => ({ ...layout, name }))}
         onAddLayout={addLayout}
         onSave={saveLayouts}
+        placingButton={placingButton}
+        hasSelectedButton={Boolean(selectedButtonId)}
+        onTogglePlaceButton={() => {
+          setPlacingButton((v) => !v)
+          setMessage((m) => m || 'Кликни по экрану телефона, чтобы поставить кнопку')
+          setError('')
+        }}
+        onDeleteSelectedButton={() => deleteSelectedButton()}
       />
 
       <div className="editctl-split" ref={splitWrapRef}>
@@ -529,6 +540,7 @@ function EditControlLayoutPage() {
 
           {selectedButton ? (
             <NodeProgramEditor
+              key={selectedButton.id}
               program={normalizeProgramFromButton(selectedButton)}
               programEdges={selectedButton.programEdges || null}
               commands={commands}

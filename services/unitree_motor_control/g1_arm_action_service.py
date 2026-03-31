@@ -237,7 +237,8 @@ class G1ArmActionService:
     def execute(self, action_name: str, network_interface: str = "eth0", domain_id: int = 0) -> Dict[str, Any]:
         option_id = _OPTION_ID_BY_NAME.get(action_name)
         action_id = _ACTION_MAP.get(action_name)
-        duration_ms = _DURATION_MS_BY_NAME.get(action_name, 3000)
+        # duration_ms is only used for actions that require auto-release (i.e. "reset motors").
+        duration_ms = max(0, int(_DURATION_MS_BY_NAME.get(action_name, 3000)))
         if action_id is None or option_id is None:
             return {
                 "success": False,
@@ -280,15 +281,16 @@ class G1ArmActionService:
                         "code": result_code,
                         **({"reset_code": reset_code} if reset_code is not None else {}),
                     }
-                # Ждём физического выполнения движения (RPC fire-and-forget — SDK возвращается сразу).
-                # duration_ms — примерное время анимации, чтобы следующая команда не запустилась раньше.
-                time.sleep(duration_ms / 1000.0)
-
                 # Как в g1_arm_action_example.py: после жеста release arm (для перечисленных option_id).
                 need_auto_release = (
                     option_id in _AUTO_RELEASE_OPTION_IDS
                     and release_id is not None
                 )
+
+            # Если нужен авто-сброс (release arm) — ждём физическое выполнение жеста,
+            # иначе не задерживаем сценарий (SDK вызов fire-and-forget).
+            if need_auto_release and duration_ms > 0:
+                time.sleep(duration_ms / 1000.0)
 
             if need_auto_release:
                 release_code: Optional[int] = None
@@ -307,7 +309,8 @@ class G1ArmActionService:
                         "action_id": action_id,
                         "option_id": option_id,
                         "code": release_code,
-                        "duration_ms": duration_ms,
+                        # Return duration only when it matters (reset case)
+                        "duration_ms": duration_ms if need_auto_release else 0,
                     }
 
             return {
@@ -321,7 +324,8 @@ class G1ArmActionService:
                 "action_id": action_id,
                 "option_id": option_id,
                 "code": result_code,
-                "duration_ms": duration_ms,
+                # Return duration only when it matters (reset case)
+                "duration_ms": duration_ms if need_auto_release else 0,
                 **(
                     {"reset_code": reset_code}
                     if reset_code is not None and action_name != "release arm"

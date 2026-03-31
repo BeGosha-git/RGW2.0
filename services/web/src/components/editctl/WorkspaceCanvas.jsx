@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react'
 import { normalizeProgramFromButton } from '../../utils/controlProgram'
+import IconGlyph from '../IconGlyph'
 
 const COLOR_PRESETS = [
   { id: 'blue', hex: '#2196f3' },
@@ -104,8 +105,6 @@ function WorkspaceCanvas({
                       onClick={() =>
                         onPatchButton?.({
                           shape: it.shape,
-                          // legacy icon for existing places
-                          icon: it.shape === 'square' ? '■' : it.shape === 'triangle' ? '▲' : '●',
                         })
                       }
                       title={it.shape}
@@ -191,8 +190,6 @@ function WorkspaceCanvas({
               onContextMenu={(event) => {
                 event.preventDefault()
                 event.stopPropagation()
-                // удаляем конкретную кнопку
-                onDeleteButton?.(button.id)
               }}
               onClick={(event) => {
                 event.stopPropagation()
@@ -201,7 +198,9 @@ function WorkspaceCanvas({
               title={draggingId === button.id ? 'Перемещение...' : 'Зажми и двигай'}
             >
               {hasScenario && <span className="workspace-program-badge">{prog.length}</span>}
-              <span className="workspace-button__shape">{shape === 'square' ? '■' : shape === 'triangle' ? '▲' : '●'}</span>
+              <span className="workspace-button__shape" style={{ color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                <IconGlyph name={button.icon || (shape === 'square' ? '■' : shape === 'triangle' ? '▲' : '●')} size={18} />
+              </span>
               <small>{button.label || button.commandId}</small>
               <small className="target">{(button.targetIps || [button.targetIp || 'LOCAL']).join(', ')}</small>
             </button>

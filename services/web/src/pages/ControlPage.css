@@ -148,6 +148,10 @@
 .button-emoji {
   font-size: 1.05rem;
   line-height: 1;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .button-label {

@@ -362,7 +362,9 @@ class ServiceRunner:
                         motor_status = motor_service_info.get("status", "OFF") if motor_service_info else "OFF"
                         motor_enabled = motor_service_info.get("parameters", {}).get("enabled", True) if motor_service_info else True
                         
-                        if motor_status == "OFF":
+                        # If motor service is expected to be running (ON) but its thread died,
+                        # restart the whole runner. If motor is OFF, it's a normal state on PCs.
+                        if motor_status == "ON":
                             motor_was_loaded = False
                             motor_thread_alive = False
                             

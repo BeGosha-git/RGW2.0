@@ -642,12 +642,19 @@ class CameraStream:
         self.height = height
         self.fps = fps
         self.running = False
-        self.thread: Optional[threading.Thread] = None
+        self.thread: Optional[threading.Thread] = None  # encode/udp loop
+        self.capture_thread: Optional[threading.Thread] = None  # capture loop (drop frames)
         self.cap = None
         self.pipeline = None
         self.udp_socket = None
         self.frame_queue: deque = deque(maxlen=1)  # Уменьшаем размер очереди до 1
         self._frame_event = threading.Event()
+        # Cached JPEG to avoid per-client encoding spikes/lag
+        self._jpeg_lock = threading.Lock()
+        self._latest_jpeg: Optional[bytes] = None
+        self._latest_jpeg_ts: float = 0.0
+        # Prefer lowering quality over lowering FPS for "real-time" feel.
+        self._jpeg_quality = int(os.environ.get("RGW2_CAMERA_JPEG_QUALITY", "60"))
         self.error_count = 0
         self.max_errors = 5
         self.last_frame_time = 0
@@ -655,6 +662,8 @@ class CameraStream:
         self.stop_event = threading.Event()
         self.consecutive_errors = 0
         self.max_consecutive_errors = 10
+        self._frame_lock = threading.Lock()
+        self._latest_frame_raw: Optional["np.ndarray"] = None
         
     def start(self):
         """Запуск потока камеры."""
@@ -671,12 +680,63 @@ class CameraStream:
                         return False
                 
                 self.running = True
+                self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
                 self.thread = threading.Thread(target=self._stream_loop, daemon=True)
+                self.capture_thread.start()
                 self.thread.start()
                 return True
             except Exception as e:
                 print(f"[CameraStream] Error starting camera {self.camera_id}: {e}", flush=True)
                 return False
+
+    def _push_frame(self, frame) -> None:
+        try:
+            with self._frame_lock:
+                self._latest_frame_raw = frame
+            while len(self.frame_queue) > 0:
+                try:
+                    self.frame_queue.pop()
+                except Exception:
+                    break
+            self.frame_queue.append(frame)
+            self._frame_event.set()
+            self.last_frame_time = time.time()
+        except Exception:
+            pass
+
+    def _capture_loop(self):
+        """Capture loop: keeps only newest frame (drop frames)."""
+        while self.running and not self.stop_event.is_set():
+            frame = None
+            try:
+                if self.camera_info["type"] == "realsense":
+                    if not self.pipeline:
+                        self.stop_event.wait(timeout=0.02)
+                        continue
+                    with _suppress_stderr():
+                        frames = self.pipeline.wait_for_frames(timeout_ms=_RS_LOOP_POLL_MS)
+                    if frames:
+                        cf = frames.get_color_frame()
+                        if cf:
+                            frame = np.asanyarray(cf.get_data())
+                else:
+                    if not self.cap or (hasattr(self.cap, "isOpened") and not self.cap.isOpened()):
+                        self.stop_event.wait(timeout=0.02)
+                        continue
+                    with _suppress_stderr():
+                        if hasattr(self.cap, "grab") and self.cap.grab():
+                            ok, fr = self.cap.retrieve()
+                        else:
+                            ok, fr = self.cap.read()
+                    if ok and fr is not None:
+                        frame = fr
+
+                if frame is not None:
+                    self._push_frame(frame.copy())
+            except Exception:
+                pass
+
+            self.stop_event.wait(timeout=0.001)
     
     def _start_realsense(self) -> bool:
         """Запуск RealSense камеры с улучшенной обработкой ошибок."""
@@ -865,7 +925,7 @@ class CameraStream:
             return False
     
     def _stream_loop(self):
-        """Основной цикл чтения кадров с автоматическим перезапуском при ошибках."""
+        """Encode+UDP loop at target FPS (stable)."""
         if self.udp_port:
             try:
                 self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -874,127 +934,41 @@ class CameraStream:
                 print(f"[CameraStream] UDP socket error: {e}", flush=True)
 
         frame_id = 0
-        interval = max(0.01, 1.0 / self.fps)
+        interval = max(0.005, 1.0 / max(1, int(self.fps)))
 
         while self.running and not self.stop_event.is_set():
             t0 = time.time()
             frame = None
 
             try:
-                # Проверяем доступность камеры
-                if self.camera_info["type"] == "realsense":
-                    if self.pipeline is None or not self.pipeline:
-                        #print(f"[CameraStream] RealSense pipeline unavailable, restarting...", flush=True)
-                        self.consecutive_errors += 1
-                        if self.consecutive_errors >= self.max_consecutive_errors:
-                            if self._restart_camera():
-                                self.consecutive_errors = 0
-                            else:
-                                time.sleep(1.0)
-                        continue
+                # Wait for a new frame (real-time), but keep loop responsive.
+                self._frame_event.wait(timeout=min(interval, 0.2))
+                with self._frame_lock:
+                    if self._latest_frame_raw is not None:
+                        frame = self._latest_frame_raw
                     
-                    try:
-                        with _suppress_stderr():
-                            frames = self.pipeline.wait_for_frames(timeout_ms=_RS_LOOP_POLL_MS)
-                            if frames:
-                                cf = frames.get_color_frame()
-                                if cf:
-                                    frame = np.asanyarray(cf.get_data())
-                                    self.consecutive_errors = 0
-                                else:
-                                    self.consecutive_errors += 1
-                            else:
-                                self.consecutive_errors += 1
-                    except StopIteration:
-                        # Генератор закончился, перезапускаем камеру
-                        self.consecutive_errors += 1
-                        self.error_count += 1
-                        #print(f"[CameraStream] RealSense generator stopped, restarting camera {self.camera_id}", flush=True)
-                        if self.consecutive_errors >= self.max_consecutive_errors:
-                            if self._restart_camera():
-                                self.consecutive_errors = 0
-                        time.sleep(0.1)
-                        continue
-                    except Exception as e:
-                        self.consecutive_errors += 1
-                        self.error_count += 1
-                        if self.consecutive_errors >= self.max_consecutive_errors:
-                            #print(f"[CameraStream] RealSense error, restarting camera {self.camera_id}: {e}", flush=True)
-                            if self._restart_camera():
-                                self.consecutive_errors = 0
-                        time.sleep(0.1)
-                        continue
-                        
-                elif self.cap:
-                    if not self.cap.isOpened():
-                        #print(f"[CameraStream] USB camera not opened, restarting...", flush=True)
-                        self.consecutive_errors += 1
-                        if self.consecutive_errors >= self.max_consecutive_errors:
-                            if self._restart_camera():
-                                self.consecutive_errors = 0
-                            else:
-                                time.sleep(1.0)
-                        continue
-                    
-                    try:
-                        with _suppress_stderr():
-                            ret, frame = self.cap.read()
-                        if not ret or frame is None:
-                            self.consecutive_errors += 1
-                            if self.consecutive_errors >= self.max_consecutive_errors:
-                                #print(f"[CameraStream] USB camera read error, restarting...", flush=True)
-                                if self._restart_camera():
-                                    self.consecutive_errors = 0
-                            time.sleep(0.1)
-                            continue
-                        else:
-                            self.consecutive_errors = 0
-                    except Exception as e:
-                        self.consecutive_errors += 1
-                        self.error_count += 1
-                        if self.consecutive_errors >= self.max_consecutive_errors:
-                            #print(f"[CameraStream] USB camera error, restarting {self.camera_id}: {e}", flush=True)
-                            if self._restart_camera():
-                                self.consecutive_errors = 0
-                        time.sleep(0.1)
-                        continue
-                
                 if frame is not None:
-                    self.error_count = 0
-                    self.consecutive_errors = 0
-                    
-                    # Очищаем очередь и добавляем новый кадр
-                    while len(self.frame_queue) > 0:
+                    # Encode once per captured frame to keep stable FPS and reduce latency.
+                    # Clients will reuse cached JPEG instead of encoding in each request.
+                    encoded_jpeg: Optional[bytes] = None
+                    if CV2_AVAILABLE:
                         try:
-                            self.frame_queue.pop()
-                        except Exception:
-                            break
-                    
-                    self.frame_queue.append(frame.copy())
-                    self._frame_event.set()
-                    self.last_frame_time = time.time()
-                    
-                    # Отправка по UDP с оптимизацией (разрешение уже 80%, улучшаем резкость и контрастность)
-                    if self.udp_port and self.udp_socket and CV2_AVAILABLE:
-                        try:
-                            # Контрастность +20%
-                            frame_enhanced = cv2.convertScaleAbs(frame, alpha=1.2, beta=0)
-                            
-                            # Резкость +20% (unsharp mask)
-                            gaussian = cv2.GaussianBlur(frame_enhanced, (0, 0), 2.0)
-                            frame_enhanced = cv2.addWeighted(frame_enhanced, 1.2, gaussian, -0.2, 0)
-                            
-                            # Нормализация значений пикселей
-                            frame_enhanced = np.clip(frame_enhanced, 0, 255).astype(np.uint8)
-                            
-                            # Кодирование JPEG
-                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                            _, buf = cv2.imencode('.jpg', frame_enhanced, encode_param)
-                            if buf is not None:
-                                _send_udp_frame(self.udp_socket, buf.tobytes(),
-                                                self.udp_port, frame_id)
-                                frame_id = (frame_id + 1) & 0xFFFFFFFF
+                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(self._jpeg_quality)]
+                            ok, buf = cv2.imencode('.jpg', frame, encode_param)
+                            if ok and buf is not None:
+                                encoded_jpeg = buf.tobytes()
+                                with self._jpeg_lock:
+                                    self._latest_jpeg = encoded_jpeg
+                                    self._latest_jpeg_ts = time.time()
                         except Exception as e:
+                            pass
+
+                    # Отправка по UDP: используем уже закодированный JPEG (без повторного imencode)
+                    if encoded_jpeg and self.udp_port and self.udp_socket:
+                        try:
+                            _send_udp_frame(self.udp_socket, encoded_jpeg, self.udp_port, frame_id)
+                            frame_id = (frame_id + 1) & 0xFFFFFFFF
+                        except Exception:
                             pass
                 
             except Exception as e:
@@ -1074,22 +1048,34 @@ class CameraStream:
             self.running = False
             self.stop_event.set()
             thr = self.thread
+            cap_thr = self.capture_thread
         self._release_hardware_unlocked()
+        if cap_thr and cap_thr.is_alive():
+            cap_thr.join(timeout=_STREAM_JOIN_TIMEOUT_SEC)
         if thr and thr.is_alive():
             thr.join(timeout=_STREAM_JOIN_TIMEOUT_SEC)
         with self.lock:
             self.thread = None
+            self.capture_thread = None
         self._cleanup()
     
     def get_latest_frame(self, width: int = None, height: int = None,
                          quality: int = 80, wait: bool = True) -> Optional[bytes]:
         """Возвращает последний кадр в виде JPEG bytes с улучшенной резкостью и контрастностью."""
         if wait:
+            # wait for at least one frame; do not clear event to avoid multi-client jitter
             self._frame_event.wait(timeout=0.5)
-            self._frame_event.clear()
+
+        # Fast path: return cached JPEG for default size/quality
+        if width is None and height is None and int(quality) == int(self._jpeg_quality):
+            with self._jpeg_lock:
+                if self._latest_jpeg is not None:
+                    return self._latest_jpeg
 
         if not self.frame_queue or not CV2_AVAILABLE:
-            return None
+            # If cv2 is missing but we have cached jpeg (shouldn't happen), return it
+            with self._jpeg_lock:
+                return self._latest_jpeg
         
         try:
             frame = self.frame_queue[-1].copy()

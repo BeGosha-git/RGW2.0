@@ -22,6 +22,36 @@ try:
 except Exception:
     _WEB_PORT = 8080
 
+# Remote robots may run web on 8080-8085 (auto-fallback when a port is busy).
+_WEB_PORT_CANDIDATES = [8080, 8081, 8082, 8083, 8084, 8085]
+if _WEB_PORT not in _WEB_PORT_CANDIDATES:
+    _WEB_PORT_CANDIDATES.insert(0, _WEB_PORT)
+else:
+    # prefer configured port first
+    _WEB_PORT_CANDIDATES = [_WEB_PORT] + [p for p in _WEB_PORT_CANDIDATES if p != _WEB_PORT]
+
+
+def _send_to_agent_with_port_fallback(target_ip: str, endpoint: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+    """
+    Send request to ScenarioAgent on a target robot.
+    Tries multiple web ports because robots may bind to 8081..8085 if 8080 is busy.
+    """
+    last: Dict[str, Any] = {"success": False, "message": f"No response from {target_ip}"}
+    for port in _WEB_PORT_CANDIDATES:
+        res = _network_api.send_data(target_ip, endpoint, payload, timeout=timeout, port=port)
+        if res and res.get("success"):
+            # keep first transport-level success; if remote says success too we stop immediately
+            last = res
+            try:
+                remote_ok = bool(isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
+            except Exception:
+                remote_ok = False
+            if remote_ok:
+                return res
+        else:
+            last = res or last
+    return last
+
 def _self_id_for_remote(page_host: Optional[str]) -> str:
     try:
         st = status_module.get_robot_status() or {}
@@ -185,7 +215,7 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         load_errors: List[str] = []
         for t in remote_candidates:
             payload = {"scenarioId": scenario_id, "steps": steps, "peers": [], "selfId": t}
-            res = _network_api.send_data(t, "/api/robot/scenario/load", payload, timeout=15, port=_WEB_PORT)
+            res = _send_to_agent_with_port_fallback(t, "/api/robot/scenario/load", payload, timeout=15)
             ok = bool(res and res.get("success"))
             remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
             if ok and remote_ok:
@@ -202,7 +232,7 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         for t in reachable:
             peers = [x for x in reachable if x != t]
             payload = {"scenarioId": scenario_id, "steps": steps, "peers": peers, "selfId": t}
-            res = _network_api.send_data(t, "/api/robot/scenario/load", payload, timeout=15, port=_WEB_PORT)
+            res = _send_to_agent_with_port_fallback(t, "/api/robot/scenario/load", payload, timeout=15)
             ok = bool(res and res.get("success"))
             remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
             if ok and remote_ok:
@@ -218,9 +248,7 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         started_remote: List[str] = []
         start_errors: List[str] = []
         for t in loaded_remote:
-            res = _network_api.send_data(
-                t, "/api/robot/scenario/start", {"scenarioId": scenario_id}, timeout=8, port=_WEB_PORT
-            )
+            res = _send_to_agent_with_port_fallback(t, "/api/robot/scenario/start", {"scenarioId": scenario_id}, timeout=8)
             ok = bool(res and res.get("success"))
             remote_ok = bool(isinstance(res, dict) and isinstance(res.get("response"), dict) and res.get("response", {}).get("success"))
             try:

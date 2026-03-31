@@ -8,6 +8,10 @@ function LayoutToolbar({
   onActiveLayoutNameChange,
   onAddLayout,
   onSave,
+  placingButton,
+  hasSelectedButton,
+  onTogglePlaceButton,
+  onDeleteSelectedButton,
 }) {
   return (
     <div className="editctl-toolbar">
@@ -40,6 +44,25 @@ function LayoutToolbar({
 
       <button className="save-btn" type="button" onClick={onSave}>
         Сохранить
+      </button>
+
+      <button
+        type="button"
+        className={`node-editor__btn ${placingButton ? 'node-editor__btn--accent' : ''}`}
+        onClick={onTogglePlaceButton}
+        title={placingButton ? 'Отмена добавления кнопки' : 'Создать кнопку: потом клик по экрану телефона'}
+      >
+        {placingButton ? 'Отмена' : 'Создать кнопку'}
+      </button>
+
+      <button
+        type="button"
+        className="node-editor__btn node-editor__btn--danger"
+        onClick={onDeleteSelectedButton}
+        disabled={!hasSelectedButton}
+        title="Удалить выбранную кнопку"
+      >
+        Удалить кнопку
       </button>
     </div>
   )

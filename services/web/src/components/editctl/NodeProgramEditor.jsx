@@ -8,10 +8,86 @@ import ReactFlow, {
   Position,
   useEdgesState,
   useNodesState,
+  BaseEdge,
+  getSmoothStepPath,
+  useStore,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
 
 import CustomSelect from '../CustomSelect'
+
+function segmentsIntersect(a, b, c, d) {
+  const cross = (p, q, r) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+  const ab1 = cross(a, b, c)
+  const ab2 = cross(a, b, d)
+  const cd1 = cross(c, d, a)
+  const cd2 = cross(c, d, b)
+  if (ab1 === 0 && ab2 === 0 && cd1 === 0 && cd2 === 0) return false
+  return (ab1 > 0) !== (ab2 > 0) && (cd1 > 0) !== (cd2 > 0)
+}
+
+function IntersectAwareEdge(props) {
+  const { id, source, target, sourceHandle, targetHandle, sourceX, sourceY, targetX, targetY, markerEnd, style } = props
+  const allEdges = useStore((s) => s.edges)
+  const nodeInternals = useStore((s) => s.nodeInternals)
+
+  const getNodeAbs = useCallback(
+    (nodeId) => {
+      const n = nodeInternals?.get?.(nodeId)
+      if (!n) return null
+      const abs = n?.internals?.positionAbsolute || n?.positionAbsolute || n?.position || { x: 0, y: 0 }
+      const w = n?.measured?.width ?? n?.width ?? 180
+      const h = n?.measured?.height ?? n?.height ?? 110
+      return { x: abs.x, y: abs.y, w, h }
+    },
+    [nodeInternals],
+  )
+
+  const handlePoint = useCallback(
+    (nodeId, handleId, isSource) => {
+      const n = getNodeAbs(nodeId)
+      if (!n) return null
+      const hid = String(handleId || '')
+      // Our editor conventions:
+      // - main flow: source out -> target in (top/bottom)
+      // - signal: source ready (right) -> target go (left)
+      if (isSource && (hid === 'ready' || hid === 'r')) return { x: n.x + n.w, y: n.y + n.h / 2 }
+      if (!isSource && (hid === 'go' || hid === 'g')) return { x: n.x, y: n.y + n.h / 2 }
+      if (isSource) return { x: n.x + n.w / 2, y: n.y + n.h } // out / default
+      return { x: n.x + n.w / 2, y: n.y } // in / default
+    },
+    [getNodeAbs],
+  )
+
+  const intersects = useMemo(() => {
+    const a = { x: sourceX, y: sourceY }
+    const b = { x: targetX, y: targetY }
+    for (const e of allEdges || []) {
+      if (!e || e.id === id) continue
+      if (e.source === source || e.source === target || e.target === source || e.target === target) continue
+      const c0 = handlePoint(e.source, e.sourceHandle, true)
+      const d0 = handlePoint(e.target, e.targetHandle, false)
+      if (!c0 || !d0) continue
+      const c = { x: c0.x, y: c0.y }
+      const d = { x: d0.x, y: d0.y }
+      if (segmentsIntersect(a, b, c, d)) return true
+    }
+    return false
+  }, [allEdges, id, source, target, sourceHandle, targetHandle, sourceX, sourceY, targetX, targetY, handlePoint])
+
+  const [path] = getSmoothStepPath({ sourceX, sourceY, targetX, targetY })
+  return (
+    <BaseEdge
+      path={path}
+      markerEnd={markerEnd}
+      style={{
+        ...(style || {}),
+        stroke: intersects ? '#ff9800' : (style?.stroke || '#9aa6b2'),
+        strokeWidth: intersects ? 3 : (style?.strokeWidth || 2),
+      }}
+    />
+  )
+}
 
 function uid(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
@@ -272,16 +348,14 @@ function CommandNode({ id, data }) {
           options={commandOptions}
           onChange={(v) => onPatch(id, { commandId: v })}
         />
-        <div className="node__grid">
-          <label>
-            <span>до (мс)</span>
-            <IntField value={value.delayBeforeMs ?? 0} ariaLabel="delay before ms" onChange={(n) => onPatch(id, { delayBeforeMs: clampMs(n) })} />
-          </label>
-          <label>
-            <span>после (мс)</span>
-            <IntField value={value.delayAfterMs ?? 0} ariaLabel="delay after ms" onChange={(n) => onPatch(id, { delayAfterMs: clampMs(n) })} />
-          </label>
-        </div>
+        <label className="node__single" style={{ marginTop: 8 }}>
+          <span>время действия (мс)</span>
+          <IntField
+            value={value.actionDurationMs ?? 0}
+            ariaLabel="action duration ms"
+            onChange={(n) => onPatch(id, { actionDurationMs: clampMs(n) })}
+          />
+        </label>
 
         <TargetsEditor
           allTargets={allTargets || []}
@@ -385,6 +459,8 @@ const VALID_CONNECTIONS = [
   ['ready', 'go'],
 ]
 
+const edgeTypes = { intersect: IntersectAwareEdge }
+
 function isValidConnection(params) {
   const sh = String(params.sourceHandle || '')
   const th = String(params.targetHandle || '')
@@ -435,8 +511,7 @@ function programToGraph(program, programEdges, commandOptions) {
           b.type === 'command'
             ? {
                 commandId: b.commandId || commandOptions[0]?.value || '',
-                delayBeforeMs: b.delayBeforeMs ?? 0,
-                delayAfterMs: b.delayAfterMs ?? 0,
+                actionDurationMs: b.actionDurationMs ?? b.delayAfterMs ?? 0,
                 targetIps: b.targetIps ?? null,
                 waitContinue: !!b.waitContinue,
                 useGo: !!b.useGo,
@@ -468,7 +543,7 @@ function programToGraph(program, programEdges, commandOptions) {
         target: e.target,
         sourceHandle: e.sourceHandle || null,
         targetHandle: e.targetHandle || null,
-        type: 'smoothstep',
+        type: 'intersect',
         animated: false,
       })
     }
@@ -484,7 +559,7 @@ function programToGraph(program, programEdges, commandOptions) {
         target: tgt.id,
         sourceHandle: src.type === 'start' ? null : 'out',
         targetHandle: tgt.type === 'command' || tgt.type === 'delay' || tgt.type === 'and' || tgt.type === 'or' || tgt.type === 'stop' || tgt.type === 'abort' ? 'in' : null,
-        type: 'smoothstep',
+        type: 'intersect',
         animated: false,
       })
     }
@@ -602,8 +677,10 @@ function graphToProgram(nodes, edges) {
         type: 'command',
         id: n.id,
         commandId: n.data?.value?.commandId || '',
-        delayBeforeMs: clampMs(n.data?.value?.delayBeforeMs),
-        delayAfterMs: clampMs(n.data?.value?.delayAfterMs),
+        // задержки в нод-редакторе делаются отдельной нодой delay
+        delayBeforeMs: 0,
+        delayAfterMs: clampMs(n.data?.value?.actionDurationMs),
+        actionDurationMs: clampMs(n.data?.value?.actionDurationMs),
         targetIps: n.data?.value?.targetIps ?? null,
         waitContinue: true,
         useGo: (incoming.get(n.id) || []).some((e) => String(e.targetHandle || '') === 'go'),
@@ -770,7 +847,7 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
           return eds.filter((_, i) => i !== existsIdx)
         }
 
-        return addEdge({ ...params, type: 'smoothstep' }, eds)
+        return addEdge({ ...params, type: 'intersect' }, eds)
       })
     },
     [setEdges],
@@ -807,7 +884,7 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
       position: { x: 0, y: maxY + 120 },
       data: {
         value: type === 'command'
-          ? { commandId: commandOptions[0]?.value || '', delayBeforeMs: 0, delayAfterMs: 0, targetIps: null }
+          ? { commandId: commandOptions[0]?.value || '', actionDurationMs: 0, targetIps: null }
           : type === 'delay'
             ? { ms: 500 }
             : {},
@@ -887,6 +964,7 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
           onConnect={onConnect}
           isValidConnection={isValidConnection}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           fitView
           proOptions={{ hideAttribution: false }}
         >

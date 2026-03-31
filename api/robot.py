@@ -196,6 +196,16 @@ class RobotAPI:
                         }
                     return RobotAPI.execute_g1_arm_action(action_name)
 
+                if command == "g1_loco":
+                    mode = ""
+                    if args and len(args) > 0:
+                        mode = str(args[0]).strip()
+                    if not mode:
+                        return {"success": False, "message": "g1_loco requires mode name in args[0]"}
+                    # optional numeric args
+                    rest = args[1:] if isinstance(args, list) else []
+                    return RobotAPI.execute_g1_loco_mode(mode, rest)
+
                 import execute
                 
                 # Собираем stdout и stderr
@@ -283,13 +293,53 @@ class RobotAPI:
 
     @staticmethod
     def get_g1_arm_actions() -> Dict[str, Any]:
+        """
+        Возвращает список доступных G1 жестов.
+
+        Важно: `services.unitree_motor_control.g1_arm_action_service` при импорте
+        выполняет native-инициализацию (CycloneDDS/SDK). Чтобы не убивать основной
+        процесс `rgw2`, загружаем и получаем действия в отдельном subprocess.
+        """
+        import subprocess
+        import json as _json
+
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.unitree_motor_control.g1_arm_action_service import get_g1_actions\n"
+            "actions = get_g1_actions()\n"
+            "print(json.dumps({'actions': actions}, ensure_ascii=False))\n"
+        )
+
         try:
-            from services.unitree_motor_control.g1_arm_action_service import get_g1_actions
-            actions = get_g1_actions()
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(PROJECT_ROOT)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                data = _json.loads(stdout)
+                actions = data.get("actions") or {}
+                actions_list = [{"name": name, "id": action_id} for name, action_id in actions.items()]
+                return {
+                    "success": True,
+                    "actions": actions_list,
+                    "count": len(actions_list),
+                }
+
+            stderr = proc.stderr.strip()
             return {
-                "success": True,
-                "actions": [{"name": name, "id": action_id} for name, action_id in actions.items()],
-                "count": len(actions),
+                "success": False,
+                "message": f"G1 arm actions subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}",
+                "actions": [],
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "message": "G1 arm actions subprocess timed out",
+                "actions": [],
             }
         except Exception as e:
             return {
@@ -361,6 +411,119 @@ class RobotAPI:
                 "success": False,
                 "message": f"Error executing G1 arm action: {e}",
             }
+
+    @staticmethod
+    def get_g1_loco_modes() -> Dict[str, Any]:
+        """Available G1 loco modes (FSM helpers)."""
+        return {
+            "success": True,
+            "modes": [
+                {"id": "start", "name": "Start (FSM 200)"},
+                {"id": "damp", "name": "Damp (FSM 1)"},
+                {"id": "zero_torque", "name": "ZeroTorque (FSM 0)"},
+                {"id": "sit", "name": "Sit (FSM 3)"},
+                {"id": "lie_to_stand", "name": "Lie2StandUp (FSM 702)"},
+                {"id": "squat_to_stand", "name": "Squat2StandUp (FSM 706)"},
+                {"id": "high_stand", "name": "HighStand"},
+                {"id": "low_stand", "name": "LowStand"},
+                {"id": "stop_move", "name": "StopMove"},
+                {"id": "wave_hand", "name": "WaveHand (task)"},
+                {"id": "shake_hand", "name": "ShakeHand (task)"},
+            ],
+        }
+
+    @staticmethod
+    def execute_g1_loco_mode(mode: str, extra_args: Optional[list] = None) -> Dict[str, Any]:
+        """
+        Execute Unitree G1 loco mode via SDK in a subprocess.
+        This avoids native DDS crashes in the main service process.
+        """
+        import subprocess
+        import json as _json
+
+        robot_type = RobotAPI._get_robot_type()
+        if robot_type != "G1":
+            return {"success": False, "message": f"G1 loco modes are available only for RobotType=G1 (current: {robot_type or 'UNKNOWN'})"}
+
+        network_interface = "eth0"
+        domain_id = 0
+        try:
+            import services_manager
+            manager = services_manager.get_services_manager()
+            params = manager.get_service_parameters("unitree_motor_control")
+            network_interface = params.get("network", "eth0")
+            domain_id = int(params.get("id", 0))
+        except Exception:
+            pass
+
+        mode = str(mode).strip().lower()
+        rest = list(extra_args or [])
+
+        try:
+            script_path = PROJECT_ROOT / "api" / "g1_loco_cli.py"
+            payload = {"mode": mode, "args": rest}
+            proc = subprocess.run(
+                [sys.executable, str(script_path), str(PROJECT_ROOT), network_interface, str(domain_id), "mode", _json.dumps(payload)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        return _json.loads(line)
+            stderr = proc.stderr.strip()
+            return {"success": False, "message": f"G1 loco subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}", "mode": mode}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": f"G1 loco timed out (20s): {mode}", "mode": mode}
+        except Exception as e:
+            return {"success": False, "message": f"Error executing G1 loco mode: {e}", "mode": mode}
+
+    @staticmethod
+    def execute_g1_loco_op(op: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Generic loco op executor via api/g1_loco_cli.py (subprocess)."""
+        import subprocess
+        import json as _json
+
+        robot_type = RobotAPI._get_robot_type()
+        if robot_type != "G1":
+            return {"success": False, "message": f"G1 loco is available only for RobotType=G1 (current: {robot_type or 'UNKNOWN'})"}
+
+        network_interface = "eth0"
+        domain_id = 0
+        try:
+            import services_manager
+            manager = services_manager.get_services_manager()
+            params = manager.get_service_parameters("unitree_motor_control")
+            network_interface = params.get("network", "eth0")
+            domain_id = int(params.get("id", 0))
+        except Exception:
+            pass
+
+        op = str(op or "").strip().lower()
+        script_path = PROJECT_ROOT / "api" / "g1_loco_cli.py"
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script_path), str(PROJECT_ROOT), network_interface, str(domain_id), op, _json.dumps(payload or {})],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        return _json.loads(line)
+            stderr = proc.stderr.strip()
+            return {"success": False, "message": f"G1 loco subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}", "op": op}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": f"G1 loco timed out (20s): {op}", "op": op}
+        except Exception as e:
+            return {"success": False, "message": f"Error executing G1 loco op: {e}", "op": op}
     
     @staticmethod
     def ensure_default_commands() -> None:
@@ -390,6 +553,88 @@ class RobotAPI:
                 "args": ["upgrade.py", "--force"],
                 "showButton": True,
                 "buttonConfig": {"position": 2, "color": "danger", "icon": "update"},
+            },
+            # G1 loco (FSM/modes) helpers (used in default control layouts)
+            {
+                "id": "g1_loco_start",
+                "name": "G1: START (FSM 200)",
+                "description": "G1 high-level mode: Start",
+                "command": "g1_loco",
+                "args": ["start"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_damp",
+                "name": "G1: DAMP (FSM 1)",
+                "description": "G1 high-level mode: Damp",
+                "command": "g1_loco",
+                "args": ["damp"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_zero_torque",
+                "name": "G1: ZERO TORQUE (FSM 0)",
+                "description": "G1 high-level mode: ZeroTorque",
+                "command": "g1_loco",
+                "args": ["zero_torque"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_sit",
+                "name": "G1: SIT (FSM 3)",
+                "description": "G1 high-level mode: Sit",
+                "command": "g1_loco",
+                "args": ["sit"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_lie_to_stand",
+                "name": "G1: LIE→STAND (FSM 702)",
+                "description": "G1 high-level mode: Lie2StandUp",
+                "command": "g1_loco",
+                "args": ["lie_to_stand"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_squat_to_stand",
+                "name": "G1: SQUAT→STAND (FSM 706)",
+                "description": "G1 high-level mode: Squat2StandUp",
+                "command": "g1_loco",
+                "args": ["squat_to_stand"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_high_stand",
+                "name": "G1: HIGH STAND",
+                "description": "G1 high-level mode: HighStand",
+                "command": "g1_loco",
+                "args": ["high_stand"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_low_stand",
+                "name": "G1: LOW STAND",
+                "description": "G1 high-level mode: LowStand",
+                "command": "g1_loco",
+                "args": ["low_stand"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_loco_stop_move",
+                "name": "G1: STOP MOVE",
+                "description": "G1 high-level mode: StopMove",
+                "command": "g1_loco",
+                "args": ["stop_move"],
+                "showButton": False,
+                "robotTypes": ["G1"],
             },
         ]
 
@@ -431,6 +676,128 @@ class RobotAPI:
                     json.dump(default_data, f, indent=4, ensure_ascii=False)
             except Exception:
                 pass
+
+    @staticmethod
+    def ensure_default_control_layouts() -> None:
+        """Create data/control_layouts.json with 2 base layouts if missing."""
+        try:
+            layouts_path = PROJECT_ROOT / "data" / "control_layouts.json"
+            layouts_path.parent.mkdir(parents=True, exist_ok=True)
+            if layouts_path.exists():
+                return
+
+            def mk_btn(btn_id: str, command_id: str, label: str, icon: str, x: float, y: float, shape: str = "circle", color: str = "#2196f3"):
+                step_id = f"step-{btn_id}"
+                return {
+                    "id": btn_id,
+                    "commandId": command_id,
+                    "label": label,
+                    "icon": icon,
+                    "shape": shape,
+                    "color": color,
+                    "x": round(float(x), 5),
+                    "y": round(float(y), 5),
+                    "size": 64,
+                    "targetIps": ["LOCAL"],
+                    "program": [
+                        {
+                            "type": "command",
+                            "id": step_id,
+                            "commandId": command_id,
+                            "delayBeforeMs": 0,
+                            "delayAfterMs": 0,
+                            "actionDurationMs": 0,
+                            "targetIps": ["LOCAL"],
+                            "waitContinue": False,
+                            "useGo": False,
+                        }
+                    ],
+                }
+
+            # Place buttons around the edge of the "phone" area (0..1 coords).
+            # Movements (arm gestures)
+            move_cmds = [
+                ("g1_hug", "HUG", "mv_hug_1"),
+                ("g1_high_wave", "WAVE", "mv_wave_1"),
+                ("g1_face_wave", "FACE", "mv_wave_2"),
+                ("g1_shake_hand", "SHAKE", "mv_wave_3"),
+                ("g1_high_five", "FIVE", "mv_wave_4"),
+                ("g1_clap", "CLAP", "mv_dance_1"),
+                ("g1_heart", "HEART", "mv_hug_2"),
+                ("g1_right_heart", "R-HEART", "mv_hug_3"),
+                ("g1_hands_up", "HANDS UP", "mv_jump_1"),
+                ("g1_reject", "REJECT", "mv_stop_1"),
+                ("g1_left_kiss", "L-KISS", "mv_hug_4"),
+                ("g1_right_kiss", "R-KISS", "mv_hug_5"),
+            ]
+
+            # Modes (loco)
+            mode_cmds = [
+                ("g1_loco_start", "START", "mv_run_1"),
+                ("g1_loco_damp", "DAMP", "mv_stop_1"),
+                ("g1_loco_zero_torque", "0 TORQ", "mv_stop_2"),
+                ("g1_loco_sit", "SIT", "mv_sit_1"),
+                ("g1_loco_lie_to_stand", "LIE→STAND", "mv_stand_1"),
+                ("g1_loco_squat_to_stand", "SQUAT→STAND", "mv_stand_2"),
+                ("g1_loco_high_stand", "HIGH", "mv_stand_3"),
+                ("g1_loco_low_stand", "LOW", "mv_squat_1"),
+                ("g1_loco_stop_move", "STOP", "mv_stop_3"),
+            ]
+
+            def edge_positions(n: int):
+                # clockwise positions along border (top->right->bottom->left)
+                pts = []
+                if n <= 0:
+                    return pts
+                # allocate proportionally
+                top = max(1, n // 4)
+                right = max(1, n // 4)
+                bottom = max(1, n // 4)
+                left = max(1, n - top - right - bottom)
+
+                def lin(a, b, k, m):
+                    if m <= 1:
+                        return (a + b) / 2
+                    return a + (b - a) * (k / (m - 1))
+
+                for i in range(top):
+                    pts.append((lin(0.15, 0.85, i, top), 0.12))
+                for i in range(right):
+                    pts.append((0.88, lin(0.18, 0.82, i, right)))
+                for i in range(bottom):
+                    pts.append((lin(0.85, 0.15, i, bottom), 0.88))
+                for i in range(left):
+                    pts.append((0.12, lin(0.82, 0.18, i, left)))
+                return pts[:n]
+
+            move_pts = edge_positions(len(move_cmds))
+            mode_pts = edge_positions(len(mode_cmds))
+
+            movements_buttons = []
+            for i, (cmd, lbl, ico) in enumerate(move_cmds):
+                x, y = move_pts[i]
+                movements_buttons.append(mk_btn(f"base-move-{cmd}", cmd, lbl, ico, x, y, shape="circle", color="#2196f3"))
+
+            modes_buttons = []
+            for i, (cmd, lbl, ico) in enumerate(mode_cmds):
+                x, y = mode_pts[i]
+                modes_buttons.append(mk_btn(f"base-mode-{cmd}", cmd, lbl, ico, x, y, shape="square", color="#9c27b0"))
+
+            base = {
+                "version": "1.0.0",
+                "layouts": [
+                    {"id": "layout-movements", "name": "Движения", "buttons": movements_buttons},
+                    {"id": "layout-modes", "name": "Режимы", "buttons": modes_buttons},
+                ],
+            }
+
+            with open(layouts_path, "w", encoding="utf-8") as f:
+                json.dump(base, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            try:
+                print(f"[RobotAPI] ensure_default_control_layouts failed: {e}", flush=True)
+            except Exception:
+                pass
     
     @staticmethod
     def get_commands() -> Dict[str, Any]:
@@ -442,6 +809,7 @@ class RobotAPI:
         """
         try:
             RobotAPI.ensure_default_commands()
+            RobotAPI.ensure_default_control_layouts()
             commands_path = PROJECT_ROOT / "data" / "commands.json"
             if commands_path.exists():
                 with open(commands_path, 'r', encoding='utf-8') as f:

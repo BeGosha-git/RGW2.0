@@ -1891,7 +1891,7 @@ def setup_autostart():
         script_dir = script_path.parent
         
         # Определяем Python для использования (предпочитаем venv если есть и готов)
-        python_executable = sys.executable
+        python_executable = "/usr/bin/python3.8" if Path("/usr/bin/python3.8").exists() else sys.executable
         venv_path = script_dir / "venv"
         venv_ready_flag = venv_path / ".ready"
         
@@ -1904,8 +1904,23 @@ def setup_autostart():
                     venv_python = venv_path / "bin" / "python"
             
             if venv_python.exists():
-                python_executable = str(venv_python.resolve())
-                print(f"Using venv Python: {python_executable}", flush=True)
+                # Use venv python only if it actually starts on this CPU.
+                # This avoids writing a broken ExecStart that leads to 203/EXEC.
+                try:
+                    import subprocess as _sp
+                    r = _sp.run(
+                        [str(venv_python), "-c", "print('ok')"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if r.returncode == 0:
+                        python_executable = str(venv_python.resolve())
+                        print(f"Using venv Python: {python_executable}", flush=True)
+                    else:
+                        print(f"Warning: venv python is not runnable, using system python: {python_executable}", flush=True)
+                except Exception:
+                    print(f"Warning: venv python check failed, using system python: {python_executable}", flush=True)
         
         # Определяем реального пользователя (не root если запущено через sudo)
         real_user = os.getenv('SUDO_USER') or os.getenv('USER') or 'unitree'

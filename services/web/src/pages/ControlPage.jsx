@@ -8,6 +8,7 @@ import {
   validateProgram,
 } from '../utils/controlProgram'
 import { executeButtonScenario } from '../utils/controlScenarioExecution'
+import IconGlyph from '../components/IconGlyph'
 import './ControlPage.css'
 
 const LAYOUT_FILEPATH = 'data/control_layouts.json'
@@ -15,6 +16,29 @@ const LAYOUT_FILEPATH = 'data/control_layouts.json'
 const defaultLayouts = {
   version: '1.0.0',
   layouts: [{ id: 'layout-1', name: 'Раскладка 1', buttons: [] }],
+}
+
+function hexToRgba(hex, a) {
+  const h = String(hex || '').replace('#', '')
+  if (h.length !== 6) return `rgba(33,150,243,${a})`
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r},${g},${b},${a})`
+}
+
+function iconToShape(icon) {
+  if (icon === '■') return 'square'
+  if (icon === '▲') return 'triangle'
+  return 'circle'
+}
+
+function resolveShape(button) {
+  return button?.shape || iconToShape(button?.icon)
+}
+
+function resolveColor(button) {
+  return button?.color || '#2196f3'
 }
 
 function ControlPage() {
@@ -27,6 +51,8 @@ function ControlPage() {
   const [cameraIndex, setCameraIndex] = useState(0)
   const [info, setInfo] = useState('')
   const [error, setError] = useState('')
+  // Safety: require double click to run any scenario button
+  const lastClickRef = useRef(new Map()) // buttonId -> ts
   const touchStartX = useRef(null)
   const actionInFlightRef = useRef(new Set())
   const [inFlightKeys, setInFlightKeys] = useState(() => new Set())
@@ -178,6 +204,15 @@ function ControlPage() {
       return
     }
 
+    // Double-click safety gate
+    const now = Date.now()
+    const last = lastClickRef.current.get(actionKey) || 0
+    lastClickRef.current.set(actionKey, now)
+    if (now - last > 700) {
+      if (mountedRef.current) setInfo('Для безопасности нажми ещё раз')
+      return
+    }
+
     const program = normalizeProgramFromButton(button)
     const v = validateProgram(program, commandsMap)
     if (!v.ok) {
@@ -253,6 +288,12 @@ function ControlPage() {
             const isBusy = inFlightKeys.has(button.id)
             const hasParallel = prog.some((b) => b.type === 'parallel')
             const scenarioHint = hasParallel ? `${prog.length} бл. · ‖` : `${prog.length} бл.`
+            const shape = resolveShape(button)
+            const color = resolveColor(button)
+            const bg = hexToRgba(color, 0.28)
+            const border = hexToRgba(color, 0.8)
+            const clipPath = shape === 'triangle' ? 'polygon(50% 0%, 0% 100%, 100% 100%)' : undefined
+            const borderRadius = shape === 'square' ? '12px' : '50%'
             return (
               <button
                 key={button.id}
@@ -263,12 +304,18 @@ function ControlPage() {
                   top: `${(button.y || 0.5) * 100}%`,
                   width: `${button.size || 72}px`,
                   height: `${button.size || 72}px`,
+                  background: bg,
+                  borderColor: border,
+                  borderRadius,
+                  clipPath,
                 }}
                 disabled={isBusy}
                 onClick={() => runButton(button)}
                 title={`${label} · ${scenarioHint} · цели: ${normalizeTargetList(button).join(', ')}`}
               >
-                <span className="button-emoji">{button.icon || '●'}</span>
+                <span className="button-emoji">
+                  <IconGlyph name={button.icon || '●'} size={18} />
+                </span>
                 <span className="button-label">{label}</span>
               </button>
             )

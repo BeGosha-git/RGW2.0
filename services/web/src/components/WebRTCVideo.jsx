@@ -10,13 +10,29 @@ import './WebRTCVideo.css'
  *
  * qualityMode — 'low' (matrix/thumbnail view) | 'high' (fullscreen)
  */
-function WebRTCVideo({ signalingUrl, label, qualityMode = 'low' }) {
+function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
   const videoRef = useRef(null)
   const pcRef = useRef(null)
   const connIdRef = useRef(null)
   const closeUrlRef = useRef(null)
   const retryTimerRef = useRef(null)
   const [state, setState] = useState('connecting') // connecting | connected | error
+  const [effectiveQuality, setEffectiveQuality] = useState(qualityMode)
+  const [fps, setFps] = useState(null)
+  const lastQualityChangeRef = useRef(0)
+  const goodStreakRef = useRef(0)
+
+  useEffect(() => {
+    setEffectiveQuality(qualityMode)
+  }, [qualityMode])
+
+  useEffect(() => {
+    try {
+      if (typeof onDebug === 'function') {
+        onDebug({ state, quality: effectiveQuality, fps })
+      }
+    } catch (_e) {}
+  }, [state, effectiveQuality, fps, onDebug])
 
   useEffect(() => {
     if (!signalingUrl) {
@@ -92,7 +108,7 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low' }) {
           body: JSON.stringify({
             sdp: pc.localDescription.sdp,
             type: pc.localDescription.type,
-            quality: qualityMode,
+            quality: effectiveQuality,
           }),
           signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
         })
@@ -120,7 +136,111 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low' }) {
       cancelled = true
       cleanup()
     }
-  }, [signalingUrl, qualityMode]) // qualityMode — must reconnect when switching low/high
+  }, [signalingUrl, effectiveQuality]) // reconnect when adaptive mode changes
+
+  // Adaptive quality:
+  // - On bad connection: downgrade to 'low' (server caps bitrate/FPS/res, keeps JPEG >=30%)
+  // - When stable again: upgrade back to requested qualityMode
+  useEffect(() => {
+    if (state !== 'connected') return
+    const pc = pcRef.current
+    if (!pc || typeof pc.getStats !== 'function') return
+
+    let cancelled = false
+    let prev = { recv: 0, lost: 0, ts: 0 }
+
+    const tick = async () => {
+      if (cancelled) return
+      const pc2 = pcRef.current
+      if (!pc2) return
+      try {
+        const stats = await pc2.getStats()
+        let inbound = null
+        stats.forEach((r) => {
+          if (r && r.type === 'inbound-rtp' && r.kind === 'video') inbound = r
+        })
+        if (!inbound) return
+        const now = Number(inbound.timestamp || Date.now())
+        const recv = Number(inbound.packetsReceived || 0)
+        const lost = Number(inbound.packetsLost || 0)
+        const jitter = Number(inbound.jitter || 0) // seconds
+
+        const dRecv = prev.ts ? Math.max(0, recv - prev.recv) : 0
+        const dLost = prev.ts ? Math.max(0, lost - prev.lost) : 0
+        prev = { recv, lost, ts: now }
+
+        const lossRate = dRecv + dLost > 0 ? dLost / (dRecv + dLost) : 0
+        const poor = lossRate > 0.08 || jitter > 0.06
+        const good = lossRate < 0.02 && jitter < 0.03
+
+        const tNow = Date.now()
+        const cooldownOk = tNow - lastQualityChangeRef.current > 8000
+
+        if (poor) {
+          goodStreakRef.current = 0
+          if (effectiveQuality !== 'low' && cooldownOk) {
+            lastQualityChangeRef.current = tNow
+            setEffectiveQuality('low')
+          }
+          return
+        }
+
+        if (good) {
+          goodStreakRef.current += 1
+          if (effectiveQuality === 'low' && qualityMode !== 'low' && goodStreakRef.current >= 3 && cooldownOk) {
+            lastQualityChangeRef.current = tNow
+            setEffectiveQuality(qualityMode)
+            goodStreakRef.current = 0
+          }
+        } else {
+          goodStreakRef.current = 0
+        }
+      } catch (_e) {}
+    }
+
+    const t = setInterval(tick, 2000)
+    tick()
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [state, effectiveQuality, qualityMode])
+
+  // FPS estimate from the rendered video (best-effort).
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    if (typeof v.requestVideoFrameCallback !== 'function') return
+
+    let cancelled = false
+    let last = { t: 0, count: 0 }
+
+    const cb = (_now, meta) => {
+      if (cancelled) return
+      const t = Number(meta?.expectedDisplayTime || performance.now())
+      if (!last.t) {
+        last = { t, count: 1 }
+      } else {
+        last.count += 1
+        const dt = t - last.t
+        if (dt >= 900) {
+          const next = Math.max(0, (last.count * 1000) / dt)
+          setFps(next)
+          last = { t, count: 0 }
+        }
+      }
+      try {
+        v.requestVideoFrameCallback(cb)
+      } catch (_e) {}
+    }
+
+    try {
+      v.requestVideoFrameCallback(cb)
+    } catch (_e) {}
+    return () => {
+      cancelled = true
+    }
+  }, [state, signalingUrl])
 
   return (
     <div className="camera-stream webrtc-stream">

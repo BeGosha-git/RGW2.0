@@ -655,6 +655,8 @@ class CameraStream:
         self._latest_jpeg_ts: float = 0.0
         # Prefer lowering quality over lowering FPS for "real-time" feel.
         self._jpeg_quality = int(os.environ.get("RGW2_CAMERA_JPEG_QUALITY", "60"))
+        # Hard cap on allowed buffering/latency: drop frames older than this.
+        self._max_frame_age_sec = float(os.environ.get("RGW2_CAMERA_MAX_AGE_SEC", "0.5"))
         self.error_count = 0
         self.max_errors = 5
         self.last_frame_time = 0
@@ -664,6 +666,8 @@ class CameraStream:
         self.max_consecutive_errors = 10
         self._frame_lock = threading.Lock()
         self._latest_frame_raw: Optional["np.ndarray"] = None
+        self._latest_frame_ts: float = 0.0
+        self._latest_frame_id: int = 0
         
     def start(self):
         """Запуск потока камеры."""
@@ -693,6 +697,8 @@ class CameraStream:
         try:
             with self._frame_lock:
                 self._latest_frame_raw = frame
+                self._latest_frame_ts = time.time()
+                self._latest_frame_id = (self._latest_frame_id + 1) & 0x7FFFFFFF
             while len(self.frame_queue) > 0:
                 try:
                     self.frame_queue.pop()
@@ -935,17 +941,32 @@ class CameraStream:
 
         frame_id = 0
         interval = max(0.005, 1.0 / max(1, int(self.fps)))
+        last_encoded_local_id = -1
 
         while self.running and not self.stop_event.is_set():
             t0 = time.time()
             frame = None
+            frame_ts = 0.0
+            local_id = -1
 
             try:
                 # Wait for a new frame (real-time), but keep loop responsive.
                 self._frame_event.wait(timeout=min(interval, 0.2))
                 with self._frame_lock:
+                    local_id = int(self._latest_frame_id)
+                    frame_ts = float(self._latest_frame_ts or 0.0)
                     if self._latest_frame_raw is not None:
                         frame = self._latest_frame_raw
+
+                # We only encode on new frames; avoids jitter from re-encoding old frame.
+                if local_id == last_encoded_local_id:
+                    frame = None
+
+                # Hard latency cap: if capture is stale, drop it and wait for fresh.
+                if frame is not None and frame_ts > 0:
+                    age = time.time() - frame_ts
+                    if age > self._max_frame_age_sec:
+                        frame = None
                     
                 if frame is not None:
                     # Encode once per captured frame to keep stable FPS and reduce latency.
@@ -962,6 +983,13 @@ class CameraStream:
                                     self._latest_jpeg_ts = time.time()
                         except Exception as e:
                             pass
+                    last_encoded_local_id = local_id
+                    # We consumed the newest frame; clear so waiters can block again.
+                    # (capture thread will set again on next frame)
+                    try:
+                        self._frame_event.clear()
+                    except Exception:
+                        pass
 
                     # Отправка по UDP: используем уже закодированный JPEG (без повторного imencode)
                     if encoded_jpeg and self.udp_port and self.udp_socket:
@@ -1069,7 +1097,7 @@ class CameraStream:
         # Fast path: return cached JPEG for default size/quality
         if width is None and height is None and int(quality) == int(self._jpeg_quality):
             with self._jpeg_lock:
-                if self._latest_jpeg is not None:
+                if self._latest_jpeg is not None and (time.time() - float(self._latest_jpeg_ts or 0.0)) <= self._max_frame_age_sec:
                     return self._latest_jpeg
 
         if not self.frame_queue or not CV2_AVAILABLE:

@@ -14,6 +14,8 @@ _scenario_jobs: Dict[str, Dict[str, Any]] = {}
 _scenario_jobs_lock = threading.Lock()
 _scenario_inflight_keys: Set[str] = set()
 _scenario_inflight_lock = threading.Lock()
+_scenario_key_to_jobid: Dict[str, str] = {}
+_scenario_key_to_jobid_lock = threading.Lock()
 
 _network_api = network_api_module.NetworkAPI()
 
@@ -57,9 +59,19 @@ def _self_id_for_remote(page_host: Optional[str]) -> str:
         st = status_module.get_robot_status() or {}
         net = st.get("network") or {}
         ip = str(net.get("interface_ip") or net.get("local_ip") or "").strip()
-        return ip or (str(page_host).strip() if page_host else "LOCAL")
+        if ip:
+            return ip
+        host = (str(page_host).strip() if page_host else "").strip()
+        # If UI is opened as localhost, treat it as loopback for self-requests.
+        if host.lower() in ("localhost", "127.0.0.1", "[::1]", "::1"):
+            return "127.0.0.1"
+        # pageHost may still be a hostname (not routable via NetworkClient); default to loopback.
+        return host or "127.0.0.1"
     except Exception:
-        return str(page_host).strip() if page_host else "LOCAL"
+        host = (str(page_host).strip() if page_host else "").strip()
+        if host.lower() in ("localhost", "127.0.0.1", "[::1]", "::1"):
+            return "127.0.0.1"
+        return host or "127.0.0.1"
 
 
 def _flatten_program(program: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -143,6 +155,9 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         program = _normalize_program_from_button(button)
         raw_targets = _normalize_target_list(button)
         local_ips_norm = [str(x).strip() for x in (local_ips or []) if str(x).strip()]
+        # Make sure we always have a reachable "self" target, even when status has no IPs.
+        if not local_ips_norm:
+            local_ips_norm = ["127.0.0.1"]
 
         # LOCAL → заменяем на реальные IP (local_ips_norm или self_id).
         # LOCAL больше не используется как псевдоним для локального агента — только реальные IP.
@@ -174,9 +189,10 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         _set_job_patch(job_id, {"status": "running"})
         _set_job_progress(job_id, {"phase": "dispatch", "message": "Рассылка сценария роботам..."})
 
-        # commands map from local api
+        # commands map from local api (include_all=True: dispatcher may need commands
+        # for other robot types, e.g. PC dispatching to G1)
         try:
-            cmds = robot_api.RobotAPI.get_commands() or {}
+            cmds = robot_api.RobotAPI.get_commands(include_all=True) or {}
             commands_map = {c.get("id"): c for c in (cmds.get("commands") or []) if isinstance(c, dict) and c.get("id")}
         except Exception:
             commands_map = {}
@@ -285,6 +301,10 @@ def _run_distributed_dispatch_job(job_id: str, job_key: Optional[str], button: D
         if job_key:
             with _scenario_inflight_lock:
                 _scenario_inflight_keys.discard(job_key)
+            with _scenario_key_to_jobid_lock:
+                # Only clear if it still points to this job_id
+                if _scenario_key_to_jobid.get(job_key) == job_id:
+                    _scenario_key_to_jobid.pop(job_key, None)
 
 
 def _normalize_program_from_button(button: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -692,6 +712,9 @@ def _run_scenario_job(job_id: str, job_key: Optional[str], button: Dict[str, Any
         if job_key:
             with _scenario_inflight_lock:
                 _scenario_inflight_keys.discard(job_key)
+            with _scenario_key_to_jobid_lock:
+                if _scenario_key_to_jobid.get(job_key) == job_id:
+                    _scenario_key_to_jobid.pop(job_key, None)
 
 
 def start_scenario_job(
@@ -708,6 +731,28 @@ def start_scenario_job(
     if job_key:
         with _scenario_inflight_lock:
             if job_key in _scenario_inflight_keys:
+                # If we know the jobId, return it so UI can keep polling instead of failing.
+                with _scenario_key_to_jobid_lock:
+                    existing = _scenario_key_to_jobid.get(job_key)
+                if existing:
+                    # If the existing job already finished (done/error) or is stale, clear and allow a new run.
+                    try:
+                        with _scenario_jobs_lock:
+                            job = _scenario_jobs.get(existing)
+                        if job:
+                            st = str(job.get("status") or "")
+                            created_at = float(job.get("created_at") or 0.0)
+                            age = time.time() - created_at if created_at > 0 else 0.0
+                            if st in ("done", "error") or (age and age > 180):
+                                _scenario_inflight_keys.discard(job_key)
+                                with _scenario_key_to_jobid_lock:
+                                    if _scenario_key_to_jobid.get(job_key) == existing:
+                                        _scenario_key_to_jobid.pop(job_key, None)
+                                existing = None
+                    except Exception:
+                        pass
+                if existing:
+                    return {"success": True, "jobId": existing, "duplicate": True}
                 return {"success": False, "message": "Сценарий уже выполняется (дублирующий запрос)", "duplicate": True}
             _scenario_inflight_keys.add(job_key)
 
@@ -720,6 +765,9 @@ def start_scenario_job(
             "progress": {"phase": "queue", "message": "Поставлено в очередь…"},
             "scenarioKey": job_key,
         }
+    if job_key:
+        with _scenario_key_to_jobid_lock:
+            _scenario_key_to_jobid[job_key] = job_id
 
     t = threading.Thread(
         target=_run_distributed_dispatch_job,

@@ -477,7 +477,12 @@ def register_robot_endpoints():
     @flask_app.route('/api/robot/commands', methods=['GET'])
     def api_robot_commands():
         """Получает список быстрых команд из commands.json."""
-        return jsonify(robot_api.RobotAPI.get_commands())
+        try:
+            all_flag = str(request.args.get("all") or request.args.get("includeAll") or "").strip().lower()
+            include_all = all_flag in ("1", "true", "yes", "on", "all")
+        except Exception:
+            include_all = False
+        return jsonify(robot_api.RobotAPI.get_commands(include_all=include_all))
     
     @flask_app.route('/api/robot/commands', methods=['PUT', 'POST'])
     def api_robot_commands_update():
@@ -543,6 +548,11 @@ def register_robot_endpoints():
             return jsonify({"success": False, "message": "stand_height required"}), 400
         result = robot_api.RobotAPI.execute_g1_loco_op("set_stand_height", {"stand_height": stand_height})
         return jsonify(result), (200 if result.get("success") else 400)
+
+    @flask_app.route('/api/robot/telemetry', methods=['GET'])
+    def api_robot_telemetry():
+        """Battery SOC + motor temperatures via Unitree DDS (best-effort)."""
+        return jsonify(robot_api.RobotAPI.get_unitree_telemetry()), 200
     
     @flask_app.route('/api/settings', methods=['GET'])
     def api_settings_get():

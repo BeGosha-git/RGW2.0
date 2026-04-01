@@ -2030,6 +2030,35 @@ def run_update():
         return False
 
 
+def _wait_for_first_wifi_scan(start_ts: float, timeout_sec: float = 12.0) -> bool:
+    """
+    Ensure we have at least one completed network scan (ips.json updated)
+    before running any update checks.
+    """
+    import time
+    from pathlib import Path
+    t0 = time.time()
+    ips_path = Path("data") / "ips.json"
+    while time.time() - t0 < float(timeout_sec):
+        try:
+            if ips_path.exists():
+                import json as _json
+                data = _json.loads(ips_path.read_text(encoding="utf-8") or "{}")
+                scan_count = int(data.get("scan_count") or 0)
+                last_scan = float(data.get("last_scan") or 0.0)
+                try:
+                    mtime = float(ips_path.stat().st_mtime)
+                except Exception:
+                    mtime = 0.0
+                # Require at least one scan happening during THIS process start.
+                if scan_count >= 1 and (last_scan >= (start_ts - 1.0) or mtime >= (start_ts - 1.0)):
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.25)
+    return False
+
+
 def run_services():
     """Запускает все сервисы."""
     try:
@@ -2060,6 +2089,8 @@ def main(python_version: str = None, debug: bool = False):
     else:
         os.environ.pop('RGW2_DEBUG', None)
 
+    import time as _time
+    boot_start_ts = _time.time()
     print("[RGW2] entering main()", flush=True)
     try:
         try:
@@ -2070,15 +2101,28 @@ def main(python_version: str = None, debug: bool = False):
             pass
         
         try:
-            print("[RGW2] check_and_update_version()", flush=True)
-            check_and_update_version()
-        except Exception:
-            pass
-        
-        try:
             print("[RGW2] refresh_services()", flush=True)
             manager = services_manager.get_services_manager()
             manager.refresh_services()
+        except Exception:
+            pass
+
+        # Update checks should run only after at least one Wi-Fi/network scan happened.
+        try:
+            ok_scan = _wait_for_first_wifi_scan(start_ts=boot_start_ts, timeout_sec=12.0)
+            if not ok_scan:
+                # Fallback: perform a direct scan once (fast timeout) to populate ips.json.
+                try:
+                    import scanner
+                    scanner.scan_network()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            print("[RGW2] check_and_update_version()", flush=True)
+            check_and_update_version()
         except Exception:
             pass
         

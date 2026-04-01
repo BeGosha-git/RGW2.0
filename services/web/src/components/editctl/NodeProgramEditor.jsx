@@ -137,6 +137,18 @@ function IntField({ value, onChange, min = 0, ariaLabel }) {
 function TargetsEditor({ allTargets, valueTargets, onPatchTargets, targetMeta }) {
   const set = new Set(valueTargets || [])
 
+  const groups = useMemo(() => {
+    const by = new Map()
+    for (const ip of allTargets || []) {
+      const meta = targetMeta?.[ip]
+      const g = String(meta?.group || '').trim().toLowerCase()
+      if (!g) continue
+      if (!by.has(g)) by.set(g, { group: g, ips: [], bg: meta?.bg, fg: meta?.fg })
+      by.get(g).ips.push(ip)
+    }
+    return Array.from(by.values()).sort((a, b) => String(a.group).localeCompare(String(b.group)))
+  }, [allTargets, targetMeta])
+
   const toggle = (ip) => {
     const next = new Set(valueTargets || [])
     if (next.has(ip)) next.delete(ip)
@@ -147,6 +159,27 @@ function TargetsEditor({ allTargets, valueTargets, onPatchTargets, targetMeta })
 
   return (
     <div className="node-targets">
+      {groups.length ? (
+        <div className="node-targets__list" style={{ marginBottom: 8 }}>
+          {groups.map((g) => (
+            <button
+              key={g.group}
+              type="button"
+              className="node-targets__chip"
+              style={g.bg ? { backgroundColor: g.bg, color: g.fg || undefined, borderColor: 'rgba(255,255,255,0.14)' } : undefined}
+              onPointerDown={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onPatchTargets(g.ips.slice())
+              }}
+              title={`Выбрать группу: ${g.group}`}
+            >
+              <b>{g.group}</b> <span style={{ opacity: 0.8 }}>{g.ips.length}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="node-targets__list">
         {(allTargets || []).map((ip) => {
           const meta = targetMeta?.[ip]
@@ -300,7 +333,7 @@ function OrNode() {
 }
 
 function CommandNode({ id, data }) {
-  const { commandOptions, value, onPatch, allTargets, targetMeta, scenarioUi } = data
+  const { commandOptions, commandsRaw, value, onPatch, allTargets, targetMeta, scenarioUi } = data
   const stepIndex = Number.isFinite(Number(scenarioUi?.stepIndexByNodeId?.[id])) ? Number(scenarioUi.stepIndexByNodeId[id]) : null
   const participants = scenarioUi?.participants || null
   const readyByStep = scenarioUi?.readyByStep || null
@@ -343,11 +376,42 @@ function CommandNode({ id, data }) {
         ) : null}
       </div>
       <div className="node__body">
-        <CustomSelect
-          value={value.commandId || commandOptions[0]?.value || ''}
-          options={commandOptions}
-          onChange={(v) => onPatch(id, { commandId: v })}
-        />
+        {(() => {
+          const selected = Array.isArray(value.targetIps) ? value.targetIps : []
+          const types = new Set(
+            selected
+              .map((ip) => String(targetMeta?.[ip]?.robotType || '').trim().toUpperCase())
+              .filter((t) => !!t),
+          )
+          const chosenType = types.size === 1 ? Array.from(types)[0] : null
+          const raw = Array.isArray(commandsRaw) ? commandsRaw : []
+          const opts = (commandOptions || []).filter((opt) => {
+            const cmd = raw.find((c) => c && c.id === opt.value)
+            const allowed = cmd?.robotTypes
+            if (!chosenType) return true
+            if (!allowed || !Array.isArray(allowed) || !allowed.length) return true
+            const normalized = new Set(allowed.map((x) => String(x).trim().toUpperCase()).filter(Boolean))
+            return normalized.has(chosenType)
+          })
+          const selectedId = value.commandId || opts[0]?.value || commandOptions[0]?.value || ''
+          const finalOpts = opts.some((o) => o.value === selectedId)
+            ? opts
+            : [{ value: selectedId, label: `⚠ ${selectedId}` }, ...opts]
+          return (
+            <>
+              <CustomSelect value={selectedId} options={finalOpts} onChange={(v) => onPatch(id, { commandId: v })} />
+              {types.size > 1 ? (
+                <div className="node__note" style={{ marginTop: 6, opacity: 0.85 }}>
+                  Выбрано несколько типов роботов ({Array.from(types).join(', ')}). Показаны команды без ограничения по типу.
+                </div>
+              ) : chosenType ? (
+                <div className="node__note" style={{ marginTop: 6, opacity: 0.85 }}>
+                  Команды для типа: <b>{chosenType}</b>
+                </div>
+              ) : null}
+            </>
+          )
+        })()}
         <label className="node__single" style={{ marginTop: 8 }}>
           <span>время действия (мс)</span>
           <IntField
@@ -725,10 +789,11 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
   const [nodes, setNodes, onNodesChange] = useNodesState(
     initialNodes.map((n) => ({
       ...n,
-      data: { ...n.data, commandOptions, allTargets, targetMeta, onPatch: patchNode },
+      data: { ...n.data, commandOptions, commandsRaw: commands || [], allTargets, targetMeta, onPatch: patchNode },
     })),
   )
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
+  const [confirmDelete, setConfirmDelete] = useState(null) // { ids: string[] }
 
   const lastEmitRef = useRef(0)
 
@@ -737,7 +802,7 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
     setNodes(
       initialNodes.map((n) => ({
         ...n,
-        data: { ...n.data, commandOptions, allTargets, targetMeta, onPatch: patchNode },
+        data: { ...n.data, commandOptions, commandsRaw: commands || [], allTargets, targetMeta, onPatch: patchNode },
       })),
     )
     setEdges(initialEdges)
@@ -858,11 +923,19 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
   const deleteSelected = useCallback(() => {
     const ids = Array.from(selectedIds).filter((id) => id !== 'start')
     if (!ids.length) return
-    const ok = window.confirm(`Удалить нод(ы): ${ids.length}?`)
-    if (!ok) return
+    setConfirmDelete({ ids })
+  }, [selectedIds, setNodes, setEdges])
+
+  const doConfirmDelete = useCallback(() => {
+    const ids = confirmDelete?.ids || []
+    if (!ids.length) {
+      setConfirmDelete(null)
+      return
+    }
     setNodes((prev) => prev.filter((n) => !ids.includes(n.id)))
     setEdges((prev) => prev.filter((e) => !ids.includes(e.source) && !ids.includes(e.target) && !e.selected))
-  }, [selectedIds, setNodes, setEdges])
+    setConfirmDelete(null)
+  }, [confirmDelete, setNodes, setEdges])
 
   useEffect(() => {
     const onKey = (e) => {
@@ -921,6 +994,22 @@ export default function NodeProgramEditor({ program, programEdges, commands, tar
 
   return (
     <div className="node-editor">
+      {confirmDelete?.ids?.length ? (
+        <div className="center-modal" role="dialog" aria-modal="true" onMouseDown={() => setConfirmDelete(null)}>
+          <div className="center-modal__card" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="center-modal__ttl">Удалить ноды?</div>
+            <div className="center-modal__sub">Будет удалено: {confirmDelete.ids.length}</div>
+            <div className="center-modal__btns">
+              <button type="button" className="center-modal__btn" onClick={() => setConfirmDelete(null)}>
+                Отмена
+              </button>
+              <button type="button" className="center-modal__btn center-modal__btn--danger" onClick={doConfirmDelete}>
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="node-editor__bar">
         <button type="button" className="node-editor__btn" onClick={() => addNode('command')}>
           + Команда

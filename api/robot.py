@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
 import status
@@ -15,6 +16,12 @@ PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 # Повторные HTTP-запросы с тем же command+args, пока выполнение не завершено — отклоняются.
 _execution_inflight: Set[str] = set()
 _execution_lock = threading.Lock()
+
+_commands_cache_lock = threading.Lock()
+_commands_cache: Dict[str, Dict[str, Any]] = {}
+
+_telemetry_cache_lock = threading.Lock()
+_telemetry_cache: Dict[str, Any] = {"ts": 0.0, "value": None}
 
 
 class RobotAPI:
@@ -524,6 +531,82 @@ class RobotAPI:
             return {"success": False, "message": f"G1 loco timed out (20s): {op}", "op": op}
         except Exception as e:
             return {"success": False, "message": f"Error executing G1 loco op: {e}", "op": op}
+
+    @staticmethod
+    def get_unitree_telemetry() -> Dict[str, Any]:
+        """
+        Battery SOC + motor temperatures via Unitree DDS.
+        Runs in a subprocess to avoid native CycloneDDS crashes taking down rgw2.
+        """
+        # Very short cache to avoid hammering DDS/subprocess when UI polls.
+        try:
+            ttl = float(os.environ.get("RGW_TELEMETRY_CACHE_TTL", "0.75"))
+        except Exception:
+            ttl = 0.75
+        now = time.time()
+        with _telemetry_cache_lock:
+            cached_ts = float(_telemetry_cache.get("ts") or 0.0)
+            cached_val = _telemetry_cache.get("value")
+        if cached_val is not None and ttl > 0 and (now - cached_ts) <= ttl:
+            return cached_val
+
+        import subprocess
+        import json as _json
+
+        network_interface = "eth0"
+        domain_id = 0
+        try:
+            import services_manager
+            manager = services_manager.get_services_manager()
+            params = manager.get_service_parameters("unitree_motor_control")
+            network_interface = params.get("network", "eth0")
+            domain_id = int(params.get("id", 0))
+        except Exception:
+            pass
+
+        try:
+            script_path = PROJECT_ROOT / "api" / "unitree_telemetry_cli.py"
+            try:
+                timeout_s = float(os.environ.get("RGW_TELEMETRY_TIMEOUT", "3"))
+            except Exception:
+                timeout_s = 3.0
+            proc = subprocess.run(
+                [sys.executable, str(script_path), str(PROJECT_ROOT), str(network_interface), str(domain_id)],
+                capture_output=True,
+                text=True,
+                timeout=max(0.5, min(timeout_s, 10.0)),
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        val = _json.loads(line)
+                        with _telemetry_cache_lock:
+                            _telemetry_cache["ts"] = time.time()
+                            _telemetry_cache["value"] = val
+                        return val
+            stderr = proc.stderr.strip()
+            val = {
+                "success": False,
+                "message": f"Telemetry subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}",
+            }
+            with _telemetry_cache_lock:
+                _telemetry_cache["ts"] = time.time()
+                _telemetry_cache["value"] = val
+            return val
+        except subprocess.TimeoutExpired:
+            val = {"success": False, "message": "Telemetry timed out"}
+            with _telemetry_cache_lock:
+                _telemetry_cache["ts"] = time.time()
+                _telemetry_cache["value"] = val
+            return val
+        except Exception as e:
+            val = {"success": False, "message": f"Error reading telemetry: {e}"}
+            with _telemetry_cache_lock:
+                _telemetry_cache["ts"] = time.time()
+                _telemetry_cache["value"] = val
+            return val
     
     @staticmethod
     def ensure_default_commands() -> None:
@@ -800,7 +883,7 @@ class RobotAPI:
                 pass
     
     @staticmethod
-    def get_commands() -> Dict[str, Any]:
+    def get_commands(include_all: bool = False) -> Dict[str, Any]:
         """
         Получает список быстрых команд из commands.json.
         
@@ -808,35 +891,68 @@ class RobotAPI:
             Список команд
         """
         try:
+            try:
+                ttl = float(os.environ.get("RGW_COMMANDS_CACHE_TTL", "2.0"))
+            except Exception:
+                ttl = 2.0
             RobotAPI.ensure_default_commands()
             RobotAPI.ensure_default_control_layouts()
             commands_path = PROJECT_ROOT / "data" / "commands.json"
+            cache_key = "all" if include_all else "filtered"
+            now = time.time()
+            mtime = None
+            try:
+                if commands_path.exists():
+                    mtime = float(commands_path.stat().st_mtime)
+            except Exception:
+                mtime = None
+            if ttl > 0:
+                with _commands_cache_lock:
+                    ent = _commands_cache.get(cache_key) or {}
+                if ent:
+                    ent_ts = float(ent.get("ts") or 0.0)
+                    ent_mtime = ent.get("mtime")
+                    ent_val = ent.get("value")
+                    if ent_val is not None and (now - ent_ts) <= ttl and ent_mtime == mtime:
+                        return ent_val
             if commands_path.exists():
                 with open(commands_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    return {
+                    all_cmds = data.get("commands", [])
+                    cmds = (
+                        list(all_cmds)
+                        if include_all
+                        else RobotAPI._filter_commands_by_robot_type(all_cmds, RobotAPI._get_robot_type())
+                    )
+                    val = {
                         "success": True,
-                        "commands": RobotAPI._filter_commands_by_robot_type(
-                            data.get("commands", []),
-                            RobotAPI._get_robot_type(),
-                        ),
+                        "commands": cmds,
                         "version": data.get("version", "1.0.0"),
                         "lastUpdated": data.get("lastUpdated")
                     }
+                    if ttl > 0:
+                        with _commands_cache_lock:
+                            _commands_cache[cache_key] = {"ts": time.time(), "mtime": mtime, "value": val}
+                    return val
             else:
                 # Возвращаем пустой список если файл не существует
-                return {
+                val = {
                     "success": True,
                     "commands": [],
                     "version": "1.0.0",
                     "lastUpdated": None
                 }
+                if ttl > 0:
+                    with _commands_cache_lock:
+                        _commands_cache[cache_key] = {"ts": time.time(), "mtime": mtime, "value": val}
+                return val
         except Exception as e:
-            return {
+            val = {
                 "success": False,
                 "message": f"Error reading commands: {str(e)}",
                 "commands": []
             }
+            return val
     
     @staticmethod
     def update_commands(new_commands: Dict[str, Any]) -> Dict[str, Any]:

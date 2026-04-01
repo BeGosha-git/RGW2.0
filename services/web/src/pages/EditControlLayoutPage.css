@@ -259,6 +259,8 @@
   border-radius: 12px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.18);
+  /* Slightly reduce vertical footprint on small screens */
+  max-height: calc(100% - 5vh);
 }
 
 .node {

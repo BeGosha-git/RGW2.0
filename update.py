@@ -9,6 +9,23 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import network
 import api.network_api as network_api_module
+from api import _net as net_policy
+
+
+def _try_get_version_from(ip: str, port: int) -> Optional[Dict[str, Any]]:
+    """Best-effort: refresh + GET /api/version from ip:port. Returns version_response dict or None."""
+    try:
+        base_url = f"http://{ip}:{int(port)}"
+        import network as net_mod
+        try:
+            refresh_client = net_mod.NetworkClient(timeout=net_policy.timeout_version_refresh())
+            refresh_client.post(f"{base_url.rstrip('/')}/api/version/refresh", {"skip_venv_archive": True})
+        except Exception:
+            pass
+        check_client = net_mod.NetworkClient(timeout=net_policy.timeout_version_check())
+        return check_client.get_from_robot(base_url, "version")
+    except Exception:
+        return None
 
 
 def calculate_file_size(filepath: str) -> int:
@@ -273,7 +290,7 @@ def update_version_file(skip_venv_archive: bool = False):
         return False
 
 
-def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> bool:
+def download_file_from_robot(source_ip: str, filepath: str, local_path: str, api_port: Optional[int] = None) -> bool:
     """
     Скачивает файл с другого робота.
     
@@ -286,8 +303,9 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         True если успешно
     """
     try:
-        import services_manager
-        api_port = services_manager.get_api_port()
+        if api_port is None:
+            import services_manager
+            api_port = services_manager.get_api_port()
         client = network.NetworkClient()
         url = f"http://{source_ip}:{api_port}/api/files/download?path={filepath}"
         
@@ -316,7 +334,7 @@ def download_file_from_robot(source_ip: str, filepath: str, local_path: str) -> 
         return False
 
 
-def download_venv_from_robot(source_ip: str, python_version: str = None) -> bool:
+def download_venv_from_robot(source_ip: str, python_version: str = None, api_port: Optional[int] = None) -> bool:
     """
     Скачивает venv с другого робота как архив для конкретной версии Python.
     
@@ -348,7 +366,8 @@ def download_venv_from_robot(source_ip: str, python_version: str = None) -> bool
         venv_name = f"venv-{python_version}"
         venv_path = Path(venv_name)
         venv_archive = f"venv-{python_version}.tar.gz"
-        api_port = services_manager.get_api_port()
+        if api_port is None:
+            api_port = services_manager.get_api_port()
         
         client = network.NetworkClient()
         url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
@@ -393,7 +412,7 @@ def download_venv_from_robot(source_ip: str, python_version: str = None) -> bool
         return False
 
 
-def check_venv_exists_on_robot(source_ip: str, python_version: str = None) -> bool:
+def check_venv_exists_on_robot(source_ip: str, python_version: str = None, api_port: Optional[int] = None) -> bool:
     """
     Проверяет наличие venv на другом роботе для конкретной версии Python.
     
@@ -407,7 +426,8 @@ def check_venv_exists_on_robot(source_ip: str, python_version: str = None) -> bo
     try:
         import requests
         import services_manager
-        api_port = services_manager.get_api_port()
+        if api_port is None:
+            api_port = services_manager.get_api_port()
         
         # Определяем версию Python
         if not python_version:
@@ -418,7 +438,7 @@ def check_venv_exists_on_robot(source_ip: str, python_version: str = None) -> bo
                     venv_archive = f"venv-{version}.tar.gz"
                     url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
                     try:
-                        response = requests.head(url, timeout=5)
+                        response = requests.head(url, timeout=net_policy.timeout_file_head())
                         if response.status_code == 200:
                             return True
                     except Exception:
@@ -427,13 +447,13 @@ def check_venv_exists_on_robot(source_ip: str, python_version: str = None) -> bo
         
         venv_archive = f"venv-{python_version}.tar.gz"
         url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
-        response = requests.head(url, timeout=5)
+        response = requests.head(url, timeout=net_policy.timeout_file_head())
         return response.status_code == 200
     except Exception:
         return False
 
 
-def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
+def get_remote_file_size(source_ip: str, filepath: str, api_port: Optional[int] = None) -> Optional[int]:
     """
     Получает размер файла на удаленном роботе.
     
@@ -447,9 +467,10 @@ def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
     try:
         import requests
         import services_manager
-        api_port = services_manager.get_api_port()
+        if api_port is None:
+            api_port = services_manager.get_api_port()
         url = f"http://{source_ip}:{api_port}/api/files/info?filepath={filepath}"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=net_policy.timeout_file_info())
         if response.status_code == 200:
             data = response.json()
             if data.get("success") and data.get("is_file"):
@@ -460,7 +481,7 @@ def get_remote_file_size(source_ip: str, filepath: str) -> Optional[int]:
 
 
 def actualize_file_list_from_source_and_local(
-    source_ip: str, files_list: List[Dict[str, Any]]
+    source_ip: str, files_list: List[Dict[str, Any]], api_port: Optional[int] = None
 ) -> tuple:
     """
     Проверяет файлы на источнике и локально, актуализирует размеры (вес).
@@ -481,7 +502,7 @@ def actualize_file_list_from_source_and_local(
             file_info["size"] = file_info.get("size")
             continue
         # Актуализируем размер на источнике
-        remote_size = get_remote_file_size(source_ip, path)
+        remote_size = get_remote_file_size(source_ip, path, api_port=api_port)
         if remote_size is not None:
             file_info["size"] = remote_size
         else:
@@ -503,7 +524,7 @@ def actualize_file_list_from_source_and_local(
     return files_list, need_update, up_to_date
 
 
-def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
+def update_files_from_robot(source_ip: str, files_to_update: list, api_port: Optional[int] = None) -> tuple:
     """
     Обновляет файлы с другого робота, загружая только файлы с отличающимся размером.
     
@@ -559,7 +580,7 @@ def update_files_from_robot(source_ip: str, files_to_update: list) -> tuple:
         # Загружаем файл
         print(f"Downloading {filepath} (local: {local_size}, remote: {remote_size})...", flush=True)
         try:
-            if download_file_from_robot(source_ip, filepath, local_path):
+            if download_file_from_robot(source_ip, filepath, local_path, api_port=api_port):
                 updated_count += 1
                 print(f"Successfully downloaded {filepath}", flush=True)
             else:
@@ -687,37 +708,38 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
     Returns:
         Словарь с информацией о версии и IP источника, или None
     """
-    import services_manager
-    api_port = services_manager.get_api_port()
     network_api = network_api_module.NetworkAPI()
     best_version = None
     best_version_info = None
     best_source_ip = None
+    best_source_port: Optional[int] = None
     
-    print(f"Checking versions from {len(robot_ips)} robot(s) on port {api_port}: {robot_ips}", flush=True)
+    ports_to_try = net_policy.candidate_api_ports()
+    print(
+        f"Checking versions from {len(robot_ips)} robot(s) on ports {ports_to_try}: {robot_ips}",
+        flush=True,
+    )
     
     for ip in robot_ips:
         try:
-            base_url = f"http://{ip}:{api_port}"
-            print(f"Checking version from {ip}:{api_port}...", flush=True)
-            import network as net_mod
-            # Сначала просим робота актуализировать свой version.json (список файлов и размеры, без пересборки venv)
-            refresh_url = f"{base_url.rstrip('/')}/api/version/refresh"
-            try:
-                refresh_client = net_mod.NetworkClient(timeout=30)
-                refresh_client.post(refresh_url, {"skip_venv_archive": True})
-            except Exception:
-                pass
-            # Явный таймаут 5 сек на запрос версии
-            check_client = net_mod.NetworkClient(timeout=5)
-            version_response = check_client.get_from_robot(base_url, "version")
+            version_response = None
+            used_port: Optional[int] = None
+            for p in ports_to_try:
+                print(f"Checking version from {ip}:{p}...", flush=True)
+                version_response = _try_get_version_from(ip, p)
+                if version_response and isinstance(version_response, dict) and version_response.get("success"):
+                    used_port = int(p)
+                    break
             
             if version_response and version_response.get("success"):
                 version_data = version_response.get("version", {})
                 version_str = version_data.get("version", "0.00.00")
                 version_type = version_data.get("version_type", "STABLE")
                 
-                print(f"Found version {version_str} ({version_type}) from {ip} with {len(version_data.get('files', []))} files", flush=True)
+                print(
+                    f"Found version {version_str} ({version_type}) from {ip}:{used_port} with {len(version_data.get('files', []))} files",
+                    flush=True,
+                )
                 
                 if not version_matches_priority(version_type, priority):
                     print(f"Version {version_str} ({version_type}) does not match priority {priority}, skipping", flush=True)
@@ -725,10 +747,11 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
                     continue
                 
                 if best_version is None or network_api._compare_versions(version_str, best_version) > 0:
-                    print(f"New best version: {version_str} from {ip}", flush=True)
+                    print(f"New best version: {version_str} from {ip}:{used_port}", flush=True)
                     best_version = version_str
                     best_version_info = version_data
                     best_source_ip = ip
+                    best_source_port = used_port
             else:
                 print(f"No version info from {ip}: {version_response}", flush=True)
             print(f"Done with {ip}", flush=True)
@@ -740,12 +763,13 @@ def find_best_version_by_priority(robot_ips: List[str], priority: str) -> Option
             continue
     
     if best_version_info and best_source_ip:
-        print(f"Best version found: {best_version} from {best_source_ip}", flush=True)
+        print(f"Best version found: {best_version} from {best_source_ip}:{best_source_port}", flush=True)
         return {
             "success": True,
             "version": best_version_info,
             "source_ip": best_source_ip,
-            "source_url": f"http://{best_source_ip}:{api_port}"
+            "source_port": best_source_port,
+            "source_url": f"http://{best_source_ip}:{best_source_port}" if best_source_port else f"http://{best_source_ip}"
         }
     else:
         print(f"No suitable version found (checked {len(robot_ips)} robots)", flush=True)
@@ -872,6 +896,7 @@ def update_system(force: bool = False, source_ip: str = None):
         return True
 
     chosen_source_ip = version_info.get("source_ip")
+    chosen_source_port = version_info.get("source_port")
     version_data = version_info.get("version", {})
     remote_version = version_data.get("version", "0.00.00")
     remote_version_type = version_data.get("version_type", "STABLE")
@@ -900,7 +925,7 @@ def update_system(force: bool = False, source_ip: str = None):
     files_to_update = version_data.get("files", [])
     print("Actualizing file list from source and local...", flush=True)
     files_to_update, need_update_count, up_to_date_count = actualize_file_list_from_source_and_local(
-        chosen_source_ip, files_to_update
+        chosen_source_ip, files_to_update, api_port=chosen_source_port
     )
     print(f"Actualized: {need_update_count} file(s) need update, {up_to_date_count} file(s) up to date (same size)", flush=True)
 
@@ -937,10 +962,10 @@ def update_system(force: bool = False, source_ip: str = None):
     )
 
     venv_updated = False
-    if check_venv_exists_on_robot(chosen_source_ip):
-        venv_updated = download_venv_from_robot(chosen_source_ip)
+    if check_venv_exists_on_robot(chosen_source_ip, api_port=chosen_source_port):
+        venv_updated = download_venv_from_robot(chosen_source_ip, api_port=chosen_source_port)
 
-    success, updated_count, skipped_count, error_count = update_files_from_robot(chosen_source_ip, files_to_update)
+    success, updated_count, skipped_count, error_count = update_files_from_robot(chosen_source_ip, files_to_update, api_port=chosen_source_port)
 
     # Обновляем версию только если:
     # 1. Все файлы успешно загружены (success = True), ИЛИ

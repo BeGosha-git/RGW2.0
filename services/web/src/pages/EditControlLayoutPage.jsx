@@ -4,6 +4,7 @@ import LayoutToolbar from '../components/editctl/LayoutToolbar'
 import WorkspaceCanvas from '../components/editctl/WorkspaceCanvas'
 import NodeProgramEditor from '../components/editctl/NodeProgramEditor'
 import { normalizeProgramFromButton, derivePrimaryCommandId } from '../utils/controlProgram'
+import { buildDefaultControlLayouts } from '../utils/defaultControlLayouts'
 
 const LAYOUT_FILEPATH = 'data/control_layouts.json'
 
@@ -72,7 +73,9 @@ function EditControlLayoutPage() {
         // Не блокируем загрузку раскладок медленными сетевыми запросами (find_robots может быть долгим)
         const [layoutsResp, commandsResp, ipsResp, statusResp] = await Promise.all([
           fetch(`/api/files/read?filepath=${encodeURIComponent(LAYOUT_FILEPATH)}`),
-          fetch('/api/robot/commands'),
+          // In editor/dispatcher we need the full commands list (not filtered by local RobotType),
+          // because we may build scenarios for remote robots of different types.
+          fetch('/api/robot/commands?all=1'),
           fetch('/api/network/scanned_ips'),
           fetch('/api/status'),
         ])
@@ -121,9 +124,22 @@ function EditControlLayoutPage() {
         } else {
           // If file read failed or content invalid, keep current state but show error once.
           if (!loadedOnceRef.current) {
-            setLayoutData(defaultData)
-            setLayoutIndex(0)
-            loadedOnceRef.current = true
+            // First-run bootstrap: create base layouts file
+            try {
+              const created = buildDefaultControlLayouts()
+              await fetch('/api/files/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filepath: LAYOUT_FILEPATH, content: JSON.stringify(created, null, 2) }),
+              })
+              setLayoutData(created)
+              setLayoutIndex(0)
+            } catch (_e) {
+              setLayoutData(defaultData)
+              setLayoutIndex(0)
+            } finally {
+              loadedOnceRef.current = true
+            }
           }
           if (!layoutsJson?.success) setError(layoutsJson?.message || 'Не удалось загрузить раскладки')
         }
@@ -186,6 +202,26 @@ function EditControlLayoutPage() {
               const ip = String(item?.ip || '').trim()
               if (!ip) continue
               const info = item?.info || {}
+              const robotTypeRaw =
+                info?.robot?.type ??
+                info?.robot?.robot_type ??
+                info?.robot?.robotType ??
+                info?.settings?.RobotType ??
+                info?.settings?.robot_type ??
+                info?.settings?.robotType
+              const robotType = String(robotTypeRaw || '').trim().toUpperCase() || null
+              const robotNumRaw =
+                info?.robot?.number ??
+                info?.robot?.robot_number ??
+                info?.robot?.robotNumber ??
+                info?.robot?.id ??
+                info?.robot?.robot_id ??
+                info?.robot?.robotId ??
+                info?.settings?.RobotNumber ??
+                info?.settings?.robot_number ??
+                info?.settings?.RobotId ??
+                info?.settings?.robot_id
+              const robotNumber = String(robotNumRaw ?? '').trim() || null
               const nameRaw =
                 info?.robot?.name ??
                 info?.robot?.robot_name ??
@@ -201,11 +237,17 @@ function EditControlLayoutPage() {
                 info?.settings?.robot_group
               const group = String(groupRaw || '').toLowerCase().trim()
               const base = COMMAND_COLORS[group] || '#64748b'
+              const niceName =
+                robotType
+                  ? `${robotType}${robotNumber ? ` #${robotNumber}` : ''}`
+                  : String(nameRaw || '').trim() || null
               nextMeta[ip] = {
                 bg: base,
                 fg: pickFg(base),
                 group,
-                name: String(nameRaw || '').trim() || null,
+                name: niceName,
+                robotType,
+                robotNumber,
               }
             }
             setIpMeta(nextMeta)

@@ -9,6 +9,8 @@ import {
 } from '../utils/controlProgram'
 import { executeButtonScenario } from '../utils/controlScenarioExecution'
 import IconGlyph from '../components/IconGlyph'
+import { buildDefaultControlLayouts } from '../utils/defaultControlLayouts'
+import WebRTCVideo from '../components/WebRTCVideo'
 import './ControlPage.css'
 
 const LAYOUT_FILEPATH = 'data/control_layouts.json'
@@ -51,6 +53,8 @@ function ControlPage() {
   const [cameraIndex, setCameraIndex] = useState(0)
   const [info, setInfo] = useState('')
   const [error, setError] = useState('')
+  const [telemetry, setTelemetry] = useState(null)
+  const [camDebug, setCamDebug] = useState(null)
   // Safety: require double click to run any scenario button
   const lastClickRef = useRef(new Map()) // buttonId -> ts
   const touchStartX = useRef(null)
@@ -83,7 +87,8 @@ function ControlPage() {
       try {
         const [layoutsResp, commandsResp, ipsResp, camerasResp, statusResp] = await Promise.all([
           fetch(`/api/files/read?filepath=${encodeURIComponent(LAYOUT_FILEPATH)}`),
-          fetch('/api/robot/commands'),
+          // UI may control remote robots of other types; don't hide commands by local RobotType.
+          fetch('/api/robot/commands?all=1'),
           fetch('/api/network/scanned_ips'),
           fetch('/api/cameras/list'),
           fetch('/api/status'),
@@ -101,6 +106,19 @@ function ControlPage() {
             if (Array.isArray(parsed.layouts) && parsed.layouts.length) {
               setLayoutData(parsed)
             }
+          } catch (_e) {
+            setLayoutData(defaultLayouts)
+          }
+        } else if (!layoutsJson?.success && String(layoutsJson?.message || '').toLowerCase().includes('not found')) {
+          // First-run bootstrap: create base layouts file
+          try {
+            const created = buildDefaultControlLayouts()
+            await fetch('/api/files/create', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filepath: LAYOUT_FILEPATH, content: JSON.stringify(created, null, 2) }),
+            })
+            setLayoutData(created)
           } catch (_e) {
             setLayoutData(defaultLayouts)
           }
@@ -138,8 +156,48 @@ function ControlPage() {
   }, [])
 
   useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 1200)
+      try {
+        const r = await fetch('/api/robot/telemetry', { signal: controller.signal })
+        const j = await r.json().catch(() => null)
+        if (!alive) return
+        if (j && typeof j === 'object') setTelemetry(j)
+      } catch (_e) {
+        // keep previous telemetry; don't spam errors
+      } finally {
+        clearTimeout(timeout)
+      }
+    }
+    tick()
+    const t = setInterval(tick, 2500)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [])
+
+  useEffect(() => {
     return () => {
       mountedRef.current = false
+    }
+  }, [])
+
+  // Best-effort: on mobile landscape try to hide browser UI by nudging scroll.
+  useEffect(() => {
+    const nudge = () => {
+      try {
+        window.scrollTo(0, 1)
+      } catch (_e) {}
+    }
+    nudge()
+    window.addEventListener('orientationchange', nudge)
+    window.addEventListener('resize', nudge)
+    return () => {
+      window.removeEventListener('orientationchange', nudge)
+      window.removeEventListener('resize', nudge)
     }
   }, [])
 
@@ -252,19 +310,32 @@ function ControlPage() {
     <div className="control-page">
       <div className="control-camera-layer">
         {currentCameraId ? (
-          <img
-            src={`/api/cameras/${currentCameraId}/mjpeg`}
-            alt={currentCameraId}
-            className="control-camera"
-            draggable={false}
-            onDragStart={(event) => event.preventDefault()}
-          />
+          <div className="control-camera control-camera--webrtc">
+            <WebRTCVideo
+              signalingUrl={`/api/cameras/${currentCameraId}/webrtc/offer`}
+              label={currentCameraId}
+              qualityMode="high"
+              onDebug={setCamDebug}
+            />
+          </div>
         ) : (
           <div className="control-camera-empty">Камера не найдена</div>
         )}
       </div>
 
       <div className="control-overlay">
+        <div className="control-top-left">
+          {telemetry?.soc != null ? (
+            <div className={`telemetry-chip${Number(telemetry.soc) <= 15 ? ' telemetry-warn' : ''}`} title="Заряд батареи">
+              <b>🔋</b> {Math.round(Number(telemetry.soc))}%
+            </div>
+          ) : (
+            <div className="telemetry-chip" title={telemetry?.message || 'нет данных'}>
+              <b>🔋</b> —
+            </div>
+          )}
+        </div>
+
         <div className="control-top">
           <button className="overlay-chip" onClick={() => switchLayout(-1)}>Предыдущая</button>
           <div className="overlay-chip layout-name">{activeLayout?.name || 'Раскладка'}</div>
@@ -273,6 +344,15 @@ function ControlPage() {
         </div>
 
         <div className="control-top-right">
+          {telemetry?.motor_temps?.max != null ? (
+            <div className={`telemetry-chip${Number(telemetry.motor_temps.max) >= 70 ? ' telemetry-warn' : ''}`} title="Температура моторов (макс/сред)">
+              <b>🌡</b> {Math.round(Number(telemetry.motor_temps.max))}° / {telemetry.motor_temps.avg != null ? Math.round(Number(telemetry.motor_temps.avg)) : '—'}°
+            </div>
+          ) : (
+            <div className="telemetry-chip" title={telemetry?.message || 'нет данных'}>
+              <b>🌡</b> —
+            </div>
+          )}
           {unavailableTargets.length > 0 && (
             <div className="warning-badge" title={`Недоступны: ${unavailableTargets.join(', ')}`}>!</div>
           )}
@@ -320,6 +400,14 @@ function ControlPage() {
               </button>
             )
           })}
+        </div>
+
+        <div className="control-debug">
+          <div className="telemetry-chip" title="Debug: WebRTC качество и FPS">
+            <b>dbg</b>{' '}
+            {camDebug?.fps != null ? `${Math.round(Number(camDebug.fps))}fps` : '—fps'} ·{' '}
+            {camDebug?.quality || '—'} · {camDebug?.state || '—'}
+          </div>
         </div>
 
         <div

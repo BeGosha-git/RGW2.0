@@ -84,7 +84,7 @@ def scan_network(port: Optional[int] = None, network_base: Optional[str] = None)
         if port is None:
             try:
                 import services_manager
-                port = services_manager.get_scanner_port()
+                port = int(services_manager.get_scanner_port())
             except Exception:
                 port = 8080
         
@@ -94,7 +94,7 @@ def scan_network(port: Optional[int] = None, network_base: Optional[str] = None)
         timeout = 0.5 / 1.5
         
         # Сканируем сеть
-        found_ips = network.find_robots_in_network(port=port, timeout=timeout, network_base=network_base)
+        found_ips = network.find_robots_in_network(port=int(port), timeout=timeout, network_base=network_base)
         
         scan_end = time.time()
         scan_duration = scan_end - scan_start

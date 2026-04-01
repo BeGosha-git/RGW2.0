@@ -191,6 +191,10 @@ def create_venv_archive(root: Optional[Path] = None, python_version: str = None)
         return False
     
     try:
+        import gzip
+        import io
+        import os as _os
+        import stat as _stat
         import tarfile
 
         base = Path(root) if root else Path(".")
@@ -208,8 +212,85 @@ def create_venv_archive(root: Optional[Path] = None, python_version: str = None)
         if not venv_ready_flag.exists():
             return False
 
-        with tarfile.open(venv_archive, 'w:gz') as tar:
-            tar.add(venv_path, arcname=venv_name, filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+        # Deterministic tar.gz:
+        # - stable path order
+        # - fixed uid/gid/uname/gname
+        # - fixed mtime
+        # - gzip without timestamp (mtime=0)
+        def _should_skip(rel_posix: str) -> bool:
+            if not rel_posix:
+                return False
+            parts = rel_posix.split("/")
+            if "__pycache__" in parts:
+                return True
+            if rel_posix.endswith(".pyc"):
+                return True
+            return False
+
+        def _mk_info(arcname: str, st: _os.stat_result, is_dir: bool) -> tarfile.TarInfo:
+            ti = tarfile.TarInfo(name=arcname)
+            ti.uid = 0
+            ti.gid = 0
+            ti.uname = ""
+            ti.gname = ""
+            ti.mtime = 0
+            # Preserve basic permissions (stable)
+            try:
+                ti.mode = _stat.S_IMODE(int(st.st_mode))
+            except Exception:
+                ti.mode = 0o755 if is_dir else 0o644
+            if is_dir:
+                ti.type = tarfile.DIRTYPE
+                ti.size = 0
+            else:
+                try:
+                    ti.size = int(st.st_size)
+                except Exception:
+                    ti.size = 0
+            return ti
+
+        # Use gzip fileobj with mtime=0 to avoid embedding current time.
+        with open(venv_archive, "wb") as raw_out:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw_out, compresslevel=6, mtime=0) as gz:
+                with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
+                    # Add the top directory entry explicitly.
+                    st_root = _os.stat(str(venv_path))
+                    tar.addfile(_mk_info(venv_name, st_root, is_dir=True))
+
+                    # Walk and add in sorted order for determinism.
+                    for dirpath, dirnames, filenames in _os.walk(str(venv_path)):
+                        rel_dir = _os.path.relpath(dirpath, str(venv_path))
+                        rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
+                        if _should_skip(rel_dir):
+                            dirnames[:] = []
+                            continue
+
+                        # Ensure deterministic traversal order.
+                        dirnames[:] = sorted([d for d in dirnames if not _should_skip((rel_dir + "/" + d).strip("/"))])
+                        filenames = sorted(filenames)
+
+                        # Add directory entry (except root which already added)
+                        if rel_dir:
+                            arc_dir = f"{venv_name}/{rel_dir}"
+                            try:
+                                st_d = _os.stat(dirpath)
+                                tar.addfile(_mk_info(arc_dir, st_d, is_dir=True))
+                            except Exception:
+                                pass
+
+                        for fn in filenames:
+                            rel_file = (rel_dir + "/" + fn).strip("/")
+                            if _should_skip(rel_file):
+                                continue
+                            fs_path = _os.path.join(dirpath, fn)
+                            arc_file = f"{venv_name}/{rel_file}"
+                            try:
+                                st_f = _os.stat(fs_path)
+                                ti = _mk_info(arc_file, st_f, is_dir=False)
+                                with open(fs_path, "rb") as f:
+                                    tar.addfile(ti, fileobj=f)
+                            except Exception:
+                                continue
 
         return True
 

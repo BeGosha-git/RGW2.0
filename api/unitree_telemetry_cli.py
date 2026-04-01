@@ -94,6 +94,7 @@ def main() -> int:
             return False
         return False
 
+    # G1 uses unitree_hg LowState_ on rt/lowstate; topic name confirmed by Unitree SDK2 docs.
     ok = try_read_lowstate_go() or try_read_lowstate_hg()
 
     soc: Optional[float] = None
@@ -115,7 +116,9 @@ def main() -> int:
         try:
             ms = getattr(lowstate, "motor_state", None)
             if ms is not None:
-                for m in list(ms):
+                # cyclonedds arrays are iterable, but guard just in case
+                seq = list(ms) if not isinstance(ms, list) else ms
+                for m in seq:
                     t = getattr(m, "temperature", None)
                     if t is None:
                         continue
@@ -145,16 +148,18 @@ def main() -> int:
         except Exception:
             pass
 
-    # If HG lowstate doesn't include BMS, try separate HG BmsState topic name variants.
+    # HG LowState_ (G1/H1) does not include BMS in our IDL.
+    # Try separate HG BmsState topic name variants.
     if soc is None:
         try:
             from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_ as HGBmsState_
 
-            for topic in ("rt/bmsstate", "rt/bms_state", "rt/bms"):
+            # Common names seen in SDK wrappers / deployments
+            for topic in ("rt/bmsstate", "rt/bms_state", "rt/bms", "rt/bmsState", "rt/bmsState_"):
                 try:
                     sub = ChannelSubscriber(topic, HGBmsState_)
                     sub.Init()
-                    msg = sub.Read(timeout=1.5)
+                    msg = sub.Read(timeout=2.5)
                     sub.Close()
                     if msg is not None and hasattr(msg, "soc"):
                         soc = float(getattr(msg, "soc"))

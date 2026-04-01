@@ -405,8 +405,15 @@ function ControlPage() {
         <div className="control-debug">
           <div className="telemetry-chip" title="Debug: WebRTC качество и FPS">
             <b>dbg</b>{' '}
-            {camDebug?.fps != null ? `${Math.round(Number(camDebug.fps))}fps` : '—fps'} ·{' '}
-            {camDebug?.quality || '—'} · {camDebug?.state || '—'}
+            {camDebug?.fps != null ? `${Math.round(Number(camDebug.fps))}fps` : '—fps'}
+            {camDebug?.net?.fps != null ? `/${Math.round(Number(camDebug.net.fps))}` : ''}
+            {' '}·{' '}
+            {camDebug?.qualityPct != null ? `${Math.round(Number(camDebug.qualityPct))}%` : (camDebug?.quality || '—')} ·{' '}
+            {camDebug?.resPct != null ? `${Math.round(Number(camDebug.resPct))}%` : '—'}{' '}
+            {camDebug?.res?.w && camDebug?.res?.h ? `(${camDebug.res.w}×${camDebug.res.h})` : ''} ·{' '}
+            {camDebug?.net?.lossPct != null ? `loss ${camDebug.net.lossPct.toFixed(1)}%` : 'loss —'} ·{' '}
+            {camDebug?.net?.jitterMs != null ? `jit ${Math.round(Number(camDebug.net.jitterMs))}ms` : 'jit —'} ·{' '}
+            {camDebug?.state || '—'}
           </div>
         </div>
 

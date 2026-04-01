@@ -294,8 +294,9 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
                     pass
                 print(f"[venv-{python_version}] venv marked not-ready (critical deps missing).", flush=True)
                 return False
-            # Создаем/обновляем архив
-            venv_archive = Path(f"venv-{python_version}.tar.gz")
+            # Создаем/обновляем архив (архитектура-специфично, с fallback на legacy имя)
+            host_arch = _host_architecture()
+            venv_archive = Path(f"venv-{python_version}-{host_arch}.tar.gz")
             if not venv_archive.exists() or packages_updated:
                 try:
                     create_venv_archive_for_version(python_version)
@@ -303,11 +304,20 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
                     pass
             return True
     
-    # Проверяем наличие архива venv для этой версии
-    venv_archive = Path(f"venv-{python_version}.tar.gz")
-    venv_meta = Path(f"venv-{python_version}.meta.json")
-    if venv_archive.exists():
-        print(f"Found venv-{python_version}.tar.gz, extracting...", flush=True)
+    # Проверяем наличие архива venv для этой версии (архитектура-специфично)
+    host_arch = _host_architecture()
+    venv_archive_candidates = [
+        Path(f"venv-{python_version}-{host_arch}.tar.gz"),
+        Path(f"venv-{python_version}.tar.gz"),  # legacy fallback
+    ]
+    venv_meta_candidates = [
+        Path(f"venv-{python_version}-{host_arch}.meta.json"),
+        Path(f"venv-{python_version}.meta.json"),  # legacy fallback
+    ]
+    venv_archive = next((p for p in venv_archive_candidates if p.exists()), None)
+    venv_meta = next((p for p in venv_meta_candidates if p.exists()), None)
+    if venv_archive is not None and venv_archive.exists():
+        print(f"Found {venv_archive.name}, extracting...", flush=True)
         try:
             if venv_meta.exists():
                 with open(venv_meta, "r", encoding="utf-8") as f:
@@ -348,7 +358,7 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
                 except Exception:
                     pass
                 raise RuntimeError("Incompatible venv archive architecture")
-            print(f"Successfully extracted venv-{python_version}.tar.gz", flush=True)
+            print(f"Successfully extracted {venv_archive.name}", flush=True)
 
             # Restore execute permissions on all bin/ scripts — tarfile extraction
             # can lose the +x bit depending on the platform umask or filter used.
@@ -373,7 +383,7 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
                 pass
             return True
         except Exception as e:
-            print(f"Warning: Failed to extract venv-{python_version}.tar.gz: {e}", flush=True)
+            print(f"Warning: Failed to extract {venv_archive.name if venv_archive else f'venv-{python_version}.tar.gz'}: {e}", flush=True)
     
     # Создаем новый venv
     print(f"Creating virtual environment for Python {python_version}...", flush=True)
@@ -431,9 +441,9 @@ def setup_virtual_environment_for_version(python_version: str) -> bool:
     # Создаем архив
     try:
         create_venv_archive_for_version(python_version)
-        print(f"Created archive venv-{python_version}.tar.gz", flush=True)
+        print(f"Created archive venv-{python_version}-{_host_architecture()}.tar.gz", flush=True)
     except Exception as e:
-        print(f"Warning: Could not create venv-{python_version}.tar.gz archive: {e}", flush=True)
+        print(f"Warning: Could not create venv-{python_version}-{_host_architecture()}.tar.gz archive: {e}", flush=True)
     
     print(f"Virtual environment for Python {python_version} created successfully", flush=True)
     return True
@@ -917,12 +927,15 @@ def create_venv_archive_for_version(python_version: str) -> bool:
         True если успешно
     """
     try:
-        import tarfile
+        # Use the updater's deterministic archive builder to avoid
+        # unstable gzip timestamps and to embed the host arch in filename.
+        import update as _update
         
         venv_name = f"venv-{python_version}"
         venv_path = Path(venv_name)
-        venv_archive = Path(f"{venv_name}.tar.gz")
-        venv_meta = Path(f"{venv_name}.meta.json")
+        host_arch = _host_architecture()
+        venv_archive = Path(f"{venv_name}-{host_arch}.tar.gz")
+        venv_meta = Path(f"{venv_name}-{host_arch}.meta.json")
         
         if not venv_path.exists():
             return False
@@ -930,13 +943,13 @@ def create_venv_archive_for_version(python_version: str) -> bool:
         venv_ready_flag = venv_path / ".ready"
         if not venv_ready_flag.exists():
             return False
-        
-        with tarfile.open(venv_archive, 'w:gz') as tar:
-            tar.add(venv_path, arcname=venv_name, filter=lambda tarinfo: None if '__pycache__' in tarinfo.name else tarinfo)
+
+        if not _update.create_venv_archive(Path("."), python_version, arch=host_arch):
+            return False
         try:
             meta = {
                 "python_version": python_version,
-                "host_arch": _host_architecture(),
+                "host_arch": host_arch,
                 "cyclonedds_arch": _venv_cyclonedds_arch(venv_path, python_version),
             }
             with open(venv_meta, "w", encoding="utf-8") as f:

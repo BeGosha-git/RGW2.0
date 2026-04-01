@@ -19,6 +19,8 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
   const [state, setState] = useState('connecting') // connecting | connected | error
   const [effectiveQuality, setEffectiveQuality] = useState(qualityMode)
   const [fps, setFps] = useState(null)
+  const [res, setRes] = useState({ w: null, h: null })
+  const [net, setNet] = useState({ fps: null, lossPct: null, jitterMs: null })
   const lastQualityChangeRef = useRef(0)
   const goodStreakRef = useRef(0)
 
@@ -29,10 +31,23 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
   useEffect(() => {
     try {
       if (typeof onDebug === 'function') {
-        onDebug({ state, quality: effectiveQuality, fps })
+        const qPct = effectiveQuality === 'low' ? 30 : effectiveQuality === 'high' ? 100 : null
+        const w = Number(res?.w || 0) || null
+        const h = Number(res?.h || 0) || null
+        const base = 1920 * 1080
+        const resPct = w && h ? Math.max(1, Math.min(100, Math.round((w * h * 100) / base))) : null
+        onDebug({
+          state,
+          quality: effectiveQuality,
+          qualityPct: qPct,
+          fps,
+          net,
+          res: w && h ? { w, h } : null,
+          resPct,
+        })
       }
     } catch (_e) {}
-  }, [state, effectiveQuality, fps, onDebug])
+  }, [state, effectiveQuality, fps, net, res, onDebug])
 
   useEffect(() => {
     if (!signalingUrl) {
@@ -62,6 +77,15 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
         pc.ontrack = (event) => {
           if (!cancelled && videoRef.current && event.streams[0]) {
             videoRef.current.srcObject = event.streams[0]
+          // Best-effort: request small playout buffer (~0.5s) for realtime feel.
+          try {
+            const recvs = pc.getReceivers ? pc.getReceivers() : []
+            for (const r of recvs) {
+              if (r && r.track && r.track.kind === 'video' && 'playoutDelayHint' in r) {
+                r.playoutDelayHint = 0.5
+              }
+            }
+          } catch (_e) {}
             setState('connected')
             retryDelay = 3000 // reset backoff on success
           }
@@ -147,7 +171,7 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
     if (!pc || typeof pc.getStats !== 'function') return
 
     let cancelled = false
-    let prev = { recv: 0, lost: 0, ts: 0 }
+    let prev = { recv: 0, lost: 0, ts: 0, frames: 0 }
 
     const tick = async () => {
       if (cancelled) return
@@ -164,14 +188,24 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
         const recv = Number(inbound.packetsReceived || 0)
         const lost = Number(inbound.packetsLost || 0)
         const jitter = Number(inbound.jitter || 0) // seconds
+        const frames = Number(inbound.framesDecoded || inbound.framesReceived || 0)
 
         const dRecv = prev.ts ? Math.max(0, recv - prev.recv) : 0
         const dLost = prev.ts ? Math.max(0, lost - prev.lost) : 0
-        prev = { recv, lost, ts: now }
+        const dtMs = prev.ts ? Math.max(1, now - prev.ts) : 0
+        const dFrames = prev.ts ? Math.max(0, frames - prev.frames) : 0
+        const fpsNet = prev.ts ? (dFrames * 1000) / dtMs : null
+        prev = { recv, lost, ts: now, frames }
 
         const lossRate = dRecv + dLost > 0 ? dLost / (dRecv + dLost) : 0
         const poor = lossRate > 0.08 || jitter > 0.06
         const good = lossRate < 0.02 && jitter < 0.03
+
+        setNet({
+          fps: fpsNet != null ? Math.max(0, Math.min(120, fpsNet)) : null,
+          lossPct: lossRate ? Math.max(0, Math.min(100, lossRate * 100)) : 0,
+          jitterMs: jitter ? Math.max(0, jitter * 1000) : 0,
+        })
 
         const tNow = Date.now()
         const cooldownOk = tNow - lastQualityChangeRef.current > 8000
@@ -217,6 +251,9 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
 
     const cb = (_now, meta) => {
       if (cancelled) return
+      try {
+        if (v.videoWidth && v.videoHeight) setRes({ w: v.videoWidth, h: v.videoHeight })
+      } catch (_e) {}
       const t = Number(meta?.expectedDisplayTime || performance.now())
       if (!last.t) {
         last = { t, count: 1 }

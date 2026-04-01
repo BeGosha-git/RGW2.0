@@ -1,4 +1,4 @@
-import{r as Pe,j as ze}from"./index-DJOYWQzO.js";/**
+import{r as Pe,j as ze}from"./index-CFUqxFKB.js";/**
  * Copyright (c) 2014-2024 The xterm.js authors. All rights reserved.
  * @license MIT
  *

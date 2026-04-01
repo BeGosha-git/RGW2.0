@@ -5,11 +5,74 @@
 import os
 import json
 import shutil
+import platform
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import network
 import api.network_api as network_api_module
 from api import _net as net_policy
+
+
+def _normalize_arch(arch: str) -> str:
+    a = str(arch or "").strip().lower()
+    if not a:
+        return ""
+    # common normalizations
+    if a in ("x86_64", "amd64"):
+        return "x86_64"
+    if a in ("aarch64", "arm64"):
+        return "aarch64"
+    return a
+
+
+def _host_architecture() -> str:
+    return _normalize_arch(platform.machine())
+
+
+def _venv_archive_name(python_version: str, arch: Optional[str] = None) -> str:
+    a = _normalize_arch(arch) if arch else ""
+    if a:
+        return f"venv-{python_version}-{a}.tar.gz"
+    return f"venv-{python_version}.tar.gz"
+
+
+def _venv_archive_candidates(python_version: str, arch: Optional[str] = None) -> List[str]:
+    """
+    Prefer arch-specific archive, but keep fallback to legacy name for backward compatibility.
+    """
+    a = _normalize_arch(arch) if arch else ""
+    out: List[str] = []
+    if a:
+        out.append(_venv_archive_name(python_version, a))
+    out.append(_venv_archive_name(python_version, None))
+    # de-dup
+    dedup: List[str] = []
+    seen = set()
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            dedup.append(x)
+    return dedup
+
+
+def _local_robot_type() -> str:
+    """
+    Read local RobotType from data/settings.json (e.g. SERVER, G1, GO2...).
+    """
+    try:
+        settings_path = Path("data/settings.json")
+        if not settings_path.exists():
+            return ""
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        return str(data.get("RobotType", "")).strip().upper()
+    except Exception:
+        return ""
+
+
+def _is_venv_artifact(path: str) -> bool:
+    p = str(path or "")
+    return p.startswith("venv-") and (p.endswith(".tar.gz") or p.endswith(".meta.json"))
 
 
 def _try_get_version_from(ip: str, port: int) -> Optional[Dict[str, Any]]:
@@ -107,28 +170,28 @@ def scan_project_files():
                 "size": file_size
             })
     
-    if os.path.exists(services_path):
-        if os.path.isdir(services_path):
-            for item in os.listdir(services_path):
-                if item == '__pycache__':
+    # Also include files under services/**.
+    # IMPORTANT: do NOT publish directories as items in version.json:
+    # directory sizes are not stable (e.g. web build assets), and updater cannot "download a directory" anyway.
+    if os.path.exists(services_path) and os.path.isdir(services_path):
+        for root, dirs, files in os.walk(services_path):
+            root_norm = root.replace('\\', '/')
+            # skip caches/node deps
+            dirs[:] = [d for d in dirs if d not in ('__pycache__', 'node_modules') and not d.startswith('venv-')]
+            if '__pycache__' in root_norm:
+                continue
+            for file in files:
+                if file.endswith('.pyc'):
                     continue
-                
-                item_path = os.path.join(services_path, item)
-                normalized_item_path = item_path.replace('\\', '/')
-                
-                if os.path.isfile(item_path) and item.endswith('.py'):
-                    file_size = calculate_file_size(item_path)
-                    files_list.append({
-                        "path": normalized_item_path,
-                        "size": file_size
-                    })
-                elif os.path.isdir(item_path):
-                    dir_size = calculate_file_size(item_path)
-                    files_list.append({
-                        "path": normalized_item_path,
-                        "size": dir_size,
-                        "is_directory": True
-                    })
+                fp = os.path.join(root, file)
+                if '__pycache__' in fp:
+                    continue
+                normalized_path = fp.replace('\\', '/').lstrip('./')
+                try:
+                    file_size = os.path.getsize(fp)
+                except OSError:
+                    file_size = calculate_file_size(fp)
+                files_list.append({"path": normalized_path, "size": file_size})
     
     return files_list
 
@@ -179,7 +242,7 @@ def check_and_update_version():
         return False
 
 
-def create_venv_archive(root: Optional[Path] = None, python_version: str = None) -> bool:
+def create_venv_archive(root: Optional[Path] = None, python_version: str = None, arch: Optional[str] = None) -> bool:
     """
     Создает архив venv для распространения на другие роботы.
     root: корень проекта; если None — текущая директория.
@@ -200,7 +263,7 @@ def create_venv_archive(root: Optional[Path] = None, python_version: str = None)
         base = Path(root) if root else Path(".")
         
         venv_name = f"venv-{python_version}"
-        venv_archive_name = f"venv-{python_version}.tar.gz"
+        venv_archive_name = _venv_archive_name(python_version, arch or _host_architecture())
         
         venv_path = base / venv_name
         venv_archive = base / venv_archive_name
@@ -298,7 +361,7 @@ def create_venv_archive(root: Optional[Path] = None, python_version: str = None)
         return False
 
 
-def ensure_venv_archive(project_root: Path, python_version: str = None) -> bool:
+def ensure_venv_archive(project_root: Path, python_version: str = None, arch: Optional[str] = None) -> bool:
     """
     Создаёт venv-{version}.tar.gz в project_root, если файла нет или venv обновился.
     python_version: версия Python (например, "3.8", "3.11", "3.13"). Обязательный параметр.
@@ -309,7 +372,7 @@ def ensure_venv_archive(project_root: Path, python_version: str = None) -> bool:
         return False
     
     venv_name = f"venv-{python_version}"
-    archive_name = f"venv-{python_version}.tar.gz"
+    archive_name = _venv_archive_name(python_version, arch or _host_architecture())
     
     archive = project_root / archive_name
     venv_path = project_root / venv_name
@@ -324,7 +387,7 @@ def ensure_venv_archive(project_root: Path, python_version: str = None) -> bool:
         except OSError:
             need_build = True
     if need_build:
-        create_venv_archive(project_root, python_version)
+        create_venv_archive(project_root, python_version, arch=(arch or _host_architecture()))
     return archive.exists()
 
 
@@ -356,7 +419,7 @@ def update_version_file(skip_venv_archive: bool = False):
         if not skip_venv_archive:
             # Создаем архивы для всех версий Python (3.8, 3.11, 3.13)
             for version in ["3.8", "3.11", "3.13"]:
-                ensure_venv_archive(Path("."), version)
+                ensure_venv_archive(Path("."), version, arch=_host_architecture())
         
         files_list = scan_project_files()
         version_data["files"] = files_list
@@ -446,18 +509,24 @@ def download_venv_from_robot(source_ip: str, python_version: str = None, api_por
         
         venv_name = f"venv-{python_version}"
         venv_path = Path(venv_name)
-        venv_archive = f"venv-{python_version}.tar.gz"
+        host_arch = _host_architecture()
+        archive_candidates = _venv_archive_candidates(python_version, host_arch)
         if api_port is None:
             api_port = services_manager.get_api_port()
         
         client = network.NetworkClient()
-        url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
+        url_candidates = [f"http://{source_ip}:{api_port}/api/files/download?path={name}" for name in archive_candidates]
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.tar.gz') as tmp_file:
             tmp_path = tmp_file.name
         
         try:
-            if not client.download_file(url, tmp_path):
+            downloaded = False
+            for url in url_candidates:
+                if client.download_file(url, tmp_path):
+                    downloaded = True
+                    break
+            if not downloaded:
                 return False
             
             if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
@@ -515,21 +584,28 @@ def check_venv_exists_on_robot(source_ip: str, python_version: str = None, api_p
             python_version = os.environ.get('PYTHON_VERSION')
             if not python_version:
                 # Проверяем все версии
+                host_arch = _host_architecture()
                 for version in ["3.13", "3.11", "3.8"]:
-                    venv_archive = f"venv-{version}.tar.gz"
-                    url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
-                    try:
-                        response = requests.head(url, timeout=net_policy.timeout_file_head())
-                        if response.status_code == 200:
-                            return True
-                    except Exception:
-                        continue
+                    for venv_archive in _venv_archive_candidates(version, host_arch):
+                        url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
+                        try:
+                            response = requests.head(url, timeout=net_policy.timeout_file_head())
+                            if response.status_code == 200:
+                                return True
+                        except Exception:
+                            continue
                 return False
         
-        venv_archive = f"venv-{python_version}.tar.gz"
-        url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
-        response = requests.head(url, timeout=net_policy.timeout_file_head())
-        return response.status_code == 200
+        host_arch = _host_architecture()
+        for venv_archive in _venv_archive_candidates(python_version, host_arch):
+            url = f"http://{source_ip}:{api_port}/api/files/download?path={venv_archive}"
+            try:
+                response = requests.head(url, timeout=net_policy.timeout_file_head())
+                if response.status_code == 200:
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 
@@ -561,8 +637,29 @@ def get_remote_file_size(source_ip: str, filepath: str, api_port: Optional[int] 
     return None
 
 
+def _remote_download_exists(source_ip: str, filepath: str, api_port: Optional[int] = None) -> bool:
+    """
+    Fast check via HEAD /api/files/download?path=... to ensure the source can actually serve the file.
+    Some stale version.json entries can otherwise cause infinite retries.
+    """
+    try:
+        import requests
+        import services_manager
+
+        if api_port is None:
+            api_port = services_manager.get_api_port()
+        url = f"http://{source_ip}:{api_port}/api/files/download?path={filepath}"
+        r = requests.head(url, timeout=net_policy.timeout_file_head())
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def actualize_file_list_from_source_and_local(
-    source_ip: str, files_list: List[Dict[str, Any]], api_port: Optional[int] = None
+    source_ip: str,
+    files_list: List[Dict[str, Any]],
+    api_port: Optional[int] = None,
+    ignore_venv: bool = False,
 ) -> tuple:
     """
     Проверяет файлы на источнике и локально, актуализирует размеры (вес).
@@ -573,21 +670,33 @@ def actualize_file_list_from_source_and_local(
     """
     need_update = 0
     up_to_date = 0
+    out_list: List[Dict[str, Any]] = []
     for file_info in files_list:
         path = file_info.get("path")
         if not path:
             continue
-        if file_info.get("is_directory"):
-            # для директорий локальный размер для отчёта
-            file_info["local_size"] = calculate_file_size(path) if os.path.exists(path) else None
-            file_info["size"] = file_info.get("size")
+        if ignore_venv and _is_venv_artifact(path):
+            # If versions are equal, venv artifacts must not influence "need update".
+            # Venv is managed locally (and is architecture-specific).
             continue
-        # Актуализируем размер на источнике
+        # Never treat directories as updatable items.
+        # (They are unstable by aggregated size and updater can't download directories.)
+        if file_info.get("is_directory"):
+            continue
+        # Актуализируем размер на источнике.
+        # If the source does not have the file (404 / invalid), do NOT try to download it:
+        # stale/incorrect version.json entries would otherwise cause infinite "need update".
         remote_size = get_remote_file_size(source_ip, path, api_port=api_port)
-        if remote_size is not None:
-            file_info["size"] = remote_size
-        else:
-            remote_size = file_info.get("size")
+        if remote_size is None:
+            file_info["remote_missing"] = True
+            continue
+        # Double-check that the source can actually serve the file.
+        # (Some setups accidentally publish mismatched file lists.)
+        if str(path).endswith(".tar.gz") and str(path).startswith("venv-"):
+            if not _remote_download_exists(source_ip, path, api_port=api_port):
+                file_info["remote_missing"] = True
+                continue
+        file_info["size"] = remote_size
         # Размер у себя
         if os.path.exists(path) and os.path.isfile(path):
             try:
@@ -598,11 +707,12 @@ def actualize_file_list_from_source_and_local(
             local_size = None
         file_info["local_size"] = local_size
         # что нужно обновлять
-        if local_size is not None and remote_size is not None and local_size == remote_size:
+        if local_size is not None and local_size == remote_size:
             up_to_date += 1
         else:
             need_update += 1
-    return files_list, need_update, up_to_date
+        out_list.append(file_info)
+    return out_list, need_update, up_to_date
 
 
 def update_files_from_robot(source_ip: str, files_to_update: list, api_port: Optional[int] = None) -> tuple:
@@ -620,60 +730,80 @@ def update_files_from_robot(source_ip: str, files_to_update: list, api_port: Opt
     if not files_to_update:
         return (True, 0, 0, 0)
     
+    import concurrent.futures
+
+    try:
+        max_workers = int(os.environ.get("RGW_UPDATE_PARALLEL", "6"))
+    except Exception:
+        max_workers = 6
+    max_workers = max(1, min(max_workers, 12))
+
     success = True
     skipped_count = 0
     updated_count = 0
     error_count = 0
-    
+
+    # Pre-filter and build download queue (skip early if already up-to-date).
+    queue = []
     for file_info in files_to_update:
         filepath = file_info.get("path")
         if not filepath:
             continue
-        
+
         # Пропускаем директории
         if file_info.get("is_directory"):
-            print(f"Skipping directory: {filepath}", flush=True)
             continue
-        
+
         # Пропускаем файлы внутри папок venv-* (синхронизируем только архивы venv-*.tar.gz)
         if any(filepath.startswith(f'venv-{v}/') for v in ['3.8', '3.11', '3.13']):
-            print(f"Skipping venv file: {filepath} (only archives are synced)", flush=True)
             skipped_count += 1
             continue
-        
+
         local_path = filepath
         remote_size = file_info.get("size")
-        
-        # Проверяем размер локального файла
+
         local_size = None
         if os.path.exists(local_path) and os.path.isfile(local_path):
             try:
                 local_size = os.path.getsize(local_path)
             except (OSError, IOError):
                 pass
-        
-        # Если размеры совпадают и оба не None, пропускаем файл
+
         if local_size is not None and remote_size is not None and local_size == remote_size:
             skipped_count += 1
-            print(f"Skipping {filepath}: sizes match ({local_size} bytes)", flush=True)
             continue
-        
-        # Загружаем файл
-        print(f"Downloading {filepath} (local: {local_size}, remote: {remote_size})...", flush=True)
+
+        queue.append((filepath, local_path, local_size, remote_size))
+
+    if not queue:
+        # nothing to download; only skips
+        if skipped_count:
+            print(f"Update complete: 0 files updated, {skipped_count} files skipped (same size), 0 errors", flush=True)
+        return (True, 0, skipped_count, 0)
+
+    print(f"Downloading {len(queue)} file(s) in parallel (workers={max_workers})...", flush=True)
+
+    def _download_one(args):
+        filepath, local_path, local_size, remote_size = args
         try:
-            if download_file_from_robot(source_ip, filepath, local_path, api_port=api_port):
+            ok = download_file_from_robot(source_ip, filepath, local_path, api_port=api_port)
+            return (filepath, ok, local_size, remote_size, None)
+        except Exception as e:
+            return (filepath, False, local_size, remote_size, str(e))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_download_one, item) for item in queue]
+        for fut in concurrent.futures.as_completed(futs):
+            filepath, ok, local_size, remote_size, err = fut.result()
+            if ok:
                 updated_count += 1
-                print(f"Successfully downloaded {filepath}", flush=True)
             else:
-                print(f"Failed to download {filepath}", flush=True)
                 error_count += 1
                 success = False
-        except Exception as e:
-            print(f"Error downloading {filepath}: {str(e)}", flush=True)
-            import traceback
-            traceback.print_exc()
-            error_count += 1
-            success = False
+                if err:
+                    print(f"Error downloading {filepath}: {err}", flush=True)
+                else:
+                    print(f"Failed to download {filepath} (local: {local_size}, remote: {remote_size})", flush=True)
     
     # Выводим статистику только если были изменения
     if updated_count > 0 or skipped_count > 0 or error_count > 0:
@@ -933,6 +1063,12 @@ def update_system(force: bool = False, source_ip: str = None):
     соответствующую приоритету, и обновляет файлы.
     Если изменены сервисы - перезапускает только их, иначе перезапускает проект.
     """
+    # Server must not pull updates from robots automatically.
+    # It can still be used as a source for robots.
+    local_type = _local_robot_type()
+    if local_type == "SERVER" and not force:
+        print("This host is RobotType=SERVER. Skipping update download from robots (server is a source only).", flush=True)
+        return True
     # --- Discover candidate IPs -------------------------------------------------
     if source_ip:
         # Forced update from a specific IP — skip network scan entirely
@@ -1005,8 +1141,9 @@ def update_system(force: bool = False, source_ip: str = None):
 
     files_to_update = version_data.get("files", [])
     print("Actualizing file list from source and local...", flush=True)
+    ignore_venv = (not force) and (version_comparison == 0)
     files_to_update, need_update_count, up_to_date_count = actualize_file_list_from_source_and_local(
-        chosen_source_ip, files_to_update, api_port=chosen_source_port
+        chosen_source_ip, files_to_update, api_port=chosen_source_port, ignore_venv=ignore_venv
     )
     print(f"Actualized: {need_update_count} file(s) need update, {up_to_date_count} file(s) up to date (same size)", flush=True)
 
@@ -1019,7 +1156,27 @@ def update_system(force: bool = False, source_ip: str = None):
 
     # Только при реальном обновлении обновляем version.json и venv-архив (иначе create_venv_archive тормозит на минуты)
     update_version_file()
-    print(f"Files to update: {len(files_to_update)}", flush=True)
+    # Print explicit download list for debugging.
+    to_download = []
+    for fi in files_to_update:
+        p = fi.get("path")
+        if not p or fi.get("remote_missing"):
+            continue
+        rs = fi.get("size")
+        ls = fi.get("local_size")
+        if ls is None or rs is None or ls != rs:
+            to_download.append(fi)
+    if to_download:
+        print(f"To download: {len(to_download)} file(s)", flush=True)
+        for fi in to_download[:40]:
+            print(
+                f" - {fi.get('path')} (local={fi.get('local_size')}, remote={fi.get('size')})",
+                flush=True,
+            )
+        if len(to_download) > 40:
+            print(f" - ... and {len(to_download) - 40} more", flush=True)
+    else:
+        print("To download: 0 file(s)", flush=True)
     if not files_to_update:
         print("No files to update in version data", flush=True)
         return True

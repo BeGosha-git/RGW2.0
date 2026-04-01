@@ -46,15 +46,16 @@ VIDEO_CLOCK_RATE = 90000
 VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 
 # WebRTC tuning for:
-#  - weak connection: prefer lowering FPS (down to RGW2_WEBRTC_FPS_MIN, default 20) before JPEG quality
-#  - fullscreen: up to RGW2_WEBRTC_FPS_MAX (default 60)
+#  - keep target FPS stable at 30 (do not exceed 30)
+#  - adapt image quality / resolution first to preserve realtime feel
 #
 # Bitrate constraint from user: "не более 8к" → interpret as ~8 Mbps.
 MAX_BITRATE_CAP_BPS = 8_000_000
 
 # Hard FPS bounds (adaptive path stays inside this range).
-FPS_MIN = int(os.getenv("RGW2_WEBRTC_FPS_MIN", "20"))
-FPS_MAX = int(os.getenv("RGW2_WEBRTC_FPS_MAX", "60"))
+# Default: cap at 30fps (user request).
+FPS_MIN = int(os.getenv("RGW2_WEBRTC_FPS_MIN", "15"))
+FPS_MAX = int(os.getenv("RGW2_WEBRTC_FPS_MAX", "30"))
 FPS_MIN = max(1, FPS_MIN)
 FPS_MAX = max(FPS_MIN, FPS_MAX)
 
@@ -62,8 +63,8 @@ def _clamp_fps(v: int) -> int:
     return max(FPS_MIN, min(FPS_MAX, int(v)))
 
 
-# Fullscreen / normal conditions
-TARGET_FPS_HIGH = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", "60"))))
+# Fullscreen / normal conditions (cap at 30)
+TARGET_FPS_HIGH = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", "30"))))
 JPEG_QUALITY_HIGH = int(os.getenv("RGW2_WEBRTC_JPEG_QUALITY_HIGH", os.getenv("RGW2_WEBRTC_JPEG_QUALITY", "70")))
 
 # Keep FPS stable; do not exceed bitrate cap.
@@ -79,7 +80,7 @@ WEBRTC_HEIGHT_HIGH = int(os.getenv("RGW2_WEBRTC_HEIGHT_HIGH", os.getenv("RGW2_WE
 
 VIDEO_RESYNC_SLEEP = float(os.getenv("RGW2_WEBRTC_RESYNC_SLEEP_SEC", "0.0"))  # optional debug knob
 
-# Matrix / weak connection — start lower; under load we drop FPS toward FPS_MIN before JPEG quality.
+# Matrix / weak connection — also cap at 30
 TARGET_FPS_LOW = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_LOW", "30")))
 
 # Require JPEG quality not below 30.
@@ -202,7 +203,18 @@ if _aiortc_available:
             self._cam = camera_stream
             self._pts = 0
             self._fps_floor = FPS_MIN
-            if str(quality_mode).lower() == 'low':
+            # quality_mode can be: 'low' | 'high' | '30'..'100' (percent)
+            q_raw = str(quality_mode).strip().lower()
+            q_pct = None
+            try:
+                if q_raw.isdigit():
+                    q_pct = int(q_raw)
+            except Exception:
+                q_pct = None
+            if q_pct is not None:
+                q_pct = max(30, min(100, int(q_pct)))
+
+            if q_raw == 'low':
                 self._quality_mode = 'low'
                 self._jpeg_quality = JPEG_QUALITY_LOW
                 self._jpeg_quality_min = 30  # keep image quality >= 30%
@@ -212,6 +224,20 @@ if _aiortc_available:
                 self._max_bitrate_bps = MAX_BITRATE_BPS_LOW
                 # Matrix view: never auto-ramp above this FPS (saves bandwidth).
                 self._fps_ceiling = TARGET_FPS_LOW
+            elif q_pct is not None:
+                # Percent mode: map 30..100% into resolution scale + jpeg quality.
+                self._quality_mode = f"{q_pct}"
+                self._jpeg_quality_min = 30
+                self._jpeg_quality_cap = int(JPEG_QUALITY_HIGH)
+                # Start near cap; bitrate guard will reduce as needed.
+                self._jpeg_quality = max(self._jpeg_quality_min, min(self._jpeg_quality_cap, int(round((q_pct / 100) * JPEG_QUALITY_HIGH))))
+                # Resolution scale by sqrt to preserve area proportionality.
+                scale = math.sqrt(q_pct / 100.0)
+                self._out_w = max(320, int(WEBRTC_WIDTH_HIGH * scale))
+                self._out_h = max(180, int(WEBRTC_HEIGHT_HIGH * scale))
+                self._target_fps = TARGET_FPS_HIGH
+                self._max_bitrate_bps = MAX_BITRATE_BPS_HIGH
+                self._fps_ceiling = TARGET_FPS_HIGH
             else:
                 self._quality_mode = 'high'
                 self._jpeg_quality = JPEG_QUALITY_HIGH
@@ -231,11 +257,25 @@ if _aiortc_available:
             self._last_emit_time = None  # monotonic timestamp for pacing
 
             # Simple bitrate guard:
-            # adjust JPEG quality to keep avg bitrate <= cap (best-effort).
+            # adjust JPEG quality (then resolution) to keep avg bitrate <= cap (best-effort).
             self._bytes_acc = 0
             self._bitrate_last_ts = time.monotonic()
             self._bitrate_eval_period_s = 0.5
-            self._jpeg_quality_cap = int(self._jpeg_quality)
+            self._jpeg_quality_cap = int(getattr(self, "_jpeg_quality_cap", self._jpeg_quality))
+            self._min_w = max(240, min(320, int(self._out_w)))
+            self._min_h = max(135, min(180, int(self._out_h)))
+
+        def _shrink_resolution(self) -> None:
+            # Reduce resolution ~10% per step, but keep a floor.
+            nw = max(self._min_w, int(self._out_w * 0.9))
+            nh = max(self._min_h, int(self._out_h * 0.9))
+            # keep even numbers for yuv420
+            if nw % 2:
+                nw -= 1
+            if nh % 2:
+                nh -= 1
+            self._out_w = max(self._min_w, nw)
+            self._out_h = max(self._min_h, nh)
 
         def _apply_target_fps(self, fps: int) -> None:
             """Update pacing + RTP clock step when adaptive FPS changes."""
@@ -275,22 +315,20 @@ if _aiortc_available:
                         self._bytes_acc = 0
                         self._bitrate_last_ts = now
 
-                        # Hysteresis: when over cap, lower FPS first (down to FPS_MIN), then JPEG quality.
-                        # When under cap, raise FPS first (up to mode ceiling), then quality.
+                        # Hysteresis: when over cap, lower JPEG quality first, then resolution,
+                        # and only then lower FPS (down to FPS_MIN).
+                        # When under cap, raise quality first (up to cap). FPS stays capped at 30.
                         if bitrate_bps > self._max_bitrate_bps * 1.05:
-                            if self._target_fps > self._fps_floor:
+                            if self._jpeg_quality > self._jpeg_quality_min:
+                                self._jpeg_quality = max(self._jpeg_quality_min, self._jpeg_quality - 5)
+                            elif self._out_w > self._min_w or self._out_h > self._min_h:
+                                self._shrink_resolution()
+                            elif self._target_fps > self._fps_floor:
                                 self._apply_target_fps(self._target_fps - 3)
-                            else:
-                                self._jpeg_quality = max(
-                                    self._jpeg_quality_min, self._jpeg_quality - 5
-                                )
                         elif bitrate_bps < self._max_bitrate_bps * 0.70:
-                            if self._target_fps < self._fps_ceiling:
-                                self._apply_target_fps(self._target_fps + 2)
-                            else:
-                                self._jpeg_quality = min(
-                                    self._jpeg_quality_cap, self._jpeg_quality + 2
-                                )
+                            # Prefer raising quality; keep fps at ceiling (<=30).
+                            if self._jpeg_quality < self._jpeg_quality_cap:
+                                self._jpeg_quality = min(self._jpeg_quality_cap, self._jpeg_quality + 2)
                 except Exception:
                     pass
                 if av_frame is None:
@@ -470,7 +508,8 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
         if params and getattr(params, "encodings", None):
             quality_mode_l = str(quality_mode).lower()
             max_bitrate = MAX_BITRATE_BPS_LOW if quality_mode_l == 'low' else MAX_BITRATE_BPS_HIGH
-            max_framerate = MAX_FRAMERATE_LOW if quality_mode_l == 'low' else MAX_FRAMERATE_HIGH
+            # Cap max framerate at 30 always.
+            max_framerate = 30.0 if quality_mode_l != 'low' else min(30.0, MAX_FRAMERATE_LOW)
             for enc in params.encodings:
                 enc.maxBitrate = max_bitrate
                 enc.maxFramerate = max_framerate

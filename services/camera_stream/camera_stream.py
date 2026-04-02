@@ -10,7 +10,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
@@ -135,7 +135,7 @@ def _find_camera(camera_id: str, cameras: List[Dict]) -> Optional[Dict]:
 
 
 class CameraStream:
-    def __init__(self, camera_info: Dict, udp_port: int = None, width: int = 640, height: int = 480, fps: int = 30):
+    def __init__(self, camera_info: Dict, udp_port: int = None, width: int = 640, height: int = 480, fps: int = 25):
         self.camera_info = camera_info
         self.udp_port = udp_port
         self.width = width
@@ -287,7 +287,7 @@ def start_camera_stream(camera_id: str, udp_port: int = None, width: int = None,
                 udp_port = 5005 + idx
             width = 1024 if width is None and udp_port else (640 if width is None else width)
             height = 576 if height is None and udp_port else (480 if height is None else height)
-        stream = CameraStream(info, udp_port=udp_port, width=width, height=height, fps=30)
+        stream = CameraStream(info, udp_port=udp_port, width=width, height=height, fps=25)
         if not stream.start():
             return False
         _camera_streams[camera_id] = {
@@ -501,7 +501,7 @@ def detect_cameras() -> List[Dict]:
                             "index": i,
                             "width": width,
                             "height": height,
-                            "fps": fps if fps > 0 else 30.0,
+                            "fps": fps if fps > 0 else 25.0,
                             "available": True
                         })
                     finally:
@@ -530,7 +530,7 @@ def detect_cameras() -> List[Dict]:
                 "index": i,
                 "width": 640,
                 "height": 480,
-                "fps": 30.0,
+                "fps": 25.0,
                 "available": bool(can_rw),
             })
     except Exception:
@@ -634,13 +634,22 @@ class CameraStream:
     """Улучшенный поток для чтения кадров с камеры с автоматическим перезапуском."""
     
     def __init__(self, camera_info: Dict, udp_port: int = None,
-                 width: int = 640, height: int = 480, fps: int = 30):
+                 width: int = 640, height: int = 480, fps: int = 25,
+                 capture_fps: Optional[int] = None):
         self.camera_info = camera_info
         self.camera_id = camera_info["id"]
         self.udp_port = udp_port
         self.width = width
         self.height = height
-        self.fps = fps
+        # Stream/encode pacing (background caching/UDP sending).
+        # Capture FPS can be higher; we try not to constrain capture.
+        self.stream_fps = int(fps)
+        self.capture_fps = int(capture_fps) if capture_fps is not None else None
+        # If enabled, we will explicitly set CAP_PROP_FPS for USB.
+        # Default is disabled to avoid artificially constraining capture.
+        self._usb_set_fps = int(os.environ.get("RGW2_CAMERA_SET_USB_FPS", "0")) == 1
+        if self.capture_fps is not None:
+            self.capture_fps = max(1, self.capture_fps)
         self.running = False
         self.thread: Optional[threading.Thread] = None  # encode/udp loop
         self.capture_thread: Optional[threading.Thread] = None  # capture loop (drop frames)
@@ -653,6 +662,10 @@ class CameraStream:
         self._jpeg_lock = threading.Lock()
         self._latest_jpeg: Optional[bytes] = None
         self._latest_jpeg_ts: float = 0.0
+        # Small cache for non-default (w,h,quality) JPEGs.
+        # Keyed by encoded frame_id to avoid returning stale data.
+        self._jpeg_cache: Dict[Tuple[int, int, int], Tuple[int, float, bytes]] = {}
+        self._jpeg_cache_max_keys = int(os.environ.get("RGW2_CAMERA_JPEG_CACHE_KEYS", "6"))
         # Prefer lowering quality over lowering FPS for "real-time" feel.
         self._jpeg_quality = int(os.environ.get("RGW2_CAMERA_JPEG_QUALITY", "60"))
         # Hard cap on allowed buffering/latency: drop frames older than this.
@@ -668,6 +681,21 @@ class CameraStream:
         self._latest_frame_raw: Optional["np.ndarray"] = None
         self._latest_frame_ts: float = 0.0
         self._latest_frame_id: int = 0
+        # Moving average of capture FPS (for /control debug).
+        self._capture_ts_window: deque = deque(maxlen=240)
+        self._capture_fps_ma: float = 0.0
+        # Best-effort CUDA availability for image operations.
+        self._cuda_available = False
+        try:
+            self._cuda_available = bool(hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0)
+        except Exception:
+            self._cuda_available = False
+
+    def get_capture_fps(self) -> Optional[float]:
+        """Returns moving average capture FPS (seconds window), or None if not enough data."""
+        if self._capture_fps_ma and self._capture_fps_ma > 0:
+            return float(self._capture_fps_ma)
+        return None
         
     def start(self):
         """Запуск потока камеры."""
@@ -699,6 +727,18 @@ class CameraStream:
                 self._latest_frame_raw = frame
                 self._latest_frame_ts = time.time()
                 self._latest_frame_id = (self._latest_frame_id + 1) & 0x7FFFFFFF
+            # Capture FPS moving average (1s window, best-effort).
+            try:
+                now_m = time.monotonic()
+                self._capture_ts_window.append(now_m)
+                cutoff = now_m - 1.0
+                while self._capture_ts_window and self._capture_ts_window[0] < cutoff:
+                    self._capture_ts_window.popleft()
+                if len(self._capture_ts_window) >= 2:
+                    span = max(1e-6, now_m - self._capture_ts_window[0])
+                    self._capture_fps_ma = (len(self._capture_ts_window) - 1) / span
+            except Exception:
+                pass
             while len(self.frame_queue) > 0:
                 try:
                     self.frame_queue.pop()
@@ -777,7 +817,7 @@ class CameraStream:
                 if serial:
                     config.enable_device(serial)
                 config.enable_stream(rs.stream.color, self.width, self.height,
-                                     rs.format.bgr8, self.fps)
+                                     rs.format.bgr8, int(self.capture_fps or self.stream_fps))
                 self.pipeline.start(config)
                 
                 # Проверяем, что камера работает с правильной обработкой генератора
@@ -834,7 +874,8 @@ class CameraStream:
             with _suppress_stderr():
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                if self.capture_fps is not None and self._usb_set_fps:
+                    self.cap.set(cv2.CAP_PROP_FPS, self.capture_fps)
                 # Request minimal V4L2 kernel buffer: 1 frame prevents stale-frame latency.
                 # Note: some drivers ignore this, so we also drain below.
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -940,7 +981,7 @@ class CameraStream:
                 print(f"[CameraStream] UDP socket error: {e}", flush=True)
 
         frame_id = 0
-        interval = max(0.005, 1.0 / max(1, int(self.fps)))
+        interval = max(0.005, 1.0 / max(1, int(self.stream_fps)))
         last_encoded_local_id = -1
 
         while self.running and not self.stop_event.is_set():
@@ -1100,29 +1141,76 @@ class CameraStream:
                 if self._latest_jpeg is not None and (time.time() - float(self._latest_jpeg_ts or 0.0)) <= self._max_frame_age_sec:
                     return self._latest_jpeg
 
-        if not self.frame_queue or not CV2_AVAILABLE:
-            # If cv2 is missing but we have cached jpeg (shouldn't happen), return it
+        if not CV2_AVAILABLE:
             with self._jpeg_lock:
                 return self._latest_jpeg
-        
+
         try:
-            frame = self.frame_queue[-1].copy()
-            if width and height and (width != frame.shape[1] or height != frame.shape[0]):
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
-            
-            # Контрастность +20%
+            # Read the newest frame atomically.
+            with self._frame_lock:
+                frame = self._latest_frame_raw
+                frame_ts = float(self._latest_frame_ts or 0.0)
+                frame_id = int(self._latest_frame_id or 0)
+
+            if frame is None:
+                return None
+
+            # Hard realtime cap: do not encode frames older than allowed.
+            if frame_ts > 0:
+                age = time.time() - frame_ts
+                if age > self._max_frame_age_sec:
+                    return None
+
+            # IMPORTANT (performance):
+            # WebRTC requests often specify width/height and varying quality.
+            # For these "non-default" requests we do a fast path: resize + JPEG encode only.
+            non_default = bool(width or height or int(quality) != int(self._jpeg_quality))
+
+            target_w = int(width) if width is not None else int(frame.shape[1])
+            target_h = int(height) if height is not None else int(frame.shape[0])
+
+            if non_default:
+                key = (target_w, target_h, int(quality))
+                cached = self._jpeg_cache.get(key)
+                if cached is not None:
+                    cached_frame_id, cached_ts, cached_bytes = cached
+                    if cached_frame_id == frame_id:
+                        return cached_bytes
+
+                # Resize (best-effort GPU).
+                out = frame
+                if target_w != frame.shape[1] or target_h != frame.shape[0]:
+                    if self._cuda_available:
+                        try:
+                            gpu = cv2.cuda_GpuMat()
+                            gpu.upload(frame)
+                            out_gpu = cv2.cuda.resize(gpu, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                            out = out_gpu.download()
+                        except Exception:
+                            out = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                    else:
+                        out = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+                ok, buf = cv2.imencode('.jpg', out, encode_param)
+                if not (ok and buf is not None):
+                    return None
+
+                jpg = buf.tobytes()
+                if len(self._jpeg_cache) >= self._jpeg_cache_max_keys:
+                    self._jpeg_cache.clear()
+                self._jpeg_cache[key] = (frame_id, time.time(), jpg)
+                return jpg
+
+            # Default request path: apply mild enhancement (used by MJPEG and default cache).
             frame_enhanced = cv2.convertScaleAbs(frame, alpha=1.2, beta=0)
-            
-            # Резкость +20% (unsharp mask)
             gaussian = cv2.GaussianBlur(frame_enhanced, (0, 0), 2.0)
             frame_enhanced = cv2.addWeighted(frame_enhanced, 1.2, gaussian, -0.2, 0)
-            
-            # Нормализация значений пикселей
             frame_enhanced = np.clip(frame_enhanced, 0, 255).astype(np.uint8)
-            
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-            _, buf = cv2.imencode('.jpg', frame_enhanced, encode_param)
-            if buf is not None:
+
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+            ok, buf = cv2.imencode('.jpg', frame_enhanced, encode_param)
+            if ok and buf is not None:
                 return buf.tobytes()
         except Exception:
             return None
@@ -1150,32 +1238,36 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
             return True  # уже запущен
 
     cam_idx = camera_info.get("index", 0)
+    stream_fps_env = int(os.environ.get("RGW2_CAMERA_STREAM_FPS", "25"))
 
-    # Для RealSense камеры всегда используем отдельный стабильный UDP порт
+    # UDP-поток (если udp_port задан извне) используется для UDP/MJPEG сценариев.
     if camera_info["type"] == "realsense":
-        if udp_port is None:
-            udp_port = REALSENSE_UDP_PORT
-        # Для RealSense используем разрешение 80% от максимального (1024x576)
+        # Для WebRTC (когда udp_port не задан) оставляем параметры, ориентированные на 640x480.
         if width is None:
-            width = 1024  # 80% от 1280
+            width = 640 if udp_port is None else 1024
         if height is None:
-            height = 576  # 80% от 720
-        # Фиксируем FPS на 30
-        fps = 30
+            height = 480 if udp_port is None else 576
+        capture_fps = int(os.environ.get("RGW2_CAPTURE_FPS", "60"))
+        stream_fps = min(stream_fps_env, capture_fps)
     else:
-        # UDP для первых 3 USB камер
-        if udp_port is None and cam_idx < 3:
-            udp_port = 5005 + cam_idx
         # Разрешение: для UDP 80% от максимального, иначе 640x480
         if width is None:
             width = 1024 if udp_port else 640  # 80% от 1280
         if height is None:
             height = 576 if udp_port else 480  # 80% от 720
-        # Фиксируем FPS на 30
-        fps = 30
+        capture_fps = camera_info.get("fps")
+        capture_fps = int(capture_fps) if capture_fps else int(os.environ.get("RGW2_CAPTURE_FPS", "30"))
+        stream_fps = min(stream_fps_env, capture_fps)
 
     # Инициализация стрима выполняется вне лока — может занимать 0.5–1.5 сек
-    stream = CameraStream(camera_info, udp_port=udp_port, width=width, height=height, fps=fps)
+    stream = CameraStream(
+        camera_info,
+        udp_port=udp_port,
+        width=width,
+        height=height,
+        fps=stream_fps,
+        capture_fps=capture_fps,
+    )
     if not stream.start():
         #print(f"[CameraStream] Failed to start stream for {camera_id}", flush=True)
         return False

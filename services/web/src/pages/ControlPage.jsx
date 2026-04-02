@@ -337,16 +337,26 @@ function ControlPage() {
         </div>
 
         <div className="control-top">
-          <button className="overlay-chip" onClick={() => switchLayout(-1)}>Предыдущая</button>
+          <button className="overlay-chip" onClick={() => switchLayout(-1)} title="Предыдущая раскладка">
+            <span className="nav-arrow" aria-hidden="true">◀</span>
+            <span className="nav-arrow-text">Предыдущая</span>
+          </button>
           <div className="overlay-chip layout-name">{activeLayout?.name || 'Раскладка'}</div>
-          <button className="overlay-chip" onClick={() => switchLayout(1)}>Следующая</button>
+          <button className="overlay-chip" onClick={() => switchLayout(1)} title="Следующая раскладка">
+            <span className="nav-arrow" aria-hidden="true">▶</span>
+            <span className="nav-arrow-text">Следующая</span>
+          </button>
           <div className="overlay-chip camera-name">{currentCameraId || 'no-cam'}</div>
         </div>
 
         <div className="control-top-right">
           {telemetry?.motor_temps?.max != null ? (
-            <div className={`telemetry-chip${Number(telemetry.motor_temps.max) >= 70 ? ' telemetry-warn' : ''}`} title="Температура моторов (макс/сред)">
-              <b>🌡</b> {Math.round(Number(telemetry.motor_temps.max))}° / {telemetry.motor_temps.avg != null ? Math.round(Number(telemetry.motor_temps.avg)) : '—'}°
+            <div
+              className={`telemetry-chip${Number(telemetry.motor_temps.max) >= 70 ? ' telemetry-warn' : ''}`}
+              title="Температура: 1-я цифра — самый высокий максимум среди всех моторов/датчиков, 2-я — средняя по всем"
+            >
+              <b>🌡</b> {Math.round(Number(telemetry.motor_temps.max))}° /{' '}
+              {telemetry.motor_temps.avg != null ? Math.round(Number(telemetry.motor_temps.avg)) : '—'}°
             </div>
           ) : (
             <div className="telemetry-chip" title={telemetry?.message || 'нет данных'}>
@@ -406,6 +416,9 @@ function ControlPage() {
           <div className="telemetry-chip" title="Debug: WebRTC качество и FPS">
             <b>dbg</b>{' '}
             {camDebug?.fps != null ? `${Math.round(Number(camDebug.fps))}fps` : '—fps'}
+            {camDebug?.captureFps != null ? (
+              <span className="control-desktop-only">{` cap ${Math.round(Number(camDebug.captureFps))}fps`}</span>
+            ) : null}
             {camDebug?.net?.fps != null ? `/${Math.round(Number(camDebug.net.fps))}` : ''}
             {' '}·{' '}
             {camDebug?.qualityPct != null ? `${Math.round(Number(camDebug.qualityPct))}%` : (camDebug?.quality || '—')} ·{' '}

@@ -53,9 +53,9 @@ VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
 MAX_BITRATE_CAP_BPS = 8_000_000
 
 # Hard FPS bounds (adaptive path stays inside this range).
-# Default: cap at 30fps (user request).
-FPS_MIN = int(os.getenv("RGW2_WEBRTC_FPS_MIN", "15"))
-FPS_MAX = int(os.getenv("RGW2_WEBRTC_FPS_MAX", "30"))
+# Default: cap at 60fps (user request: realtime + realtime cap).
+FPS_MIN = int(os.getenv("RGW2_WEBRTC_FPS_MIN", "10"))
+FPS_MAX = int(os.getenv("RGW2_WEBRTC_FPS_MAX", "60"))
 FPS_MIN = max(1, FPS_MIN)
 FPS_MAX = max(FPS_MIN, FPS_MAX)
 
@@ -63,8 +63,8 @@ def _clamp_fps(v: int) -> int:
     return max(FPS_MIN, min(FPS_MAX, int(v)))
 
 
-# Fullscreen / normal conditions (cap at 30)
-TARGET_FPS_HIGH = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", "30"))))
+# Fullscreen / normal conditions.
+TARGET_FPS_HIGH = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_HIGH", os.getenv("RGW2_WEBRTC_FPS", str(FPS_MAX)))))
 JPEG_QUALITY_HIGH = int(os.getenv("RGW2_WEBRTC_JPEG_QUALITY_HIGH", os.getenv("RGW2_WEBRTC_JPEG_QUALITY", "70")))
 
 # Keep FPS stable; do not exceed bitrate cap.
@@ -80,8 +80,9 @@ WEBRTC_HEIGHT_HIGH = int(os.getenv("RGW2_WEBRTC_HEIGHT_HIGH", os.getenv("RGW2_WE
 
 VIDEO_RESYNC_SLEEP = float(os.getenv("RGW2_WEBRTC_RESYNC_SLEEP_SEC", "0.0"))  # optional debug knob
 
-# Matrix / weak connection — also cap at 30
-TARGET_FPS_LOW = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_LOW", "30")))
+# Matrix / weak connection.
+# This is used only when the client requests `quality='low'`.
+TARGET_FPS_LOW = _clamp_fps(int(os.getenv("RGW2_WEBRTC_FPS_LOW", "15")))
 
 # Require JPEG quality not below 30.
 QUALITY_SCALE = 1.5
@@ -255,6 +256,11 @@ if _aiortc_available:
             self._frame_interval = VIDEO_CLOCK_RATE // self._target_fps
             self._no_frame_count = 0  # consecutive misses — for logging
             self._last_emit_time = None  # monotonic timestamp for pacing
+            # Reuse the last successfully decoded frame to avoid flicker.
+            # Must not violate realtime constraint: reuse only while age <= cap.
+            self._max_reuse_age_sec = float(os.getenv("RGW2_CAMERA_REUSE_MAX_AGE_SEC", "0.5"))
+            self._last_good_av_frame = None
+            self._last_good_ts = 0.0
 
             # Simple bitrate guard:
             # adjust JPEG quality (then resolution) to keep avg bitrate <= cap (best-effort).
@@ -302,9 +308,12 @@ if _aiortc_available:
             )
 
             av_frame: Optional[object] = None
+            now_m = time.monotonic()
+            decoded_fresh = False
 
             if jpeg_bytes:
                 av_frame = _jpeg_to_av_frame(jpeg_bytes)
+                decoded_fresh = av_frame is not None
                 # Bitrate estimation & quality adaptation (for weak connections).
                 try:
                     self._bytes_acc += len(jpeg_bytes)
@@ -339,6 +348,15 @@ if _aiortc_available:
                     self._no_frame_count = 0
 
             if av_frame is None:
+                # Best-effort stabilization: reuse last successfully decoded frame.
+                # This is strictly capped by age (<= 0.5s) to avoid increasing latency.
+                try:
+                    if self._last_good_av_frame is not None and (now_m - float(self._last_good_ts or 0.0)) <= self._max_reuse_age_sec:
+                        av_frame = self._last_good_av_frame
+                except Exception:
+                    av_frame = None
+
+            if av_frame is None:
                 self._no_frame_count += 1
                 if self._no_frame_count == 1 or self._no_frame_count % 30 == 0:
                     logger.info('[WebRTC] No frame from camera (miss #%d) — sending fallback', self._no_frame_count)
@@ -362,6 +380,15 @@ if _aiortc_available:
             av_frame.pts = self._pts
             av_frame.time_base = VIDEO_TIME_BASE
             self._pts += self._frame_interval
+            # Remember last good frame only when it came from fresh camera data
+            # (i.e. current JPEG decoded successfully). This avoids extending reuse
+            # after repeated decode failures.
+            try:
+                if decoded_fresh and av_frame is not None:
+                    self._last_good_av_frame = av_frame
+                    self._last_good_ts = now_m
+            except Exception:
+                pass
 
             # Pacing: one frame per target interval. If we are behind schedule, resync to "now"
             # instead of bursting frames (bursting grows queues and ICE/packet loss).
@@ -376,7 +403,10 @@ if _aiortc_available:
                     await asyncio.sleep(sleep_for)
                     self._last_emit_time = next_time
                 else:
-                    self._last_emit_time = now
+                    # We're behind schedule: skip missed intervals instead of resetting to now.
+                    # This prevents a "burst" that would artificially increase delivered FPS.
+                    missed = int((now - next_time) / interval) + 1
+                    self._last_emit_time = next_time + missed * interval
             return av_frame
 
 
@@ -508,8 +538,8 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
         if params and getattr(params, "encodings", None):
             quality_mode_l = str(quality_mode).lower()
             max_bitrate = MAX_BITRATE_BPS_LOW if quality_mode_l == 'low' else MAX_BITRATE_BPS_HIGH
-            # Cap max framerate at 30 always.
-            max_framerate = 30.0 if quality_mode_l != 'low' else min(30.0, MAX_FRAMERATE_LOW)
+            # Cap max framerate to the configured targets (<= 60).
+            max_framerate = float(TARGET_FPS_LOW) if quality_mode_l == 'low' else float(TARGET_FPS_HIGH)
             for enc in params.encodings:
                 enc.maxBitrate = max_bitrate
                 enc.maxFramerate = max_framerate
@@ -541,6 +571,7 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
             'conn_id': conn_id,
             'camera_id': camera_id,
             'requested_camera_id': requested_camera_id,
+            'capture_fps': stream_obj.get_capture_fps() if hasattr(stream_obj, "get_capture_fps") else None,
             'sdp': pc.localDescription.sdp,
             'type': pc.localDescription.type,
         }

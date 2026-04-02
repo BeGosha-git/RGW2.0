@@ -19,6 +19,7 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
   const [state, setState] = useState('connecting') // connecting | connected | error
   const [effectiveQuality, setEffectiveQuality] = useState(qualityMode)
   const [fps, setFps] = useState(null)
+  const [captureFps, setCaptureFps] = useState(null)
   const [res, setRes] = useState({ w: null, h: null })
   const [net, setNet] = useState({ fps: null, lossPct: null, jitterMs: null })
   const lastQualityChangeRef = useRef(0)
@@ -41,13 +42,14 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
           quality: effectiveQuality,
           qualityPct: qPct,
           fps,
+        captureFps,
           net,
           res: w && h ? { w, h } : null,
           resPct,
         })
       }
     } catch (_e) {}
-  }, [state, effectiveQuality, fps, net, res, onDebug])
+  }, [state, effectiveQuality, fps, captureFps, net, res, onDebug])
 
   useEffect(() => {
     if (!signalingUrl) {
@@ -70,6 +72,7 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
     const connect = async () => {
       if (cancelled) return
       setState('connecting')
+      setCaptureFps(null)
       try {
         const pc = new RTCPeerConnection({ iceServers: [] })
         pcRef.current = pc
@@ -142,6 +145,7 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
         if (!data.success) throw new Error(data.message || 'Signaling error')
 
         connIdRef.current = data.conn_id
+        if (data.capture_fps != null) setCaptureFps(Number(data.capture_fps))
         closeUrlRef.current = signalingUrl.replace(/\/offer$/, `/${data.conn_id}`)
         await pc.setRemoteDescription({ sdp: data.sdp, type: data.type })
       } catch (err) {

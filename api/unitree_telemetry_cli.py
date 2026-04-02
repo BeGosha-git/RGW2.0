@@ -100,6 +100,8 @@ def main() -> int:
     soc: Optional[float] = None
     battery_current: Optional[float] = None
     motor_temps: List[float] = []
+    bms_temps: List[float] = []
+    mainboard_temps: List[float] = []
     extra: Dict[str, Any] = {}
 
     if ok and lowstate is not None:
@@ -148,14 +150,27 @@ def main() -> int:
         except Exception:
             pass
 
-    # HG LowState_ (G1/H1) does not include BMS in our IDL.
-    # Try separate HG BmsState topic name variants.
+    # HG LowState_ (G1/H1) does not always include BMS in our IDL.
+    # Try separate HG BmsState topic name variants (best-effort).
     if soc is None:
         try:
             from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_ as HGBmsState_
 
-            # Common names seen in SDK wrappers / deployments
-            for topic in ("rt/bmsstate", "rt/bms_state", "rt/bms", "rt/bmsState", "rt/bmsState_"):
+            # Include the real topic discovered on your G1:
+            #   rt/lf/bmsstate
+            # plus other known variants.
+            for topic in (
+                "rt/lf/bmsstate",
+                "rt/lf/bms_state",
+                "rt/lf/bms",
+                "rt/lf/bmsState",
+                "rt/lf/bmsState_",
+                "rt/bmsstate",
+                "rt/bms_state",
+                "rt/bms",
+                "rt/bmsState",
+                "rt/bmsState_",
+            ):
                 try:
                     sub = ChannelSubscriber(topic, HGBmsState_)
                     sub.Init()
@@ -164,6 +179,16 @@ def main() -> int:
                     if msg is not None and hasattr(msg, "soc"):
                         soc = float(getattr(msg, "soc"))
                         battery_current = float(getattr(msg, "current", 0.0))
+                        try:
+                            temps = getattr(msg, "temperature", None)
+                            if temps is not None:
+                                for x in list(temps):
+                                    try:
+                                        bms_temps.append(float(x))
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                         extra["bms_topic"] = topic
                         break
                 except Exception:
@@ -171,12 +196,47 @@ def main() -> int:
         except Exception:
             pass
 
+    # Mainboard temperatures (discovered topic on your G1: rt/lf/mainboardstate).
+    try:
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import MainBoardState_ as HGMainBoardState_
+        for topic in (
+            "rt/lf/mainboardstate",
+            "rt/lf/mainboard_state",
+            "rt/lf/mainboard",
+            "rt/mainboardstate",
+            "rt/mainboard_state",
+        ):
+            try:
+                sub = ChannelSubscriber(topic, HGMainBoardState_)
+                sub.Init()
+                msg = sub.Read(timeout=2.0)
+                sub.Close()
+                if msg is not None and hasattr(msg, "temperature"):
+                    temps = getattr(msg, "temperature", None)
+                    if temps is not None:
+                        for x in list(temps):
+                            try:
+                                mainboard_temps.append(float(x))
+                            except Exception:
+                                pass
+                    extra["mainboard_topic"] = topic
+                    # stop after first successful read
+                    if mainboard_temps:
+                        break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     out = {
         "success": True if (soc is not None or motor_temps) else False,
         "mode": mode,
         "soc": soc,
         "battery_current": battery_current,
-        "motor_temps": _summarize_motor_temps(motor_temps),
+        # Backward/compat fields for UI and debugging.
+        "motor_temps": _summarize_motor_temps(motor_temps + bms_temps + mainboard_temps),
+        "bms_temps": _summarize_motor_temps(bms_temps),
+        "battery_temps": _summarize_motor_temps(bms_temps + mainboard_temps),
         "extra": extra,
         "ts": time.time(),
     }

@@ -1,1 +1,0 @@
-import{j as a}from"./index-BWv_ksCp.js";import{W as e}from"./WebRTCVideo-D-mneG3s.js";function r(){return a.jsx("div",{className:"advanced-page",children:a.jsx("div",{className:"advanced-video",children:a.jsx(e,{signalingUrl:"/api/cameras/advanced/webrtc/offer",label:"advanced",qualityMode:"high"})})})}export{r as default};

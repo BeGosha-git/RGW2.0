@@ -213,6 +213,26 @@ class RobotAPI:
                     rest = args[1:] if isinstance(args, list) else []
                     return RobotAPI.execute_g1_loco_mode(mode, rest)
 
+                if command == "g1_sound":
+                    # g1_sound <subcommand> [arg...]
+                    sub = ""
+                    if args and len(args) > 0:
+                        sub = str(args[0]).strip().lower()
+                    if not sub:
+                        return {"success": False, "message": "g1_sound requires subcommand in args[0]"}
+                    if sub == "tone":
+                        name = str(args[1]).strip() if len(args) > 1 else ""
+                        return RobotAPI.play_g1_tone(name)
+                    if sub == "file":
+                        name = str(args[1]).strip() if len(args) > 1 else ""
+                        return RobotAPI.play_g1_file(name)
+                    if sub == "speak":
+                        text = str(args[1]).strip() if len(args) > 1 else ""
+                        return RobotAPI.speak_g1(text)
+                    if sub in ("stop", "mute"):
+                        return RobotAPI.stop_g1_sound()
+                    return {"success": False, "message": f"unknown g1_sound subcommand: {sub}"}
+
                 import execute
                 
                 # Собираем stdout и stderr
@@ -418,6 +438,144 @@ class RobotAPI:
                 "success": False,
                 "message": f"Error executing G1 arm action: {e}",
             }
+
+    # ------------------------------------------------------------------ G1 sound
+
+    @staticmethod
+    def _g1_sound_service_common() -> Dict[str, Any]:
+        """Возвращает network_interface / domain_id для G1 из services.json."""
+        network_interface = "eth0"
+        domain_id = 0
+        try:
+            import services_manager
+
+            params = services_manager.get_services_manager().get_service_parameters("unitree_motor_control")
+            network_interface = str(params.get("network", "eth0") or "eth0")
+            domain_id = int(params.get("id", 0) or 0)
+        except Exception:
+            pass
+        return {"network_interface": network_interface, "domain_id": domain_id}
+
+    @staticmethod
+    def _run_g1_sound_cli(script: str, args: List[str], timeout: float = 60.0) -> Dict[str, Any]:
+        """
+        Выполняет фрагмент Python (script) в subprocess и возвращает JSON-результат.
+        Сценарий должен печатать одну JSON-строку в stdout.
+        """
+        cfg = RobotAPI._g1_sound_service_common()
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", script]
+                + [str(PROJECT_ROOT), cfg["network_interface"], str(cfg["domain_id"])]
+                + list(args),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(PROJECT_ROOT),
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        return json.loads(line)
+            stderr = (proc.stderr or "").strip()
+            return {
+                "success": False,
+                "message": f"G1 sound subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}",
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "message": f"G1 sound subprocess timed out ({timeout}s)"}
+        except Exception as e:
+            return {"success": False, "message": f"Error running G1 sound subprocess: {e}"}
+
+    @staticmethod
+    def play_g1_tone(name: str) -> Dict[str, Any]:
+        """Воспроизводит предустановленный тон на G1."""
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.g1_sound.g1_sound_service import get_g1_sound_service\n"
+            "svc = get_g1_sound_service()\n"
+            "result = svc.play_tone(sys.argv[3], stop_current=True)\n"
+            "print(json.dumps(result, ensure_ascii=False, default=str))\n"
+        )
+        return RobotAPI._run_g1_sound_cli(script, [str(name or "")])
+
+    @staticmethod
+    def play_g1_file(filename: str) -> Dict[str, Any]:
+        """Воспроизводит WAV-файл из data/sounds на G1."""
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.g1_sound.g1_sound_service import get_g1_sound_service\n"
+            "svc = get_g1_sound_service()\n"
+            "result = svc.play_file(sys.argv[3], stop_current=True)\n"
+            "print(json.dumps(result, ensure_ascii=False, default=str))\n"
+        )
+        return RobotAPI._run_g1_sound_cli(script, [str(filename or "")])
+
+    @staticmethod
+    def play_g1_wav_b64(b64_pcm: str, sample_rate: int = 16000) -> Dict[str, Any]:
+        """Воспроизводит переданный (base64) PCM на G1."""
+        script = (
+            "import sys, json, base64\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.g1_sound.g1_sound_service import get_g1_sound_service\n"
+            "svc = get_g1_sound_service()\n"
+            "pcm = base64.b64decode(sys.argv[3])\n"
+            "result = svc.play_pcm(pcm, sample_rate=int(sys.argv[4]), label='api', stop_current=True)\n"
+            "print(json.dumps(result, ensure_ascii=False, default=str))\n"
+        )
+        return RobotAPI._run_g1_sound_cli(
+            script,
+            [str(b64_pcm or ""), str(int(sample_rate))],
+        )
+
+    @staticmethod
+    def speak_g1(text: str) -> Dict[str, Any]:
+        """Синтезирует и воспроизводит речь на G1 (требуется espeak)."""
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.g1_sound.g1_sound_service import get_g1_sound_service\n"
+            "svc = get_g1_sound_service()\n"
+            "result = svc.play_speak(sys.argv[3], stop_current=True)\n"
+            "print(json.dumps(result, ensure_ascii=False, default=str))\n"
+        )
+        return RobotAPI._run_g1_sound_cli(script, [str(text or "")])
+
+    @staticmethod
+    def stop_g1_sound() -> Dict[str, Any]:
+        """Останавливает текущее воспроизведение звука на G1."""
+        script = (
+            "import sys, json\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from services.g1_sound.g1_sound_service import get_g1_sound_service\n"
+            "svc = get_g1_sound_service()\n"
+            "result = svc.stop()\n"
+            "print(json.dumps(result, ensure_ascii=False, default=str))\n"
+        )
+        return RobotAPI._run_g1_sound_cli(script, [])
+
+    @staticmethod
+    def get_g1_sound_info() -> Dict[str, Any]:
+        """Возвращает доступные тоны, файлы и статус звукового модуля G1."""
+        try:
+            from services.g1_sound.g1_sound_service import get_g1_sound_service
+
+            svc = get_g1_sound_service()
+            tones = svc.list_tones()
+            files = svc.list_files()
+            return {
+                "success": True,
+                "tones": tones.get("tones", []),
+                "files": files.get("files", []),
+                "sound_dir": files.get("dir", ""),
+                "status": svc.status_info(),
+            }
+        except Exception as e:
+            return {"success": False, "message": f"Error getting G1 sound info: {e}"}
 
     @staticmethod
     def get_g1_loco_modes() -> Dict[str, Any]:
@@ -799,6 +957,52 @@ class RobotAPI:
                 "description": "G1 high-level mode: StopMove",
                 "command": "g1_loco",
                 "args": ["stop_move"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            # G1 sound (tones / speech / files)
+            {
+                "id": "g1_sound_beep",
+                "name": "G1: Звук (beep)",
+                "description": "Воспроизвести короткий тон beep на G1",
+                "command": "g1_sound",
+                "args": ["tone", "beep"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_sound_success",
+                "name": "G1: Звук (success)",
+                "description": "Воспроизвести тон успеха на G1",
+                "command": "g1_sound",
+                "args": ["tone", "success"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_sound_error",
+                "name": "G1: Звук (error)",
+                "description": "Воспроизвести тон ошибки на G1",
+                "command": "g1_sound",
+                "args": ["tone", "error"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_sound_alert",
+                "name": "G1: Звук (alert)",
+                "description": "Воспроизвести тон alert на G1",
+                "command": "g1_sound",
+                "args": ["tone", "alert"],
+                "showButton": False,
+                "robotTypes": ["G1"],
+            },
+            {
+                "id": "g1_sound_stop",
+                "name": "G1: Стоп звука",
+                "description": "Остановить воспроизведение звука на G1",
+                "command": "g1_sound",
+                "args": ["stop"],
                 "showButton": False,
                 "robotTypes": ["G1"],
             },

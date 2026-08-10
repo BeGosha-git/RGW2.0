@@ -24,12 +24,14 @@ def register_routes(app: Flask) -> None:
     from api.routes.robot import bp as robot_bp
     from api.routes.status import bp as status_bp
     from api.routes.version import bp as version_bp
+    from api.routes.sound import bp as sound_bp
 
     app.register_blueprint(version_bp)
     app.register_blueprint(files_bp)
     app.register_blueprint(cameras_bp)
     app.register_blueprint(status_bp)
     app.register_blueprint(robot_bp)
+    app.register_blueprint(sound_bp)
 
 
 def run_api(host="0.0.0.0", port=5000, debug=False):

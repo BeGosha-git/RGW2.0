@@ -1,0 +1,1 @@
+import{j as a}from"./index-CvLzAVyy.js";import{W as e}from"./WebRTCVideo-Cwtns0_o.js";function r(){return a.jsx("div",{className:"advanced-page",children:a.jsx("div",{className:"advanced-video",children:a.jsx(e,{signalingUrl:"/api/cameras/advanced/webrtc/offer",label:"advanced",qualityMode:"high"})})})}export{r as default};

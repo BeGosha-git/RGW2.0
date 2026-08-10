@@ -5,6 +5,7 @@ import Loading from '../components/Loading'
 import ErrorBanner from '../components/ErrorBanner'
 import Card from '../components/Card'
 import LogsViewer from '../components/LogsViewer'
+import SoundPanel from '../components/SoundPanel'
 import { ICONS } from '../constants/icons'
 import './HomePage.css'
 
@@ -159,6 +160,9 @@ function HomePage() {
             <span className="info-value">{version.files_count || 0}</span>
           </div>
         </Card>
+
+        {/* Sound (G1) */}
+        <SoundPanel />
 
         {/* Logs Viewer */}
         <Card 

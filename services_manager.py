@@ -192,6 +192,15 @@ class ServicesManager:
                 "safety_force_hold": True,
                 "dependencies": []
             },
+            "g1_sound": {
+                "status": "ON",
+                "enabled": True,
+                "network": "eth0",
+                "id": 0,
+                "sample_rate": 16000,
+                "default_tone": "beep",
+                "dependencies": ["api"]
+            },
             "api": {
                 "status": "ON",
                 "enabled": True,

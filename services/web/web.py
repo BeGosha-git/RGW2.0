@@ -553,7 +553,38 @@ def register_robot_endpoints():
     def api_robot_telemetry():
         """Battery SOC + motor temperatures via Unitree DDS (best-effort)."""
         return jsonify(robot_api.RobotAPI.get_unitree_telemetry()), 200
-    
+
+    @flask_app.route('/api/robot/advanced_telemetry', methods=['GET'])
+    def api_robot_advanced_telemetry():
+        """Per-motor angles/dynamics via Unitree DDS (best-effort)."""
+        return jsonify(robot_api.RobotAPI.get_unitree_advanced_telemetry()), 200
+
+    @flask_app.route('/api/robot/advanced_world', methods=['GET'])
+    def api_robot_advanced_world():
+        """Declarative scene for /advanced (sources, merge, view, robot overlay)."""
+        try:
+            from pathlib import Path
+
+            import os
+
+            from services.advanced_render.world import default_world_path, load_world
+
+            p = Path(os.environ.get("RGW2_ADV_WORLD_PATH", "") or default_world_path())
+            world = load_world(p)
+            return jsonify({"success": True, "path": str(p), "world": world}), 200
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+
+    @flask_app.route('/api/robot/advanced_world/stats', methods=['GET'])
+    def api_robot_advanced_world_stats():
+        """Last merged point stats from AdvancedRenderStream (best-effort)."""
+        try:
+            from services.advanced_render.world_stats import get_stats
+
+            return jsonify({"success": True, "stats": get_stats()}), 200
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+
     @flask_app.route('/api/settings', methods=['GET'])
     def api_settings_get():
         """Получает настройки робота."""

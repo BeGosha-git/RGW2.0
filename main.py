@@ -2107,9 +2107,19 @@ def main(python_version: str = None, debug: bool = False):
     print("[RGW2] entering main()", flush=True)
     try:
         try:
+            from utils.data_bootstrap import bootstrap_data_files
+            from utils.path_utils import get_project_root
+
+            bootstrap_data_files(get_project_root())
+        except Exception:
+            pass
+
+        try:
             print("[RGW2] ensure_default_commands()", flush=True)
             import api.robot as robot_api
+
             robot_api.RobotAPI.ensure_default_commands()
+            robot_api.RobotAPI.ensure_default_control_layouts()
         except Exception:
             pass
         
@@ -2119,6 +2129,35 @@ def main(python_version: str = None, debug: bool = False):
             manager.refresh_services()
         except Exception:
             pass
+
+        # Run version refresh in background so startup isn't blocked by local FS scan.
+        # This can start immediately after refresh_services(); Wi-Fi wait below remains blocking.
+        try:
+            import threading as _threading
+
+            def _bg_check_and_update():
+                try:
+                    import time as _time
+                    t0 = _time.time()
+                    print("[RGW2] check_and_update_version() background start", flush=True)
+                    ok = check_and_update_version()
+                    dt = _time.time() - t0
+                    print(
+                        f"[RGW2] check_and_update_version() background done ok={ok} took {dt:.2f}s",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+
+            _t = _threading.Thread(target=_bg_check_and_update, daemon=True)
+            _t.start()
+        except Exception:
+            # If background thread failed, keep old behavior as best-effort.
+            try:
+                print("[RGW2] check_and_update_version()", flush=True)
+                check_and_update_version()
+            except Exception:
+                pass
 
         # Update checks should run only after at least one Wi-Fi/network scan happened.
         try:
@@ -2130,12 +2169,6 @@ def main(python_version: str = None, debug: bool = False):
                     scanner.scan_network()
                 except Exception:
                     pass
-        except Exception:
-            pass
-
-        try:
-            print("[RGW2] check_and_update_version()", flush=True)
-            check_and_update_version()
         except Exception:
             pass
         

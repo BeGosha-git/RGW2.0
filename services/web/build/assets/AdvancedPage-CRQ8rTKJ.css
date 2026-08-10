@@ -1,0 +1,1 @@
+.advanced-page{position:fixed;top:0;right:0;bottom:0;left:0;background:#000;overflow:hidden}.advanced-video{position:absolute;top:0;right:0;bottom:0;left:0}.advanced-page .camera-stream.webrtc-stream{position:absolute;top:0;right:0;bottom:0;left:0;border-radius:0}.advanced-page .camera-stream.webrtc-stream video{width:100%;height:100%;object-fit:fill}

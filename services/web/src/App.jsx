@@ -14,6 +14,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const MotorControlPage = lazy(() => import('./pages/MotorControlPage'))
 const ControlPage = lazy(() => import('./pages/ControlPage'))
 const EditControlLayoutPage = lazy(() => import('./pages/EditControlLayoutPage'))
+const AdvancedPage = lazy(() => import('./pages/AdvancedPage'))
 
 function Navigation() {
   const location = useLocation()
@@ -28,6 +29,7 @@ function Navigation() {
     { path: '/motors', label: 'Моторы', icon: '◉' },
     { path: '/terminal', label: 'Терминал', icon: NAV_ICONS.TERMINAL },
     { path: '/settings', label: 'Настройки', icon: '⚙' }
+    ,{ path: '/advanced', label: 'Advanced', icon: NAV_ICONS.ADVANCED }
   ]
 
   return (
@@ -74,7 +76,7 @@ function Navigation() {
 function App() {
   const FullscreenRoutes = () => {
     const location = useLocation()
-    const hideNavigation = location.pathname === '/control' || location.pathname === '/editctl'
+    const hideNavigation = location.pathname === '/control' || location.pathname === '/editctl' || location.pathname === '/advanced'
 
     return (
       <div className="app">
@@ -91,6 +93,7 @@ function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/control" element={<ControlPage />} />
               <Route path="/editctl" element={<EditControlLayoutPage />} />
+              <Route path="/advanced" element={<AdvancedPage />} />
             </Routes>
           </Suspense>
         </main>

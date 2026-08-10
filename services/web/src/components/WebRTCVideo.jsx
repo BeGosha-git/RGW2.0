@@ -74,7 +74,10 @@ function WebRTCVideo({ signalingUrl, label, qualityMode = 'low', onDebug }) {
       setState('connecting')
       setCaptureFps(null)
       try {
-        const pc = new RTCPeerConnection({ iceServers: [] })
+        // Important for LANs where the browser uses mDNS host candidates (*.local),
+        // which the backend (aioice) may not be able to resolve. STUN helps provide
+        // IP-based srflx candidates so ICE can form pairs.
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
         pcRef.current = pc
 
         pc.ontrack = (event) => {

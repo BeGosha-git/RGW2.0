@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from flask import Blueprint, jsonify, request
 
 import api.robot as robot_api
@@ -26,6 +29,33 @@ def api_robot_commands():
 @bp.route("/api/robot/telemetry", methods=["GET"])
 def api_robot_telemetry():
     return jsonify(robot_api.RobotAPI.get_unitree_telemetry()), 200
+
+
+@bp.route("/api/robot/advanced_telemetry", methods=["GET"])
+def api_robot_advanced_telemetry():
+    return jsonify(robot_api.RobotAPI.get_unitree_advanced_telemetry()), 200
+
+
+@bp.route("/api/robot/advanced_world", methods=["GET"])
+def api_robot_advanced_world():
+    try:
+        from services.advanced_render.world import default_world_path, load_world
+
+        p = Path(os.environ.get("RGW2_ADV_WORLD_PATH", "") or default_world_path())
+        world = load_world(p)
+        return jsonify({"success": True, "path": str(p), "world": world}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@bp.route("/api/robot/advanced_world/stats", methods=["GET"])
+def api_robot_advanced_world_stats():
+    try:
+        from services.advanced_render.world_stats import get_stats
+
+        return jsonify({"success": True, "stats": get_stats()}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @bp.route("/api/robot/g1/arm_actions", methods=["GET"])

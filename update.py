@@ -6,6 +6,7 @@ import os
 import json
 import shutil
 import platform
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import network
@@ -209,9 +210,34 @@ def check_and_update_version():
         True on success, False on exception.
     """
     try:
+        t0 = time.time()
         os.makedirs("data", exist_ok=True)
 
         version_file = "data/version.json"
+
+        # Throttle: local refresh (scan_project_files + json dump) is expensive.
+        # If version.json was updated very recently, skip to speed up startup.
+        # Default 5 minutes (as agreed in Plan).
+        min_interval_sec = float(os.environ.get("RGW2_VERSION_REFRESH_MIN_SEC", "300"))
+        if os.path.exists(version_file):
+            try:
+                mtime = os.path.getmtime(version_file)
+                age = time.time() - float(mtime)
+                if age >= 0.0 and age < min_interval_sec:
+                    # Best-effort early exit.
+                    if os.environ.get("RGW2_DEBUG") == "1":
+                        print(
+                            f"[update] check_and_update_version() skipped: age={age:.1f}s < {min_interval_sec:.1f}s",
+                            flush=True,
+                        )
+                    if os.environ.get("RGW2_DEBUG") == "1":
+                        print(
+                            f"[update] check_and_update_version() skipped (took {time.time()-t0:.2f}s)",
+                            flush=True,
+                        )
+                    return True
+            except Exception:
+                pass
 
         current_version = "1.00.01"
         existing_version_type = "STABLE"
@@ -236,6 +262,11 @@ def check_and_update_version():
         with open(version_file, 'w', encoding='utf-8') as f:
             json.dump(version_data, f, indent=4, ensure_ascii=False)
 
+        if os.environ.get("RGW2_DEBUG") == "1":
+            print(
+                f"[update] check_and_update_version() refreshed {len(files_list)} file(s) (took {time.time()-t0:.2f}s)",
+                flush=True,
+            )
         return True
 
     except Exception:

@@ -1218,14 +1218,51 @@ class CameraStream:
 
 # ─── Публичный API ─────────────────────────────────────────────────────────────
 
+def _canonical_camera_id(camera_id: str) -> str:
+    c = str(camera_id).strip().lower()
+    if c in ("advanced", "adv", "advanced_0"):
+        return "advanced"
+    return str(camera_id)
+
+
 def get_camera_stream(camera_id: str) -> Optional[CameraStream]:
+    cid = _canonical_camera_id(camera_id)
     with _streams_lock:
-        return _camera_streams.get(camera_id, {}).get("stream")
+        return _camera_streams.get(cid, {}).get("stream")
 
 
 def start_camera_stream(camera_id: str, udp_port: int = None,
                         width: int = None, height: int = None) -> bool:
     """Запускает стрим по camera_id. RealSense автоматически получает UDP порт 5006."""
+    # Special WebRTC stream for /advanced page.
+    if str(camera_id).strip().lower() in ("advanced", "adv", "advanced_0"):
+        canon = "advanced"
+        with _streams_lock:
+            if canon in _camera_streams:
+                return True
+
+        try:
+            from services.advanced_render.advanced_viser_webrtc_stream import AdvancedViserWebRTCStream
+
+            w = int(width) if width is not None else 640
+            h = int(height) if height is not None else 480
+
+            stream = AdvancedViserWebRTCStream(width=w, height=h)
+            if not stream.start():
+                return False
+
+            with _streams_lock:
+                _camera_streams[canon] = {
+                    "stream": stream,
+                    "camera_info": {"id": canon, "type": "advanced"},
+                    "started_at": time.time(),
+                    "udp_port": None,
+                }
+            return True
+        except Exception as e:
+            print(f"[CameraStream] Failed to start advanced Viser stream: {e}", flush=True)
+            return False
+
     cameras = detect_cameras()
     camera_info = _find_camera(camera_id, cameras)
     
@@ -1289,9 +1326,10 @@ def start_camera_stream(camera_id: str, udp_port: int = None,
 
 
 def stop_camera_stream(camera_id: str) -> bool:
+    cid = _canonical_camera_id(camera_id)
     stream = None
     with _streams_lock:
-        entry = _camera_streams.pop(camera_id, None)
+        entry = _camera_streams.pop(cid, None)
         if entry is not None:
             stream = entry.get("stream")
     if stream is not None:

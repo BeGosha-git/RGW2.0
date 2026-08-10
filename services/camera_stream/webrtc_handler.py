@@ -581,6 +581,123 @@ async def _handle_offer_async(camera_id: str, offer_sdp: str, offer_type: str, q
         return {'success': False, 'message': str(e)}
 
 
+async def _handle_custom_stream_offer_async(
+    stream_obj,
+    offer_sdp: str,
+    offer_type: str,
+    quality_mode: str,
+    label: str = "custom",
+) -> dict:
+    """
+    Same as camera WebRTC path, but video frames come from any object implementing
+    get_latest_frame(width=, height=, quality=, wait=) -> jpeg bytes (like CameraStream).
+    Used by advanced world test page (merged point cloud preview).
+    """
+    if not _aiortc_available:
+        return {"success": False, "message": "aiortc not installed"}
+
+    conn_id = str(uuid.uuid4())
+    pc = RTCPeerConnection()
+
+    quality_mode_l = str(quality_mode).lower()
+    if quality_mode_l == "low":
+        dbg_target_fps = TARGET_FPS_LOW
+        dbg_jpeg_q = JPEG_QUALITY_LOW
+        dbg_w = WEBRTC_WIDTH_LOW
+        dbg_h = WEBRTC_HEIGHT_LOW
+        dbg_bitrate_cap = MAX_BITRATE_BPS_LOW
+    else:
+        dbg_target_fps = TARGET_FPS_HIGH
+        dbg_jpeg_q = JPEG_QUALITY_HIGH
+        dbg_w = WEBRTC_WIDTH_HIGH
+        dbg_h = WEBRTC_HEIGHT_HIGH
+        dbg_bitrate_cap = MAX_BITRATE_BPS_HIGH
+
+    logger.info(
+        "[WebRTC] offer stream=%s mode=%s target_fps=%s jpeg_quality=%s out=%sx%s bitrate_cap_bps=%s conn=%s",
+        label,
+        quality_mode_l,
+        dbg_target_fps,
+        dbg_jpeg_q,
+        dbg_w,
+        dbg_h,
+        dbg_bitrate_cap,
+        conn_id[:8],
+    )
+
+    track = CameraVideoTrack(stream_obj, quality_mode=quality_mode)
+    sender = pc.addTrack(track)
+
+    try:
+        params = sender.getParameters()
+        if params and getattr(params, "encodings", None):
+            max_bitrate = MAX_BITRATE_BPS_LOW if quality_mode_l == "low" else MAX_BITRATE_BPS_HIGH
+            max_framerate = float(TARGET_FPS_LOW) if quality_mode_l == "low" else float(TARGET_FPS_HIGH)
+            for enc in params.encodings:
+                enc.maxBitrate = max_bitrate
+                enc.maxFramerate = max_framerate
+            maybe_coro = sender.setParameters(params)
+            if asyncio.iscoroutine(maybe_coro):
+                await maybe_coro
+    except Exception as e:
+        logger.debug("[WebRTC] sender parameter tuning skipped: %s", e)
+
+    @pc.on("connectionstatechange")
+    async def on_state_change():
+        state = pc.connectionState
+        logger.info("[WebRTC] %s %s connection state: %s", label, conn_id[:8], state)
+        if state in ("failed", "closed", "disconnected"):
+            await _close_peer_async(conn_id)
+
+    with _peers_lock:
+        _peers[conn_id] = pc
+
+    try:
+        offer = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        return {
+            "success": True,
+            "conn_id": conn_id,
+            "camera_id": label,
+            "requested_camera_id": label,
+            "capture_fps": stream_obj.get_capture_fps() if hasattr(stream_obj, "get_capture_fps") else None,
+            "sdp": pc.localDescription.sdp,
+            "type": pc.localDescription.type,
+        }
+    except Exception as e:
+        logger.exception("[WebRTC] handle_custom_stream_offer error for %s", label)
+        await _close_peer_async(conn_id)
+        return {"success": False, "message": str(e)}
+
+
+def handle_custom_stream_offer(
+    stream_obj,
+    offer_sdp: str,
+    offer_type: str = "offer",
+    quality_mode: str = "high",
+    label: str = "world_preview",
+) -> dict:
+    if not _aiortc_available:
+        return {"success": False, "message": "aiortc not installed on this robot"}
+
+    loop = ensure_loop()
+    if loop is None:
+        return {"success": False, "message": "WebRTC event loop unavailable"}
+
+    future = asyncio.run_coroutine_threadsafe(
+        _handle_custom_stream_offer_async(stream_obj, offer_sdp, offer_type, quality_mode, label=label),
+        loop,
+    )
+    try:
+        return future.result(timeout=20)
+    except Exception as e:
+        logger.exception("[WebRTC] handle_custom_stream_offer timeout/error")
+        return {"success": False, "message": str(e)}
+
+
 async def _close_peer_async(conn_id: str):
     with _peers_lock:
         pc = _peers.pop(conn_id, None)

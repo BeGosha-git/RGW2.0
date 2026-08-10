@@ -33,6 +33,13 @@ class ServicesManager:
             "services": {}
         })
         self._ensure_data_dir()
+        try:
+            from utils.data_bootstrap import bootstrap_data_files
+            from utils.path_utils import get_project_root
+
+            bootstrap_data_files(get_project_root())
+        except Exception:
+            pass
         self.load_services()
     
     def _ensure_data_dir(self):

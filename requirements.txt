@@ -28,11 +28,19 @@ opencv-python>=4.5.0
 Pillow>=9.0.0
 # numpy 2.x requires Python 3.9+; pip installs 1.24.x on 3.8 automatically
 numpy>=1.20.0
-
-# Hardware (optional — failures are tolerated)
-pyrealsense2>=2.50.0
-cyclonedds==0.10.2
+# 3D mesh for Viser robot rig (test_world_viewer / advanced render)
+trimesh>=3.23.0
+# G1 в Viser: только MuJoCo (g1.xml + assets), см. RGW2_G1_MJCF
+mujoco>=3.1.0
 
 # Desktop / UI
 mss>=6.1.0
 pynput>=1.7.0
+
+# Advanced world viewer (3D point cloud in browser; PyPI 1.x)
+viser>=1.0.0
+
+
+# Hardware (optional — failures are tolerated)
+pyrealsense2>=2.50.0
+cyclonedds==0.10.2

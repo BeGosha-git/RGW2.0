@@ -607,6 +607,89 @@ class RobotAPI:
                 _telemetry_cache["ts"] = time.time()
                 _telemetry_cache["value"] = val
             return val
+
+    @staticmethod
+    def get_unitree_advanced_telemetry() -> Dict[str, Any]:
+        """
+        Per-motor angles/dynamics via Unitree DDS (LowState_.motor_state).
+
+        Returns arrays: motor_q/motor_dq/motor_ddq/motor_tau_est and temperatures.
+        Runs in a subprocess to reduce the risk of native CycloneDDS crashes.
+        """
+        try:
+            ttl = float(os.environ.get("RGW_TELEMETRY_ADV_CACHE_TTL", "0.5"))
+        except Exception:
+            ttl = 0.5
+
+        now = time.time()
+        cache_key = "advanced"
+        with _telemetry_cache_lock:
+            cached_ts = float(_telemetry_cache.get(f"{cache_key}_ts") or 0.0)
+            cached_val = _telemetry_cache.get(f"{cache_key}_value")
+
+        if cached_val is not None and ttl > 0 and (now - cached_ts) <= ttl:
+            return cached_val
+
+        import subprocess
+        import json as _json
+
+        network_interface = "eth0"
+        domain_id = 0
+        try:
+            import services_manager
+
+            manager = services_manager.get_services_manager()
+            params = manager.get_service_parameters("unitree_motor_control")
+            network_interface = params.get("network", "eth0")
+            domain_id = int(params.get("id", 0))
+        except Exception:
+            pass
+
+        try:
+            script_path = PROJECT_ROOT / "api" / "unitree_advanced_telemetry_cli.py"
+            try:
+                timeout_s = float(os.environ.get("RGW_TELEMETRY_ADV_TIMEOUT", "2.0"))
+            except Exception:
+                timeout_s = 2.0
+
+            proc = subprocess.run(
+                [sys.executable, str(script_path), str(PROJECT_ROOT), str(network_interface), str(domain_id)],
+                capture_output=True,
+                text=True,
+                timeout=max(0.5, min(timeout_s, 10.0)),
+            )
+            stdout = proc.stdout.strip()
+            if stdout:
+                for line in reversed(stdout.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        val = _json.loads(line)
+                        with _telemetry_cache_lock:
+                            _telemetry_cache[f"{cache_key}_ts"] = time.time()
+                            _telemetry_cache[f"{cache_key}_value"] = val
+                        return val
+
+            stderr = proc.stderr.strip()
+            val = {
+                "success": False,
+                "message": f"Advanced telemetry subprocess failed (rc={proc.returncode}): {stderr[-300:] if stderr else 'no output'}",
+            }
+            with _telemetry_cache_lock:
+                _telemetry_cache[f"{cache_key}_ts"] = time.time()
+                _telemetry_cache[f"{cache_key}_value"] = val
+            return val
+        except subprocess.TimeoutExpired:
+            val = {"success": False, "message": "Advanced telemetry timed out"}
+            with _telemetry_cache_lock:
+                _telemetry_cache[f"{cache_key}_ts"] = time.time()
+                _telemetry_cache[f"{cache_key}_value"] = val
+            return val
+        except Exception as e:
+            val = {"success": False, "message": f"Error reading advanced telemetry: {e}"}
+            with _telemetry_cache_lock:
+                _telemetry_cache[f"{cache_key}_ts"] = time.time()
+                _telemetry_cache[f"{cache_key}_value"] = val
+            return val
     
     @staticmethod
     def ensure_default_commands() -> None:
